@@ -1,0 +1,50 @@
+---
+description: NestJS module structure, layer separation, and naming conventions
+globs: src/**/*.module.ts,src/**/*.controller.ts,src/**/*.service.ts,src/**/*.repository.ts
+alwaysApply: false
+---
+
+# Architecture & Naming
+
+## Layer Rules
+
+```
+Controller → Service → Repository → PrismaService
+```
+
+| Layer | Responsibility | May import |
+|---|---|---|
+| Controller | HTTP only — no business logic, no Prisma | Service |
+| Service | All business logic — no Prisma | Repository, StorageService, QueueService |
+| Repository | All Prisma queries — nothing else | PrismaService |
+
+No circular dependencies. Never skip or merge layers.
+
+## Module File Structure
+
+```
+modules/example/
+├── example.module.ts
+├── example.controller.ts
+├── example.service.ts
+├── example.repository.ts
+└── dto/
+    ├── create-example.dto.ts
+    ├── update-example.dto.ts
+    └── example-response.dto.ts
+```
+
+Every new module must include controller + service + repository.
+
+## Naming
+
+| Thing | Convention | Example |
+|---|---|---|
+| Files | kebab-case | `create-product.dto.ts` |
+| Classes | PascalCase | `ProductsService` |
+| Variables / functions | camelCase | `getProductById` |
+| DB tables / columns | snake_case | `product_variants`, `selling_price` |
+| Prisma models | PascalCase | `ProductVariant` |
+| API routes | kebab-case plural | `/product-variants` |
+| Env vars / queues / constants | UPPER_SNAKE_CASE | `JWT_SECRET`, `NOTIFICATION_QUEUE` |
+| Booleans | is/has/can prefix | `isActive`, `hasDiscount` |

@@ -1,0 +1,45 @@
+---
+description: YouConstruct project overview, tech stack, folder layout, and critical guardrails
+alwaysApply: true
+---
+
+# YouConstruct — Core
+
+Multi-vendor construction + interiors marketplace. One NestJS REST API serves Next.js web + Expo mobile clients.
+
+**Stack:** Node 20 · NestJS (Express) · TypeScript strict · Prisma · PostgreSQL 15+ · Redis · BullMQ · JWT · pnpm
+
+**Integrations:** Razorpay · Twilio OTP · FCM push · local disk (dev) / Cloudflare R2 (prod)
+
+## Folder Layout
+
+```
+src/
+├── main.ts, app.module.ts
+├── config/          # one file per concern (app, database, redis, jwt)
+├── common/          # decorators, filters, guards, interceptors, pipes, utils
+├── prisma/          # PrismaModule + PrismaService
+├── storage/         # StorageService + local/r2 drivers
+├── queue/           # BullMQ setup + processors/
+└── modules/         # feature modules
+```
+
+## Critical Guardrails
+
+- Layer order: `Controller → Service → Repository → PrismaService` — never skip or merge
+- Prisma queries **only** in repositories; business logic **only** in services
+- Soft delete via `deletedAt` — never hard delete
+- No `any`, no TypeORM, no raw SQL unless unavoidable
+- No `process.env` in feature code — use `ConfigService`
+- No tests for now — focus on building fast
+- No logic in `main.ts` beyond bootstrapping
+- Never return `passwordHash`, tokens, or raw Prisma/DB errors to clients
+- `vendor_transactions` is append-only — never update or delete rows
+- Media via `media_links` table — never store URLs on entity tables
+- Money as DECIMAL — never JavaScript floats
+
+## Code Style
+
+- `async/await` over `.then()`; early returns; `?.` and `??` where appropriate
+- Controller methods ~10 lines max; one responsibility per service method
+- No unused imports or variables

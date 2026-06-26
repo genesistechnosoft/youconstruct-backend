@@ -1,0 +1,14 @@
+---
+description: Environment config via NestJS ConfigModule — no hardcoded secrets
+globs: src/config/**,.env.example
+alwaysApply: false
+---
+
+# Environment & Config
+
+- Never hardcode values that vary by environment (URLs, secrets, feature flags)
+- Feature code: `ConfigService` from `@nestjs/config` — **never** `process.env`
+- Required vars: documented in `.env.example` with comments
+- Config files: `src/config/` — one file per concern (`app`, `database`, `redis`, `jwt`)
+
+When adding a new env var: update the matching config file **and** `.env.example`.

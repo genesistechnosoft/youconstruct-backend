@@ -1,0 +1,37 @@
+---
+description: JWT auth, roles, guards, and OTP conventions
+globs: src/modules/auth/**,src/common/guards/**,src/common/decorators/**
+alwaysApply: false
+---
+
+# Auth
+
+```typescript
+enum UserRole {
+  CUSTOMER = 'CUSTOMER',
+  VENDOR = 'VENDOR',
+  PROFESSIONAL = 'PROFESSIONAL',
+  ADMIN = 'ADMIN',
+}
+```
+
+- Protect routes: `@UseGuards(JwtAuthGuard)`
+- Role routes: `@UseGuards(JwtAuthGuard, RolesGuard)` + `@Roles(UserRole.VENDOR)`
+- Current user: `@CurrentUser()` decorator
+
+## Tokens
+
+| Token | Expiry | Storage |
+|---|---|---|
+| Access | 15 min | Stateless JWT |
+| Refresh | 30 days | `refresh_tokens` table, rotated on every use |
+
+JWT payload only: `{ userId, role, vendorId? }` — no sensitive data.
+
+## OTP
+
+6-digit numeric · 5 min expiry · max 3 attempts before lockout
+
+## Security on auth endpoints
+
+Rate limit login, OTP send, and OTP verify. Never log passwords or tokens.

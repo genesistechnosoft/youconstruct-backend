@@ -1,0 +1,30 @@
+---
+description: Prisma query patterns, soft deletes, and repository conventions
+globs: src/**/*.repository.ts,prisma/**
+alwaysApply: false
+---
+
+# Prisma & Repository Rules
+
+All Prisma access lives in `*.repository.ts` files only.
+
+- Always `select` needed fields — never expose `passwordHash` or sensitive columns
+- Soft delete: `where: { deletedAt: null }` on reads; set `deletedAt` instead of deleting
+- Multi-table writes: `prisma.$transaction([...])`
+- Catch `PrismaClientKnownRequestError`: **P2002** → Conflict, **P2025** → NotFound
+- `findMany()` in production: always include `where` and/or `take`
+- `vendor_transactions`: **append-only** — never update or delete
+
+```typescript
+@Injectable()
+export class ProductsRepository {
+  constructor(private readonly prisma: PrismaService) {}
+
+  async findById(id: string) {
+    return this.prisma.product.findFirst({
+      where: { id, deletedAt: null },
+      select: { id: true, name: true, slug: true, status: true },
+    });
+  }
+}
+```

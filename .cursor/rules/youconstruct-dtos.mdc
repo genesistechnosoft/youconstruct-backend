@@ -1,0 +1,29 @@
+---
+description: DTO validation and Swagger documentation requirements
+globs: src/**/dto/**/*.ts
+alwaysApply: false
+---
+
+# DTO Rules
+
+- Every property: **class-validator** decorators + **`@ApiProperty()`** — no exceptions
+- Optional fields: `@ApiPropertyOptional()` + `@IsOptional()`
+- Nested objects/arrays: `@Type()` from class-transformer
+- Response DTOs: never include `passwordHash`, raw tokens, or other sensitive fields
+
+```typescript
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { IsString, IsNotEmpty, IsOptional } from 'class-validator';
+
+export class CreateProductDto {
+  @ApiProperty({ example: 'Italian Marble 600x600' })
+  @IsString()
+  @IsNotEmpty()
+  name: string;
+
+  @ApiPropertyOptional({ example: 'Premium quality marble tiles' })
+  @IsOptional()
+  @IsString()
+  description?: string;
+}
+```

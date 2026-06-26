@@ -1,0 +1,28 @@
+---
+description: Media storage abstraction and BullMQ background job patterns
+globs: src/storage/**,src/queue/**,src/**/*media*
+alwaysApply: false
+---
+
+# Media
+
+- Media references via `media_links` (polymorphic) — never URLs on entity tables
+- Upload: client → `POST /api/v1/media/upload` → StorageService → BullMQ processing job
+- Use `StorageService` only — never write to disk directly
+- Switch local ↔ R2: change `STORAGE_DRIVER` env var, no code changes
+- Validate mime type and size before saving
+
+# Queue / Background Jobs
+
+- All async work via BullMQ (`@nestjs/bullmq`)
+- Queue names: `UPPER_SNAKE_CASE` constants
+- Processors: `src/queue/processors/`
+- On failure: log error, update status — do not crash the processor
+- Critical jobs (payouts, emails): `attempts: 3` + exponential backoff
+
+```typescript
+await this.notificationQueue.add('send-push', { userId, title, body }, {
+  attempts: 3,
+  backoff: { type: 'exponential', delay: 2000 },
+});
+```

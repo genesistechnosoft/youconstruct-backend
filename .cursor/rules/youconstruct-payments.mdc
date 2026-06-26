@@ -1,0 +1,16 @@
+---
+description: Financial amounts, vendor ledger, and Razorpay payment rules
+globs: src/**/*payment*,src/**/*order*,src/**/*wallet*,src/**/*razorpay*,src/**/*webhook*
+alwaysApply: false
+---
+
+# Financial & Payments
+
+- Store all amounts as **DECIMAL** — never JavaScript floats
+- Multi-table financial writes: Prisma `$transaction` (order + sub_orders + wallet credit)
+- `vendor_transactions` ledger: append-only — never update or delete
+- Every `vendor_transaction` row: store `balance_before` and `balance_after` snapshots
+- At order creation: calculate and persist `commission` + `vendor_earning` on `sub_orders`
+- Razorpay webhooks: **verify signature before any processing**
+
+Never log payment details. Never return raw payment provider errors to clients.

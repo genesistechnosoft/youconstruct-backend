@@ -1,0 +1,30 @@
+---
+description: Service-layer error handling and exception patterns
+globs: src/**/*.service.ts
+alwaysApply: false
+---
+
+# Service Error Handling
+
+Never throw raw `Error()` or return manual HTTP responses. Use NestJS exceptions:
+
+| Exception | When |
+|---|---|
+| `NotFoundException` | Resource not found |
+| `BadRequestException` | Invalid input |
+| `ForbiddenException` | Access denied |
+| `UnauthorizedException` | Not authenticated |
+| `ConflictException` | Duplicate / conflict |
+| `InternalServerErrorException` | Unexpected errors |
+
+Repositories catch Prisma errors and rethrow as the exceptions above. Never expose stack traces or DB details in API responses.
+
+```typescript
+// Good
+throw new NotFoundException('Product not found');
+throw new ForbiddenException('You do not own this product');
+throw new ConflictException('Email already registered');
+
+// Bad
+throw new Error('something went wrong');
+```

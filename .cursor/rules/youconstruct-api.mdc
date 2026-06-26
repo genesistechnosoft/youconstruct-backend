@@ -1,0 +1,57 @@
+---
+description: REST API routes, response shapes, and pagination conventions
+globs: src/**/*.controller.ts
+alwaysApply: false
+---
+
+# API Conventions
+
+**Base URL:** `/api/v1`
+
+## Routes
+
+- Lowercase, hyphen-separated, **plural nouns** — no verbs in URLs
+- `GET /products` · `PATCH /products/:id` · `GET /orders/:id/sub-orders`
+
+### Role prefixes
+
+| Prefix | Role |
+|---|---|
+| `/api/v1/` | Public |
+| `/api/v1/customer/` | CUSTOMER |
+| `/api/v1/vendor/` | VENDOR |
+| `/api/v1/professional/` | PROFESSIONAL |
+| `/api/v1/admin/` | ADMIN |
+
+## Response Shapes
+
+Enforced by global `ResponseInterceptor` + `HttpExceptionFilter`. **Never** write raw `res.json()` in controllers.
+
+```typescript
+// Success
+{ success: true, message: "...", data: { ... } }
+
+// Paginated — add meta
+{ success: true, message: "...", data: [...], meta: { page, limit, total, totalPages } }
+
+// Error
+{ success: false, message: "...", error: "NOT_FOUND", statusCode: 404 }
+
+// Validation
+{ success: false, message: "Validation failed", error: "VALIDATION_ERROR", statusCode: 400,
+  details: [{ field: "price", message: "..." }] }
+```
+
+## Pagination
+
+Query: `?page=1&limit=20&sortBy=createdAt&sortOrder=desc`
+
+Use `common/utils/pagination.util.ts`:
+
+```typescript
+export function paginate(page = 1, limit = 20) {
+  return { skip: (page - 1) * limit, take: Math.min(limit, 100) };
+}
+```
+
+Always return `meta` with `page`, `limit`, `total`, `totalPages`.
