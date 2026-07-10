@@ -4,10 +4,191 @@
 // Get a free hosted Postgres database in seconds: `npx create-db`
 
 generator client {
-  provider = "prisma-client"
-  output   = "../generated/prisma"
+  provider     = "prisma-client"
+  output       = "../generated/prisma"
+  moduleFormat = "cjs"
 }
 
 datasource db {
   provider = "postgresql"
+}
+
+// ─────────────────────────────────────────────
+// ENUMS
+// ─────────────────────────────────────────────
+
+enum UserRole {
+  CUSTOMER
+  VENDOR
+  PROFESSIONAL
+  ADMIN
+}
+
+enum AuthProvider {
+  EMAIL
+  GOOGLE
+  PHONE
+}
+
+enum KycDocumentType {
+  AADHAAR
+  PAN
+  GST
+}
+
+enum KycStatus {
+  PENDING
+  SUBMITTED
+  VERIFIED
+  REJECTED
+}
+
+// ─────────────────────────────────────────────
+// MODELS
+// ─────────────────────────────────────────────
+
+model User {
+  id              String       @id @default(uuid())
+  name            String
+  email           String?      @unique
+  phone           String?      @unique
+  passwordHash    String?
+  role            UserRole     @default(CUSTOMER)
+  provider        AuthProvider @default(EMAIL)
+  googleId        String?      @unique
+  avatarUrl       String?
+  isEmailVerified Boolean      @default(false)
+  isPhoneVerified Boolean      @default(false)
+  isActive        Boolean      @default(true)
+  fcmToken        String?
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+  deletedAt       DateTime?
+
+  addresses        Address[]
+  refreshTokens    RefreshToken[]
+  otpVerifications OtpVerification[]
+  kycDocuments     KycDocument[]
+  vendorProfile    VendorProfile?
+  professionalProfile ProfessionalProfile?
+
+  @@map("users")
+}
+
+model Address {
+  id        String    @id @default(uuid())
+  userId    String
+  label     String?
+  line1     String
+  line2     String?
+  city      String
+  state     String
+  pincode   String
+  latitude  Float?
+  longitude Float?
+  isDefault Boolean   @default(false)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@map("addresses")
+}
+
+model RefreshToken {
+  id         String    @id @default(uuid())
+  userId     String
+  token      String    @unique
+  deviceInfo String?
+  ipAddress  String?
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  createdAt  DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@map("refresh_tokens")
+}
+
+model OtpVerification {
+  id         String    @id @default(uuid())
+  userId     String?
+  target     String
+  otp        String
+  purpose    String
+  expiresAt  DateTime
+  verifiedAt DateTime?
+  attempts   Int       @default(0)
+  createdAt  DateTime  @default(now())
+
+  user User? @relation(fields: [userId], references: [id])
+
+  @@map("otp_verifications")
+}
+
+model KycDocument {
+  id            String          @id @default(uuid())
+  userId        String
+  documentType  KycDocumentType
+  documentNo    String
+  status        KycStatus       @default(PENDING)
+  rejectionNote String?
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@unique([userId, documentType])
+  @@map("kyc_documents")
+}
+
+model VendorProfile {
+  id              String    @id @default(uuid())
+  userId          String    @unique
+  businessName    String
+  businessAddress String?
+  city            String?
+  state           String?
+  pincode         String?
+  latitude        Float?
+  longitude       Float?
+  gstNumber       String?
+  isApproved      Boolean   @default(false)
+  approvedAt      DateTime?
+  bio             String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  deletedAt       DateTime?
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@map("vendor_profiles")
+}
+
+model ProfessionalProfile {
+  id              String    @id @default(uuid())
+  userId          String    @unique
+  displayName     String
+  slug            String    @unique
+  tagline         String?
+  bio             String?
+  city            String?
+  state           String?
+  pincode         String?
+  latitude        Float?
+  longitude       Float?
+  experienceYears Int?
+  websiteUrl      String?
+  instagramUrl    String?
+  isApproved      Boolean   @default(false)
+  approvedAt      DateTime?
+  isActive        Boolean   @default(true)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  deletedAt       DateTime?
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@map("professional_profiles")
 }

@@ -28,3 +28,26 @@ throw new ConflictException('Email already registered');
 // Bad
 throw new Error('something went wrong');
 ```
+
+## Success Return Shape
+
+Every public service method must return `{ message: string, data: T }`. The global `ResponseInterceptor` adds `success: true` — services must **not** set `success` themselves.
+
+```typescript
+// Good
+return { message: 'Profile fetched successfully', data: user };
+return { message: 'Address deleted successfully', data: null };
+
+// Paginated — include meta alongside message + data
+return {
+  message: 'Products fetched successfully',
+  data: products,
+  meta: { page, limit, total, totalPages },
+};
+
+// Bad — raw entity (interceptor falls back to generic message)
+return user;
+
+// Bad — setting success in service (interceptor handles this)
+return { success: true, message: '...', data: user };
+```

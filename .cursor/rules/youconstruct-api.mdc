@@ -27,12 +27,17 @@ alwaysApply: false
 
 Enforced by global `ResponseInterceptor` + `HttpExceptionFilter`. **Never** write raw `res.json()` in controllers.
 
-```typescript
-// Success
-{ success: true, message: "...", data: { ... } }
+**Services** return `{ message, data }` (and optionally `meta` for paginated lists). **Controllers** return the service result as-is — no wrapping in controllers.
 
-// Paginated — add meta
-{ success: true, message: "...", data: [...], meta: { page, limit, total, totalPages } }
+```typescript
+// Service returns
+{ message: 'Profile fetched successfully', data: { ... } }
+
+// Client receives (after ResponseInterceptor)
+{ success: true, message: 'Profile fetched successfully', data: { ... } }
+
+// Paginated — service adds meta
+{ message: '...', data: [...], meta: { page, limit, total, totalPages } }
 
 // Error
 { success: false, message: "...", error: "NOT_FOUND", statusCode: 404 }
