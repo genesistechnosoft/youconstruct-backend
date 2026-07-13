@@ -23,6 +23,15 @@ alwaysApply: false
 | `/api/v1/professional/` | PROFESSIONAL |
 | `/api/v1/admin/` | ADMIN |
 
+**Controller path rules:**
+
+- **Admin routes** must use the `/admin/` prefix — e.g. `/admin/categories`, `/admin/brands`
+- **Public routes** — no role prefix — e.g. `/categories`, `/units`
+- **Vendor routes** — `/vendor/` prefix — e.g. `/vendor/products`
+- **Customer routes** — `/customer/` prefix when scoped to the authenticated customer
+
+Use separate controllers per audience when a resource has both public and role-scoped endpoints (e.g. `CategoriesController` + `AdminCategoriesController` in the same file).
+
 ## Response Shapes
 
 Enforced by global `ResponseInterceptor` + `HttpExceptionFilter`. **Never** write raw `res.json()` in controllers.
