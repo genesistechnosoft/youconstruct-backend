@@ -1,10 +1,30 @@
 import { ConfigService } from '@nestjs/config';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
-import { ValidationPipe } from '@nestjs/common';
+import { BadRequestException, ValidationPipe } from '@nestjs/common';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 import { ResponseInterceptor } from './common/interceptors/response.interceptor';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import helmet from 'helmet';
+import { ValidationError } from 'class-validator';
+
+function flattenValidationErrors(
+  errors: ValidationError[],
+  parentPath = '',
+): { field: string; message: string }[] {
+  return errors.flatMap((error) => {
+    const field = parentPath
+      ? `${parentPath}.${error.property}`
+      : error.property;
+    const messages = Object.values(error.constraints ?? {}).map((message) => ({
+      field,
+      message,
+    }));
+    const childMessages = flattenValidationErrors(error.children ?? [], field);
+
+    return [...messages, ...childMessages];
+  });
+}
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
@@ -13,9 +33,16 @@ async function bootstrap() {
   const port = config.get<number>('PORT', 3000);
   const apiPrefix = config.get<string>('API_PREFIX', 'api/v1');
   const swaggerEnabled = config.get<string>('SWAGGER_ENABLED') === 'true';
+  const corsOrigins = config.get<string>('CORS_ORIGINS');
 
+  app.use(helmet());
   app.setGlobalPrefix(apiPrefix);
-  app.enableCors();
+  app.enableCors({
+    origin: corsOrigins
+      ? corsOrigins.split(',').map((origin) => origin.trim())
+      : false,
+    credentials: true,
+  });
 
   app.useGlobalPipes(
     new ValidationPipe({
@@ -25,6 +52,12 @@ async function bootstrap() {
       transformOptions: {
         enableImplicitConversion: true,
       },
+      exceptionFactory: (errors) =>
+        new BadRequestException({
+          message: 'Validation failed',
+          error: 'VALIDATION_ERROR',
+          details: flattenValidationErrors(errors),
+        }),
     }),
   );
 

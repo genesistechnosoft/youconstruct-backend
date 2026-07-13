@@ -31,6 +31,24 @@ export const PRODUCT_REVIEW_SELECT = {
   rejectionNote: true,
 } as const;
 
+const PUBLIC_PRODUCT_SELECT = {
+  id: true,
+  categoryId: true,
+  brandId: true,
+  name: true,
+  slug: true,
+  description: true,
+  shortDescription: true,
+  status: true,
+  isReturnable: true,
+  returnWindowDays: true,
+  tags: true,
+  metaTitle: true,
+  metaDescription: true,
+  createdAt: true,
+  updatedAt: true,
+} as const;
+
 const CATEGORY_SELECT = {
   id: true,
   name: true,
@@ -107,6 +125,31 @@ const VARIANT_DETAIL_SELECT = {
   },
 } as const;
 
+const PUBLIC_VARIANT_SELECT = {
+  id: true,
+  sku: true,
+  name: true,
+  price: true,
+  sellingPrice: true,
+  primaryUnitId: true,
+  coverageArea: true,
+  baseUnitId: true,
+  isDefault: true,
+  isActive: true,
+  weightKg: true,
+  createdAt: true,
+  updatedAt: true,
+  attributes: {
+    select: VARIANT_ATTRIBUTE_SELECT,
+  },
+  primaryUnit: {
+    select: UNIT_SELECT,
+  },
+  baseUnit: {
+    select: UNIT_SELECT,
+  },
+} as const;
+
 const variantOrderBy: Prisma.ProductVariantOrderByWithRelationInput[] = [
   { isDefault: Prisma.SortOrder.desc },
   { createdAt: Prisma.SortOrder.asc },
@@ -130,7 +173,7 @@ const productListSelect = {
 } as const;
 
 const publicProductListSelect = {
-  ...PRODUCT_SELECT,
+  ...PUBLIC_PRODUCT_SELECT,
   category: {
     select: CATEGORY_SELECT,
   },
@@ -147,7 +190,7 @@ const publicProductListSelect = {
 } as const;
 
 const publicProductDetailSelect = {
-  ...PRODUCT_SELECT,
+  ...PUBLIC_PRODUCT_SELECT,
   category: {
     select: CATEGORY_SELECT,
   },
@@ -157,7 +200,7 @@ const publicProductDetailSelect = {
   variants: {
     where: { isActive: true, deletedAt: null },
     orderBy: variantOrderBy,
-    select: VARIANT_DETAIL_SELECT,
+    select: PUBLIC_VARIANT_SELECT,
   },
 } as const;
 
@@ -206,6 +249,13 @@ export class ProductsRepository {
     });
   }
 
+  findApprovedVendorById(id: string) {
+    return this.prisma.vendorProfile.findFirst({
+      where: { id, isApproved: true, deletedAt: null },
+      select: { id: true },
+    });
+  }
+
   async findByVendor(vendorId: string, filters: ProductFilters) {
     const { skip, take } = paginate(filters.page, filters.limit);
     const where: Prisma.ProductWhereInput = {
@@ -240,6 +290,7 @@ export class ProductsRepository {
     const where: Prisma.ProductWhereInput = {
       status: ProductStatus.ACTIVE,
       deletedAt: null,
+      vendor: { isApproved: true, deletedAt: null },
       category: { isActive: true, deletedAt: null },
       OR: [{ brandId: null }, { brand: { isActive: true, deletedAt: null } }],
       ...(filters.categoryId && { categoryId: filters.categoryId }),
@@ -269,6 +320,7 @@ export class ProductsRepository {
         id,
         status: ProductStatus.ACTIVE,
         deletedAt: null,
+        vendor: { isApproved: true, deletedAt: null },
         category: { isActive: true, deletedAt: null },
         OR: [{ brandId: null }, { brand: { isActive: true, deletedAt: null } }],
       },
@@ -368,10 +420,42 @@ export class ProductsRepository {
 
   async softDelete(id: string) {
     try {
-      return await this.prisma.product.update({
-        where: { id },
-        data: { deletedAt: new Date() },
-        select: PRODUCT_REVIEW_SELECT,
+      return await this.prisma.$transaction(async (tx) => {
+        const deletedAt = new Date();
+        const existing = await tx.product.findFirst({
+          where: { id, deletedAt: null },
+          select: { slug: true },
+        });
+        if (!existing) {
+          throw new NotFoundException('Product not found');
+        }
+
+        const product = await tx.product.update({
+          where: { id },
+          data: { slug: `${existing.slug}-deleted-${id}`, deletedAt },
+          select: PRODUCT_REVIEW_SELECT,
+        });
+
+        const variants = await tx.productVariant.findMany({
+          where: { productId: id, deletedAt: null },
+          select: { id: true, sku: true },
+        });
+
+        await Promise.all(
+          variants.map((variant) =>
+            tx.productVariant.update({
+              where: { id: variant.id },
+              data: {
+                sku: `${variant.sku}-deleted-${variant.id}`,
+                deletedAt,
+                isActive: false,
+              },
+              select: { id: true },
+            }),
+          ),
+        );
+
+        return product;
       });
     } catch (error) {
       this.handlePrismaError(error);
@@ -393,6 +477,12 @@ export class ProductsRepository {
   countActiveVariants(productId: string) {
     return this.prisma.productVariant.count({
       where: { productId, isActive: true, deletedAt: null },
+    });
+  }
+
+  countActiveDefaultVariants(productId: string) {
+    return this.prisma.productVariant.count({
+      where: { productId, isDefault: true, isActive: true, deletedAt: null },
     });
   }
 
@@ -470,9 +560,21 @@ export class ProductsRepository {
 
   async softDeleteVariant(id: string) {
     try {
+      const existing = await this.prisma.productVariant.findFirst({
+        where: { id, deletedAt: null },
+        select: { sku: true },
+      });
+      if (!existing) {
+        throw new NotFoundException('Variant not found');
+      }
+
       return await this.prisma.productVariant.update({
         where: { id },
-        data: { deletedAt: new Date() },
+        data: {
+          sku: `${existing.sku}-deleted-${id}`,
+          deletedAt: new Date(),
+          isActive: false,
+        },
         select: VARIANT_SELECT,
       });
     } catch (error) {

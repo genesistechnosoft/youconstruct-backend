@@ -6,6 +6,8 @@ import {
 } from '@nestjs/common';
 import { Response } from 'express';
 
+type ErrorDetail = { field?: string; message: string };
+
 @Catch()
 export class HttpExceptionFilter implements ExceptionFilter {
   catch(exception: unknown, host: ArgumentsHost) {
@@ -14,7 +16,7 @@ export class HttpExceptionFilter implements ExceptionFilter {
     let status = 500;
     let message: string | string[] = 'Internal server error';
     let error = 'INTERNAL_SERVER_ERROR';
-    let details: { message: string }[] | undefined;
+    let details: ErrorDetail[] | undefined;
 
     if (exception instanceof HttpException) {
       status = exception.getStatus();
@@ -36,6 +38,14 @@ export class HttpExceptionFilter implements ExceptionFilter {
         } else if (body.message !== undefined) {
           message = body.message as string;
         }
+
+        if (Array.isArray(body.details)) {
+          details = body.details as ErrorDetail[];
+        }
+
+        if (typeof body.error === 'string') {
+          error = body.error;
+        }
       }
 
       const statusToError: Record<number, string> = {
@@ -48,7 +58,10 @@ export class HttpExceptionFilter implements ExceptionFilter {
         500: 'INTERNAL_SERVER_ERROR',
       };
 
-      error = statusToError[status] ?? 'INTERNAL_SERVER_ERROR';
+      error =
+        error === 'INTERNAL_SERVER_ERROR'
+          ? (statusToError[status] ?? 'INTERNAL_SERVER_ERROR')
+          : error;
     }
 
     const errorResponse: {
@@ -56,7 +69,7 @@ export class HttpExceptionFilter implements ExceptionFilter {
       message: string | string[];
       error: string;
       statusCode: number;
-      details?: { message: string }[];
+      details?: ErrorDetail[];
     } = {
       success: false,
       message,

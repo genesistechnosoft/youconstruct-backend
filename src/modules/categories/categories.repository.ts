@@ -3,7 +3,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma } from '../../../generated/prisma/client.js';
+import { Prisma, ProductStatus } from '../../../generated/prisma/client.js';
 import { PrismaService } from '../../prisma/prisma.service';
 
 export const CATEGORY_SELECT = {
@@ -111,6 +111,29 @@ export class CategoriesRepository {
     });
   }
 
+  findParentLink(id: string) {
+    return this.prisma.category.findFirst({
+      where: { id, deletedAt: null },
+      select: { id: true, parentId: true },
+    });
+  }
+
+  countActiveChildren(id: string) {
+    return this.prisma.category.count({
+      where: { parentId: id, isActive: true, deletedAt: null },
+    });
+  }
+
+  countActiveProducts(id: string) {
+    return this.prisma.product.count({
+      where: {
+        categoryId: id,
+        status: ProductStatus.ACTIVE,
+        deletedAt: null,
+      },
+    });
+  }
+
   findRoots() {
     return this.prisma.category.findMany({
       where: { parentId: null, isActive: true, deletedAt: null },
@@ -122,14 +145,22 @@ export class CategoriesRepository {
     });
   }
 
-  findAllAdmin() {
+  findAllAdmin(skip?: number, take?: number) {
     return this.prisma.category.findMany({
       where: nonDeletedWhere,
       orderBy: { sortOrder: 'asc' },
+      skip,
+      take,
       select: {
         ...CATEGORY_SELECT,
         children: adminChildrenOneLevel,
       },
+    });
+  }
+
+  countAllAdmin() {
+    return this.prisma.category.count({
+      where: nonDeletedWhere,
     });
   }
 
@@ -169,9 +200,20 @@ export class CategoriesRepository {
 
   async softDelete(id: string) {
     try {
+      const existing = await this.prisma.category.findFirst({
+        where: { id, deletedAt: null },
+        select: { slug: true },
+      });
+      if (!existing) {
+        throw new NotFoundException('Category not found');
+      }
+
       return await this.prisma.category.update({
         where: { id },
-        data: { deletedAt: new Date() },
+        data: {
+          slug: `${existing.slug}-deleted-${id}`,
+          deletedAt: new Date(),
+        },
         select: CATEGORY_SELECT,
       });
     } catch (error) {

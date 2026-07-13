@@ -1,5 +1,6 @@
 import { Body, Controller, HttpCode, Post } from '@nestjs/common';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import { Public } from '../../common/decorators/public.decorator';
 import { AuthService } from './auth.service';
 import { LoginDto } from './dto/login.dto';
@@ -25,6 +26,7 @@ export class AuthController {
 
   @Public()
   @Post('login')
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
   @HttpCode(200)
   @ApiOperation({ summary: 'Login with email and password' })
   @ApiResponse({ status: 200, description: 'Login successful' })
@@ -35,6 +37,7 @@ export class AuthController {
 
   @Public()
   @Post('otp/send')
+  @Throttle({ default: { limit: 3, ttl: 60000 } })
   @HttpCode(200)
   @ApiOperation({ summary: 'Send OTP to phone number' })
   @ApiResponse({ status: 200, description: 'OTP sent successfully' })
@@ -45,6 +48,7 @@ export class AuthController {
 
   @Public()
   @Post('otp/verify')
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
   @HttpCode(200)
   @ApiOperation({ summary: 'Verify OTP and authenticate' })
   @ApiResponse({ status: 200, description: 'OTP verified successfully' })
@@ -55,6 +59,7 @@ export class AuthController {
 
   @Public()
   @Post('refresh')
+  @Throttle({ default: { limit: 10, ttl: 60000 } })
   @HttpCode(200)
   @ApiOperation({ summary: 'Refresh access token' })
   @ApiResponse({ status: 200, description: 'Tokens refreshed successfully' })

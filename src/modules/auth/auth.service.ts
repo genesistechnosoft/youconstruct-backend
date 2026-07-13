@@ -7,7 +7,9 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { JwtService, JwtSignOptions } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
+import { createHash, randomInt } from 'node:crypto';
 import { v4 as uuid } from 'uuid';
+import { UserRole } from '../../common/decorators/roles.decorator';
 import { AuthRepository } from './auth.repository';
 
 @Injectable()
@@ -23,7 +25,6 @@ export class AuthService {
     email?: string;
     phone?: string;
     password?: string;
-    role?: string;
   }) {
     if (dto.email) {
       const existingEmail = await this.authRepository.findUserByEmail(
@@ -53,7 +54,7 @@ export class AuthService {
       email: dto.email,
       phone: dto.phone,
       passwordHash,
-      role: dto.role,
+      role: UserRole.CUSTOMER,
     });
 
     return this.generateTokens(user.id, user.role);
@@ -82,20 +83,19 @@ export class AuthService {
   }
 
   async sendOtp(dto: { phone: string; purpose: string }) {
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const otp = randomInt(100000, 1000000).toString();
+    const otpHash = await bcrypt.hash(otp, 10);
     const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
 
     await this.authRepository.createOtp({
       target: dto.phone,
-      otp,
+      otp: otpHash,
       purpose: dto.purpose,
       expiresAt,
     });
 
-    // TODO: inject Twilio client where SMS sending would happen
-    console.log(`OTP for ${dto.phone}: ${otp}`);
-
-    return { message: 'OTP sent successfully' };
+    // TODO: inject Twilio client and send OTP without logging secret values.
+    return { message: 'OTP sent successfully', data: null };
   }
 
   async verifyOtp(dto: { phone: string; otp: string; purpose: string }) {
@@ -116,7 +116,8 @@ export class AuthService {
       throw new BadRequestException('Too many attempts');
     }
 
-    if (record.otp !== dto.otp) {
+    const isMatch = await bcrypt.compare(dto.otp, record.otp);
+    if (!isMatch) {
       await this.authRepository.incrementOtpAttempts(record.id);
       throw new BadRequestException('Invalid OTP');
     }
@@ -124,6 +125,10 @@ export class AuthService {
     await this.authRepository.markOtpVerified(record.id);
 
     const existingUser = await this.authRepository.findUserByPhone(dto.phone);
+    if (existingUser && !existingUser.isActive) {
+      throw new UnauthorizedException('Invalid credentials');
+    }
+
     const user =
       existingUser ??
       (await this.authRepository.createUser({
@@ -131,6 +136,8 @@ export class AuthService {
         phone: dto.phone,
         provider: 'PHONE',
       }));
+
+    await this.authRepository.markPhoneVerified(user.id);
 
     return this.generateTokens(user.id, user.role);
   }
@@ -170,7 +177,8 @@ export class AuthService {
   }
 
   async refresh(dto: { refreshToken: string }) {
-    const stored = await this.authRepository.findRefreshToken(dto.refreshToken);
+    const refreshTokenHash = this.hashToken(dto.refreshToken);
+    const stored = await this.authRepository.findRefreshToken(refreshTokenHash);
     if (!stored) {
       throw new UnauthorizedException('Invalid refresh token');
     }
@@ -182,25 +190,54 @@ export class AuthService {
     await this.authRepository.revokeRefreshToken(stored.id);
 
     const user = await this.authRepository.findUserById(stored.userId);
-    if (!user) {
+    if (!user || !user.isActive) {
       throw new UnauthorizedException('Invalid refresh token');
     }
 
-    return this.generateTokens(user.id, user.role);
+    const accessToken = this.signAccessToken(user.id, user.role);
+    const refreshToken = uuid();
+    await this.authRepository.rotateRefreshToken(stored.id, {
+      userId: user.id,
+      token: this.hashToken(refreshToken),
+      expiresAt: this.getRefreshTokenExpiry(),
+    });
+
+    return {
+      message: 'Authentication successful',
+      data: { accessToken, refreshToken },
+    };
   }
 
   async logout(dto: { refreshToken: string }) {
-    const stored = await this.authRepository.findRefreshToken(dto.refreshToken);
+    const stored = await this.authRepository.findRefreshToken(
+      this.hashToken(dto.refreshToken),
+    );
     if (!stored) {
-      return { message: 'Logged out successfully' };
+      return { message: 'Logged out successfully', data: null };
     }
 
     await this.authRepository.revokeRefreshToken(stored.id);
-    return { message: 'Logged out successfully' };
+    return { message: 'Logged out successfully', data: null };
   }
 
   private async generateTokens(userId: string, role: string) {
-    const accessToken = this.jwtService.sign(
+    const accessToken = this.signAccessToken(userId, role);
+    const refreshToken = uuid();
+
+    await this.authRepository.createRefreshToken({
+      userId,
+      token: this.hashToken(refreshToken),
+      expiresAt: this.getRefreshTokenExpiry(),
+    });
+
+    return {
+      message: 'Authentication successful',
+      data: { accessToken, refreshToken },
+    };
+  }
+
+  private signAccessToken(userId: string, role: string) {
+    return this.jwtService.sign(
       { userId, role },
       {
         expiresIn: this.config.getOrThrow<string>(
@@ -208,18 +245,13 @@ export class AuthService {
         ) as JwtSignOptions['expiresIn'],
       },
     );
-    const refreshToken = uuid();
-    const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+  }
 
-    await this.authRepository.createRefreshToken({
-      userId,
-      token: refreshToken,
-      expiresAt,
-    });
+  private hashToken(token: string) {
+    return createHash('sha256').update(token).digest('hex');
+  }
 
-    return {
-      message: 'Authentication successful',
-      data: { accessToken, refreshToken },
-    };
+  private getRefreshTokenExpiry() {
+    return new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
   }
 }

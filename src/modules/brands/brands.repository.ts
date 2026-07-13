@@ -3,7 +3,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma } from '../../../generated/prisma/client.js';
+import { Prisma, ProductStatus } from '../../../generated/prisma/client.js';
 import { PrismaService } from '../../prisma/prisma.service';
 
 export const BRAND_SELECT = {
@@ -19,14 +19,25 @@ export const BRAND_SELECT = {
 export class BrandsRepository {
   constructor(private readonly prisma: PrismaService) {}
 
-  findAll(includeInactive = false) {
+  findAll(includeInactive = false, skip?: number, take?: number) {
     return this.prisma.brand.findMany({
       where: {
         deletedAt: null,
         ...(includeInactive ? {} : { isActive: true }),
       },
       orderBy: { name: 'asc' },
+      skip,
+      take,
       select: BRAND_SELECT,
+    });
+  }
+
+  countAll(includeInactive = false) {
+    return this.prisma.brand.count({
+      where: {
+        deletedAt: null,
+        ...(includeInactive ? {} : { isActive: true }),
+      },
     });
   }
 
@@ -55,6 +66,16 @@ export class BrandsRepository {
     });
   }
 
+  countActiveProducts(id: string) {
+    return this.prisma.product.count({
+      where: {
+        brandId: id,
+        status: ProductStatus.ACTIVE,
+        deletedAt: null,
+      },
+    });
+  }
+
   async create(data: Prisma.BrandCreateInput) {
     try {
       return await this.prisma.brand.create({
@@ -80,9 +101,20 @@ export class BrandsRepository {
 
   async softDelete(id: string) {
     try {
+      const existing = await this.prisma.brand.findFirst({
+        where: { id, deletedAt: null },
+        select: { slug: true },
+      });
+      if (!existing) {
+        throw new NotFoundException('Brand not found');
+      }
+
       return await this.prisma.brand.update({
         where: { id },
-        data: { deletedAt: new Date() },
+        data: {
+          slug: `${existing.slug}-deleted-${id}`,
+          deletedAt: new Date(),
+        },
         select: BRAND_SELECT,
       });
     } catch (error) {

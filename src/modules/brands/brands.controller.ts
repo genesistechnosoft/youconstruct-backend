@@ -8,6 +8,7 @@ import {
   ParseUUIDPipe,
   Patch,
   Post,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
@@ -15,6 +16,7 @@ import { Public } from '../../common/decorators/public.decorator';
 import { Roles, UserRole } from '../../common/decorators/roles.decorator';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
+import { PaginationQueryDto } from '../../common/dto/pagination-query.dto';
 import { BrandsService } from './brands.service';
 import { CreateBrandDto } from './dto/create-brand.dto';
 import { UpdateBrandDto } from './dto/update-brand.dto';
@@ -51,8 +53,15 @@ export class AdminBrandsController {
   @Get()
   @HttpCode(200)
   @ApiOperation({ summary: 'List all brands including inactive' })
-  findAll() {
-    return this.brandsService.findAllAdmin();
+  findAll(@Query() query: PaginationQueryDto) {
+    return this.brandsService.findAllAdmin(query.page, query.limit);
+  }
+
+  @Get(':id')
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Get a brand by ID including inactive' })
+  findByIdAdmin(@Param('id', ParseUUIDPipe) id: string) {
+    return this.brandsService.findByIdAdmin(id);
   }
 
   @Post()

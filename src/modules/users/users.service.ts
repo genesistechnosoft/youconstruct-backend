@@ -46,10 +46,6 @@ export class UsersService {
       isDefault?: boolean;
     },
   ) {
-    if (dto.isDefault) {
-      await this.usersRepository.unsetDefaultAddresses(userId);
-    }
-
     const address = await this.usersRepository.createAddress(userId, dto);
     return { message: 'Address added successfully', data: address };
   }
@@ -77,12 +73,9 @@ export class UsersService {
       throw new NotFoundException('Address not found');
     }
 
-    if (dto.isDefault) {
-      await this.usersRepository.unsetDefaultAddresses(userId);
-    }
-
     const updatedAddress = await this.usersRepository.updateAddress(
       addressId,
+      userId,
       dto,
     );
     return { message: 'Address updated successfully', data: updatedAddress };

@@ -1,4 +1,8 @@
-import { Injectable } from '@nestjs/common';
+import {
+  ConflictException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { Prisma } from '../../../generated/prisma/client.js';
 import { PrismaService } from '../../prisma/prisma.service';
 
@@ -73,7 +77,7 @@ export class AuthRepository {
     });
   }
 
-  createUser(data: {
+  async createUser(data: {
     name: string;
     email?: string;
     phone?: string;
@@ -83,17 +87,21 @@ export class AuthRepository {
     googleId?: string;
     avatarUrl?: string;
   }) {
-    return this.prisma.user.create({
-      data: data as Prisma.UserCreateInput,
-      select: {
-        id: true,
-        name: true,
-        email: true,
-        phone: true,
-        role: true,
-        provider: true,
-      },
-    });
+    try {
+      return await this.prisma.user.create({
+        data: data as Prisma.UserCreateInput,
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          phone: true,
+          role: true,
+          provider: true,
+        },
+      });
+    } catch (error) {
+      this.handlePrismaError(error);
+    }
   }
 
   createRefreshToken(data: {
@@ -103,12 +111,16 @@ export class AuthRepository {
     deviceInfo?: string;
     ipAddress?: string;
   }) {
-    return this.prisma.refreshToken.create({ data });
+    return this.prisma.refreshToken.create({
+      data,
+      select: { id: true, userId: true, expiresAt: true },
+    });
   }
 
   findRefreshToken(token: string) {
     return this.prisma.refreshToken.findFirst({
       where: { token, revokedAt: null },
+      select: { id: true, userId: true, expiresAt: true },
     });
   }
 
@@ -116,6 +128,38 @@ export class AuthRepository {
     return this.prisma.refreshToken.update({
       where: { id },
       data: { revokedAt: new Date() },
+      select: { id: true },
+    });
+  }
+
+  rotateRefreshToken(
+    currentTokenId: string,
+    nextToken: {
+      userId: string;
+      token: string;
+      expiresAt: Date;
+      deviceInfo?: string;
+      ipAddress?: string;
+    },
+  ) {
+    return this.prisma.$transaction([
+      this.prisma.refreshToken.update({
+        where: { id: currentTokenId },
+        data: { revokedAt: new Date() },
+        select: { id: true },
+      }),
+      this.prisma.refreshToken.create({
+        data: nextToken,
+        select: { id: true },
+      }),
+    ]);
+  }
+
+  markPhoneVerified(userId: string) {
+    return this.prisma.user.update({
+      where: { id: userId },
+      data: { isPhoneVerified: true },
+      select: { id: true },
     });
   }
 
@@ -126,13 +170,22 @@ export class AuthRepository {
     expiresAt: Date;
     userId?: string;
   }) {
-    return this.prisma.otpVerification.create({ data });
+    return this.prisma.otpVerification.create({
+      data,
+      select: { id: true },
+    });
   }
 
   findLatestOtp(target: string, purpose: string) {
     return this.prisma.otpVerification.findFirst({
       where: { target, purpose, verifiedAt: null },
       orderBy: { createdAt: 'desc' },
+      select: {
+        id: true,
+        otp: true,
+        expiresAt: true,
+        attempts: true,
+      },
     });
   }
 
@@ -140,6 +193,7 @@ export class AuthRepository {
     return this.prisma.otpVerification.update({
       where: { id },
       data: { verifiedAt: new Date() },
+      select: { id: true },
     });
   }
 
@@ -147,6 +201,25 @@ export class AuthRepository {
     return this.prisma.otpVerification.update({
       where: { id },
       data: { attempts: { increment: 1 } },
+      select: { id: true },
     });
+  }
+
+  private handlePrismaError(error: unknown): never {
+    if (
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      error.code === 'P2002'
+    ) {
+      throw new ConflictException('User already exists');
+    }
+
+    if (
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      error.code === 'P2025'
+    ) {
+      throw new NotFoundException('User not found');
+    }
+
+    throw error;
   }
 }

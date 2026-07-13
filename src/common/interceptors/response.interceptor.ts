@@ -46,7 +46,10 @@ export class ResponseInterceptor<T> implements NestInterceptor<
         return {
           success: true,
           message: (body?.message as string | undefined) ?? 'Success',
-          data: (body?.data as T | undefined) ?? (response as T),
+          data:
+            body && 'data' in body
+              ? (body.data as T)
+              : ((body?.message !== undefined ? null : response) as T),
           ...(body?.meta
             ? {
                 meta: body.meta as {

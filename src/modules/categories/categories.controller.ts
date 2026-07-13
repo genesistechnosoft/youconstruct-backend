@@ -8,6 +8,7 @@ import {
   ParseUUIDPipe,
   Patch,
   Post,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
@@ -15,6 +16,7 @@ import { Public } from '../../common/decorators/public.decorator';
 import { Roles, UserRole } from '../../common/decorators/roles.decorator';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
+import { PaginationQueryDto } from '../../common/dto/pagination-query.dto';
 import { CategoriesService } from './categories.service';
 import { CreateCategoryDto } from './dto/create-category.dto';
 import { UpdateCategoryDto } from './dto/update-category.dto';
@@ -51,8 +53,8 @@ export class AdminCategoriesController {
   @Get()
   @HttpCode(200)
   @ApiOperation({ summary: 'List all categories including inactive' })
-  findAll() {
-    return this.categoriesService.findAllAdmin();
+  findAll(@Query() query: PaginationQueryDto) {
+    return this.categoriesService.findAllAdmin(query.page, query.limit);
   }
 
   @Get('tree')

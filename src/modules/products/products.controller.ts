@@ -203,6 +203,13 @@ export class AdminProductsController {
     return this.productsService.getAllProducts(filters);
   }
 
+  @Get(':id')
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Get a product by ID for review' })
+  getAdminProduct(@Param('id', ParseUUIDPipe) id: string) {
+    return this.productsService.getAdminProduct(id);
+  }
+
   @Patch(':id/approve')
   @HttpCode(200)
   @ApiOperation({ summary: 'Approve a product' })

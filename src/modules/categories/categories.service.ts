@@ -1,8 +1,10 @@
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { paginate, paginationMeta } from '../../common/utils/pagination.util';
 import { generateSlug } from '../../common/utils/slug.util';
 import { CreateCategoryDto } from './dto/create-category.dto';
 import { UpdateCategoryDto } from './dto/update-category.dto';
@@ -25,9 +27,18 @@ export class CategoriesService {
     return { message: 'Category fetched successfully', data: category };
   }
 
-  async findAllAdmin() {
-    const categories = await this.categoriesRepository.findAllAdmin();
-    return { message: 'Categories fetched successfully', data: categories };
+  async findAllAdmin(page = 1, limit = 20) {
+    const { skip, take } = paginate(page, limit);
+    const [categories, total] = await Promise.all([
+      this.categoriesRepository.findAllAdmin(skip, take),
+      this.categoriesRepository.countAllAdmin(),
+    ]);
+
+    return {
+      message: 'Categories fetched successfully',
+      data: categories,
+      meta: paginationMeta(page, limit, total),
+    };
   }
 
   async getTreeAdmin() {
@@ -45,7 +56,9 @@ export class CategoriesService {
 
   async create(dto: CreateCategoryDto) {
     if (dto.parentId) {
-      const parent = await this.categoriesRepository.findById(dto.parentId);
+      const parent = await this.categoriesRepository.findActiveById(
+        dto.parentId,
+      );
       if (!parent) {
         throw new NotFoundException('Parent category not found');
       }
@@ -73,6 +86,22 @@ export class CategoriesService {
     const existing = await this.categoriesRepository.findById(id);
     if (!existing) {
       throw new NotFoundException('Category not found');
+    }
+
+    if (dto.parentId !== undefined) {
+      if (dto.parentId === id) {
+        throw new BadRequestException('Category cannot be its own parent');
+      }
+
+      if (dto.parentId) {
+        const parent = await this.categoriesRepository.findActiveById(
+          dto.parentId,
+        );
+        if (!parent) {
+          throw new NotFoundException('Parent category not found');
+        }
+        await this.assertNoCategoryCycle(id, dto.parentId);
+      }
     }
 
     if (dto.slug !== undefined) {
@@ -118,6 +147,7 @@ export class CategoriesService {
     if (!existing) {
       throw new NotFoundException('Category not found');
     }
+    await this.assertCategoryCanBeDisabled(id);
 
     const category = await this.categoriesRepository.update(id, {
       isActive: false,
@@ -131,8 +161,44 @@ export class CategoriesService {
     if (!existing) {
       throw new NotFoundException('Category not found');
     }
+    await this.assertCategoryCanBeDisabled(id);
 
     await this.categoriesRepository.softDelete(id);
     return { message: 'Category deleted successfully', data: null };
+  }
+
+  private async assertNoCategoryCycle(categoryId: string, parentId: string) {
+    let currentParentId: string | null = parentId;
+
+    while (currentParentId) {
+      if (currentParentId === categoryId) {
+        throw new BadRequestException(
+          'Circular category hierarchy not allowed',
+        );
+      }
+
+      const parent =
+        await this.categoriesRepository.findParentLink(currentParentId);
+      currentParentId = parent?.parentId ?? null;
+    }
+  }
+
+  private async assertCategoryCanBeDisabled(id: string) {
+    const [activeChildren, activeProducts] = await Promise.all([
+      this.categoriesRepository.countActiveChildren(id),
+      this.categoriesRepository.countActiveProducts(id),
+    ]);
+
+    if (activeChildren > 0) {
+      throw new BadRequestException(
+        'Category has active child categories and cannot be disabled',
+      );
+    }
+
+    if (activeProducts > 0) {
+      throw new BadRequestException(
+        'Category has active products and cannot be disabled',
+      );
+    }
   }
 }

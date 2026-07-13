@@ -1,8 +1,10 @@
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { paginate, paginationMeta } from '../../common/utils/pagination.util';
 import { generateSlug } from '../../common/utils/slug.util';
 import { BrandsRepository } from './brands.repository';
 import { CreateBrandDto } from './dto/create-brand.dto';
@@ -25,9 +27,26 @@ export class BrandsService {
     return { message: 'Brand fetched successfully', data: brand };
   }
 
-  async findAllAdmin() {
-    const brands = await this.brandsRepository.findAll(true);
-    return { message: 'Brands fetched successfully', data: brands };
+  async findAllAdmin(page = 1, limit = 20) {
+    const { skip, take } = paginate(page, limit);
+    const [brands, total] = await Promise.all([
+      this.brandsRepository.findAll(true, skip, take),
+      this.brandsRepository.countAll(true),
+    ]);
+
+    return {
+      message: 'Brands fetched successfully',
+      data: brands,
+      meta: paginationMeta(page, limit, total),
+    };
+  }
+
+  async findByIdAdmin(id: string) {
+    const brand = await this.brandsRepository.findById(id);
+    if (!brand) {
+      throw new NotFoundException('Brand not found');
+    }
+    return { message: 'Brand fetched successfully', data: brand };
   }
 
   async create(dto: CreateBrandDto) {
@@ -62,7 +81,6 @@ export class BrandsService {
     const brand = await this.brandsRepository.update(id, {
       ...(dto.name !== undefined && { name: dto.name }),
       ...(dto.slug !== undefined && { slug: dto.slug }),
-      ...(dto.isActive !== undefined && { isActive: dto.isActive }),
     });
 
     return { message: 'Brand updated successfully', data: brand };
@@ -83,6 +101,7 @@ export class BrandsService {
     if (!existing) {
       throw new NotFoundException('Brand not found');
     }
+    await this.assertBrandHasNoActiveProducts(id);
 
     const brand = await this.brandsRepository.update(id, { isActive: false });
     return { message: 'Brand deactivated successfully', data: brand };
@@ -93,8 +112,19 @@ export class BrandsService {
     if (!existing) {
       throw new NotFoundException('Brand not found');
     }
+    await this.assertBrandHasNoActiveProducts(id);
 
     await this.brandsRepository.softDelete(id);
     return { message: 'Brand deleted successfully', data: null };
+  }
+
+  private async assertBrandHasNoActiveProducts(id: string) {
+    const activeProducts = await this.brandsRepository.countActiveProducts(id);
+
+    if (activeProducts > 0) {
+      throw new BadRequestException(
+        'Brand has active products and cannot be disabled',
+      );
+    }
   }
 }

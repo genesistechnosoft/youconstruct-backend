@@ -13,7 +13,7 @@ export class CreateCategoryDto {
   @ApiProperty({ example: 'Tiles & Flooring' })
   @IsString()
   @IsNotEmpty()
-  name: string;
+  name!: string;
 
   @ApiPropertyOptional({ example: 'tiles-flooring' })
   @IsOptional()

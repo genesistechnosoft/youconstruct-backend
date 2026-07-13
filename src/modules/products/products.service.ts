@@ -82,6 +82,7 @@ export class ProductsService {
     dto: UpdateProductDto,
   ) {
     const existing = await this.verifyProductOwnership(userId, productId);
+    this.ensureVendorCanMutateProduct(existing.status);
 
     if (dto.categoryId !== undefined) {
       await this.validateActiveCategory(dto.categoryId);
@@ -133,28 +134,33 @@ export class ProductsService {
   }
 
   async submitForApproval(userId: string, productId: string) {
-    await this.verifyProductOwnership(userId, productId);
-    const activeVariants =
-      await this.productsRepository.countActiveVariants(productId);
-
-    if (activeVariants === 0) {
+    const product = await this.verifyProductOwnership(userId, productId);
+    if (
+      product.status !== ProductStatus.DRAFT &&
+      product.status !== ProductStatus.INACTIVE
+    ) {
       throw new BadRequestException(
-        'Product must have at least one active variant before submission',
+        'Only draft or rejected products can be submitted for approval',
       );
     }
 
-    const product = await this.productsRepository.submitForApproval(productId);
-    return { message: 'Product submitted for approval', data: product };
+    await this.validateProductCanGoLive(productId);
+
+    const submitted =
+      await this.productsRepository.submitForApproval(productId);
+    return { message: 'Product submitted for approval', data: submitted };
   }
 
   async deleteProduct(userId: string, productId: string) {
-    await this.verifyProductOwnership(userId, productId);
+    const product = await this.verifyProductOwnership(userId, productId);
+    this.ensureVendorCanMutateProduct(product.status);
     await this.productsRepository.softDelete(productId);
     return { message: 'Product deleted successfully', data: null };
   }
 
   async addVariant(userId: string, productId: string, dto: CreateVariantDto) {
-    await this.verifyProductOwnership(userId, productId);
+    const product = await this.verifyProductOwnership(userId, productId);
+    this.ensureVendorCanMutateProduct(product.status);
     await this.validateUnits(dto.primaryUnitId, dto.baseUnitId);
     this.validatePriceInvariant(dto.price, dto.sellingPrice, dto.costPrice);
     this.validateCoverageInvariant(dto.coverageArea, dto.baseUnitId);
@@ -163,6 +169,10 @@ export class ProductsService {
     if (existingSku) {
       throw new ConflictException('Variant SKU already exists');
     }
+
+    const activeVariants =
+      await this.productsRepository.countActiveVariants(productId);
+    const isDefault = dto.isDefault ?? activeVariants === 0;
 
     const variant = await this.productsRepository.createVariant({
       productId,
@@ -178,7 +188,7 @@ export class ProductsService {
       coverageArea: dto.coverageArea,
       baseUnitId: dto.baseUnitId,
       weightKg: dto.weightKg,
-      isDefault: dto.isDefault ?? false,
+      isDefault,
     });
 
     return { message: 'Variant added successfully', data: variant };
@@ -195,6 +205,11 @@ export class ProductsService {
       productId,
       variantId,
     );
+    const product = await this.productsRepository.findById(productId);
+    if (!product) {
+      throw new NotFoundException('Product not found');
+    }
+    this.ensureVendorCanMutateProduct(product.status);
 
     if (dto.sku !== undefined) {
       const existingSku = await this.productsRepository.findVariantBySku(
@@ -203,6 +218,16 @@ export class ProductsService {
       );
       if (existingSku) {
         throw new ConflictException('Variant SKU already exists');
+      }
+    }
+
+    if (dto.isDefault === false && variant.isDefault) {
+      const activeDefaultVariants =
+        await this.productsRepository.countActiveDefaultVariants(productId);
+      if (activeDefaultVariants <= 1) {
+        throw new BadRequestException(
+          'Product must keep one active default variant',
+        );
       }
     }
 
@@ -260,7 +285,25 @@ export class ProductsService {
   }
 
   async deleteVariant(userId: string, productId: string, variantId: string) {
-    await this.verifyVariantOwnership(userId, productId, variantId);
+    const product = await this.verifyProductOwnership(userId, productId);
+    this.ensureVendorCanMutateProduct(product.status);
+    const variant = await this.verifyVariantOwnership(
+      userId,
+      productId,
+      variantId,
+    );
+    const activeVariants =
+      await this.productsRepository.countActiveVariants(productId);
+    if (activeVariants <= 1) {
+      throw new BadRequestException('Product must keep at least one variant');
+    }
+
+    if (variant.isDefault) {
+      throw new BadRequestException(
+        'Default variant cannot be deleted. Set another default first',
+      );
+    }
+
     await this.productsRepository.softDeleteVariant(variantId);
     return { message: 'Variant deleted successfully', data: null };
   }
@@ -271,6 +314,8 @@ export class ProductsService {
     variantId: string,
     dto: UpdateInventoryDto,
   ) {
+    const product = await this.verifyProductOwnership(userId, productId);
+    this.ensureVendorCanMutateProduct(product.status);
     await this.verifyVariantOwnership(userId, productId, variantId);
 
     const inventory = await this.productsRepository.updateInventory(variantId, {
@@ -292,6 +337,8 @@ export class ProductsService {
     variantId: string,
     dto: SetAttributesDto,
   ) {
+    const product = await this.verifyProductOwnership(userId, productId);
+    this.ensureVendorCanMutateProduct(product.status);
     await this.verifyVariantOwnership(userId, productId, variantId);
     await this.validateAttributePayload(dto.attributes);
 
@@ -336,11 +383,29 @@ export class ProductsService {
     };
   }
 
+  async getAdminProduct(id: string) {
+    const product = await this.productsRepository.findById(id);
+    if (!product) {
+      throw new NotFoundException('Product not found');
+    }
+
+    return { message: 'Product fetched successfully', data: product };
+  }
+
   async approveProduct(id: string) {
     const existing = await this.productsRepository.findById(id);
     if (!existing) {
       throw new NotFoundException('Product not found');
     }
+
+    if (existing.status !== ProductStatus.PENDING_APPROVAL) {
+      throw new BadRequestException('Only pending products can be approved');
+    }
+
+    await this.validateProductCanGoLive(id);
+    await this.validateActiveCategory(existing.categoryId);
+    await this.validateActiveBrand(existing.brandId ?? undefined);
+    await this.validateApprovedVendor(existing.vendorId);
 
     const product = await this.productsRepository.update(id, {
       status: ProductStatus.ACTIVE,
@@ -356,8 +421,12 @@ export class ProductsService {
       throw new NotFoundException('Product not found');
     }
 
+    if (existing.status !== ProductStatus.PENDING_APPROVAL) {
+      throw new BadRequestException('Only pending products can be rejected');
+    }
+
     const product = await this.productsRepository.update(id, {
-      status: ProductStatus.INACTIVE,
+      status: ProductStatus.DRAFT,
       rejectionNote: dto.rejectionNote,
     });
 
@@ -420,6 +489,47 @@ export class ProductsService {
     const brand = await this.productsRepository.findBrandById(brandId);
     if (!brand) {
       throw new NotFoundException('Brand not found');
+    }
+  }
+
+  private async validateApprovedVendor(vendorId: string) {
+    const vendor =
+      await this.productsRepository.findApprovedVendorById(vendorId);
+    if (!vendor) {
+      throw new BadRequestException('Product vendor is not approved');
+    }
+  }
+
+  private async validateProductCanGoLive(productId: string) {
+    const [activeVariants, defaultVariants] = await Promise.all([
+      this.productsRepository.countActiveVariants(productId),
+      this.productsRepository.countActiveDefaultVariants(productId),
+    ]);
+
+    if (activeVariants === 0) {
+      throw new BadRequestException(
+        'Product must have at least one active variant',
+      );
+    }
+
+    if (defaultVariants !== 1) {
+      throw new BadRequestException(
+        'Product must have exactly one active default variant',
+      );
+    }
+  }
+
+  private ensureVendorCanMutateProduct(status: ProductStatus) {
+    if (status === ProductStatus.PENDING_APPROVAL) {
+      throw new BadRequestException(
+        'Pending products cannot be changed until reviewed',
+      );
+    }
+
+    if (status === ProductStatus.ACTIVE) {
+      throw new BadRequestException(
+        'Active products cannot be changed without review',
+      );
     }
   }
 
