@@ -6,6 +6,7 @@ import { AppController } from './app.controller';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { RolesGuard } from './common/guards/roles.guard';
 import { AuthModule } from './modules/auth/auth.module';
+import { BrandsModule } from './modules/brands/brands.module';
 import { CategoriesModule } from './modules/categories/categories.module';
 import { UnitsModule } from './modules/units/units.module';
 import { UsersModule } from './modules/users/users.module';
@@ -17,6 +18,7 @@ import { PrismaModule } from './prisma/prisma.module';
     PassportModule,
     PrismaModule,
     AuthModule,
+    BrandsModule,
     CategoriesModule,
     UnitsModule,
     UsersModule,
