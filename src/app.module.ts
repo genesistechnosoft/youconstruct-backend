@@ -8,6 +8,7 @@ import { RolesGuard } from './common/guards/roles.guard';
 import { AuthModule } from './modules/auth/auth.module';
 import { BrandsModule } from './modules/brands/brands.module';
 import { CategoriesModule } from './modules/categories/categories.module';
+import { ProductsModule } from './modules/products/products.module';
 import { UnitsModule } from './modules/units/units.module';
 import { UsersModule } from './modules/users/users.module';
 import { PrismaModule } from './prisma/prisma.module';
@@ -20,6 +21,7 @@ import { PrismaModule } from './prisma/prisma.module';
     AuthModule,
     BrandsModule,
     CategoriesModule,
+    ProductsModule,
     UnitsModule,
     UsersModule,
   ],

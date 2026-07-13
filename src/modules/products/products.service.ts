@@ -1,0 +1,516 @@
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
+import { Prisma, ProductStatus } from '../../../generated/prisma/client.js';
+import { paginate, paginationMeta } from '../../common/utils/pagination.util';
+import { generateSlug } from '../../common/utils/slug.util';
+import { BrowseProductsDto } from './dto/browse-products.dto';
+import { CreateProductDto } from './dto/create-product.dto';
+import { CreateVariantDto } from './dto/create-variant.dto';
+import { ProductFiltersDto } from './dto/product-filters.dto';
+import { RejectProductDto } from './dto/reject-product.dto';
+import { SetAttributesDto } from './dto/set-attributes.dto';
+import { UpdateInventoryDto } from './dto/update-inventory.dto';
+import { UpdateProductDto } from './dto/update-product.dto';
+import { UpdateVariantDto } from './dto/update-variant.dto';
+import { ProductsRepository } from './products.repository';
+
+@Injectable()
+export class ProductsService {
+  constructor(private readonly productsRepository: ProductsRepository) {}
+
+  async getMyProducts(userId: string, filters: ProductFiltersDto) {
+    const vendorId = await this.getVendorId(userId);
+    const { items, total } = await this.productsRepository.findByVendor(
+      vendorId,
+      filters,
+    );
+
+    return {
+      message: 'Products fetched successfully',
+      data: items,
+      meta: this.getMeta(filters.page, filters.limit, total),
+    };
+  }
+
+  async getMyProduct(userId: string, productId: string) {
+    const product = await this.verifyProductOwnership(userId, productId);
+    return { message: 'Product fetched successfully', data: product };
+  }
+
+  async createProduct(userId: string, dto: CreateProductDto) {
+    const vendorId = await this.getVendorId(userId);
+    await this.validateActiveCategory(dto.categoryId);
+    await this.validateActiveBrand(dto.brandId);
+    this.validateReturnInvariant(
+      dto.isReturnable ?? false,
+      dto.returnWindowDays,
+    );
+
+    const slug = generateSlug(dto.name);
+    const existingSlug = await this.productsRepository.findBySlug(slug);
+    if (existingSlug) {
+      throw new ConflictException('Product slug already exists');
+    }
+
+    const product = await this.productsRepository.create({
+      vendorId,
+      categoryId: dto.categoryId,
+      brandId: dto.brandId,
+      name: dto.name,
+      slug,
+      description: dto.description,
+      shortDescription: dto.shortDescription,
+      status: ProductStatus.DRAFT,
+      isReturnable: dto.isReturnable ?? false,
+      returnWindowDays: dto.returnWindowDays,
+      tags: dto.tags ?? [],
+      metaTitle: dto.metaTitle,
+      metaDescription: dto.metaDescription,
+    });
+
+    return { message: 'Product created successfully', data: product };
+  }
+
+  async updateProduct(
+    userId: string,
+    productId: string,
+    dto: UpdateProductDto,
+  ) {
+    const existing = await this.verifyProductOwnership(userId, productId);
+
+    if (dto.categoryId !== undefined) {
+      await this.validateActiveCategory(dto.categoryId);
+    }
+
+    if (dto.brandId !== undefined) {
+      await this.validateActiveBrand(dto.brandId);
+    }
+
+    if (dto.name !== undefined) {
+      const slug = generateSlug(dto.name);
+      const existingSlug = await this.productsRepository.findBySlug(
+        slug,
+        productId,
+      );
+      if (existingSlug) {
+        throw new ConflictException('Product slug already exists');
+      }
+    }
+
+    const isReturnable = dto.isReturnable ?? existing.isReturnable;
+    const returnWindowDays = dto.returnWindowDays ?? existing.returnWindowDays;
+    this.validateReturnInvariant(isReturnable, returnWindowDays ?? undefined);
+
+    const product = await this.productsRepository.update(productId, {
+      ...(dto.name !== undefined && {
+        name: dto.name,
+        slug: generateSlug(dto.name),
+      }),
+      ...(dto.categoryId !== undefined && { categoryId: dto.categoryId }),
+      ...(dto.brandId !== undefined && { brandId: dto.brandId }),
+      ...(dto.description !== undefined && { description: dto.description }),
+      ...(dto.shortDescription !== undefined && {
+        shortDescription: dto.shortDescription,
+      }),
+      ...(dto.isReturnable !== undefined && { isReturnable: dto.isReturnable }),
+      ...(dto.isReturnable === false && { returnWindowDays: null }),
+      ...(dto.returnWindowDays !== undefined && {
+        returnWindowDays: dto.returnWindowDays,
+      }),
+      ...(dto.tags !== undefined && { tags: dto.tags }),
+      ...(dto.metaTitle !== undefined && { metaTitle: dto.metaTitle }),
+      ...(dto.metaDescription !== undefined && {
+        metaDescription: dto.metaDescription,
+      }),
+    });
+
+    return { message: 'Product updated successfully', data: product };
+  }
+
+  async submitForApproval(userId: string, productId: string) {
+    await this.verifyProductOwnership(userId, productId);
+    const activeVariants =
+      await this.productsRepository.countActiveVariants(productId);
+
+    if (activeVariants === 0) {
+      throw new BadRequestException(
+        'Product must have at least one active variant before submission',
+      );
+    }
+
+    const product = await this.productsRepository.submitForApproval(productId);
+    return { message: 'Product submitted for approval', data: product };
+  }
+
+  async deleteProduct(userId: string, productId: string) {
+    await this.verifyProductOwnership(userId, productId);
+    await this.productsRepository.softDelete(productId);
+    return { message: 'Product deleted successfully', data: null };
+  }
+
+  async addVariant(userId: string, productId: string, dto: CreateVariantDto) {
+    await this.verifyProductOwnership(userId, productId);
+    await this.validateUnits(dto.primaryUnitId, dto.baseUnitId);
+    this.validatePriceInvariant(dto.price, dto.sellingPrice, dto.costPrice);
+    this.validateCoverageInvariant(dto.coverageArea, dto.baseUnitId);
+
+    const existingSku = await this.productsRepository.findVariantBySku(dto.sku);
+    if (existingSku) {
+      throw new ConflictException('Variant SKU already exists');
+    }
+
+    const variant = await this.productsRepository.createVariant({
+      productId,
+      sku: dto.sku,
+      name: dto.name,
+      price: new Prisma.Decimal(dto.price),
+      sellingPrice: new Prisma.Decimal(dto.sellingPrice),
+      costPrice:
+        dto.costPrice !== undefined
+          ? new Prisma.Decimal(dto.costPrice)
+          : undefined,
+      primaryUnitId: dto.primaryUnitId,
+      coverageArea: dto.coverageArea,
+      baseUnitId: dto.baseUnitId,
+      weightKg: dto.weightKg,
+      isDefault: dto.isDefault ?? false,
+    });
+
+    return { message: 'Variant added successfully', data: variant };
+  }
+
+  async updateVariant(
+    userId: string,
+    productId: string,
+    variantId: string,
+    dto: UpdateVariantDto,
+  ) {
+    const variant = await this.verifyVariantOwnership(
+      userId,
+      productId,
+      variantId,
+    );
+
+    if (dto.sku !== undefined) {
+      const existingSku = await this.productsRepository.findVariantBySku(
+        dto.sku,
+        variantId,
+      );
+      if (existingSku) {
+        throw new ConflictException('Variant SKU already exists');
+      }
+    }
+
+    if (dto.primaryUnitId !== undefined || dto.baseUnitId !== undefined) {
+      await this.validateUnits(dto.primaryUnitId, dto.baseUnitId);
+    }
+
+    const nextPrice = dto.price ?? Number(variant.price);
+    const nextSellingPrice = dto.sellingPrice ?? Number(variant.sellingPrice);
+    const nextCostPrice =
+      dto.costPrice !== undefined
+        ? dto.costPrice
+        : variant.costPrice !== null
+          ? Number(variant.costPrice)
+          : undefined;
+    this.validatePriceInvariant(nextPrice, nextSellingPrice, nextCostPrice);
+
+    const nextBaseUnitId =
+      dto.baseUnitId !== undefined ? dto.baseUnitId : variant.baseUnitId;
+    const nextCoverageArea =
+      dto.coverageArea !== undefined ? dto.coverageArea : variant.coverageArea;
+    this.validateCoverageInvariant(
+      nextCoverageArea ?? undefined,
+      nextBaseUnitId ?? undefined,
+    );
+
+    const updatedVariant = await this.productsRepository.updateVariant(
+      variantId,
+      productId,
+      {
+        ...(dto.sku !== undefined && { sku: dto.sku }),
+        ...(dto.name !== undefined && { name: dto.name }),
+        ...(dto.price !== undefined && {
+          price: new Prisma.Decimal(dto.price),
+        }),
+        ...(dto.sellingPrice !== undefined && {
+          sellingPrice: new Prisma.Decimal(dto.sellingPrice),
+        }),
+        ...(dto.costPrice !== undefined && {
+          costPrice: new Prisma.Decimal(dto.costPrice),
+        }),
+        ...(dto.primaryUnitId !== undefined && {
+          primaryUnitId: dto.primaryUnitId,
+        }),
+        ...(dto.coverageArea !== undefined && {
+          coverageArea: dto.coverageArea,
+        }),
+        ...(dto.baseUnitId !== undefined && { baseUnitId: dto.baseUnitId }),
+        ...(dto.weightKg !== undefined && { weightKg: dto.weightKg }),
+        ...(dto.isDefault !== undefined && { isDefault: dto.isDefault }),
+      },
+    );
+
+    return { message: 'Variant updated successfully', data: updatedVariant };
+  }
+
+  async deleteVariant(userId: string, productId: string, variantId: string) {
+    await this.verifyVariantOwnership(userId, productId, variantId);
+    await this.productsRepository.softDeleteVariant(variantId);
+    return { message: 'Variant deleted successfully', data: null };
+  }
+
+  async updateInventory(
+    userId: string,
+    productId: string,
+    variantId: string,
+    dto: UpdateInventoryDto,
+  ) {
+    await this.verifyVariantOwnership(userId, productId, variantId);
+
+    const inventory = await this.productsRepository.updateInventory(variantId, {
+      quantity: dto.quantity,
+      ...(dto.lowStockThreshold !== undefined && {
+        lowStockThreshold: dto.lowStockThreshold,
+      }),
+      ...(dto.allowBackorder !== undefined && {
+        allowBackorder: dto.allowBackorder,
+      }),
+    });
+
+    return { message: 'Inventory updated successfully', data: inventory };
+  }
+
+  async setVariantAttributes(
+    userId: string,
+    productId: string,
+    variantId: string,
+    dto: SetAttributesDto,
+  ) {
+    await this.verifyVariantOwnership(userId, productId, variantId);
+    await this.validateAttributePayload(dto.attributes);
+
+    const attributes = await this.productsRepository.setVariantAttributes(
+      variantId,
+      dto.attributes,
+    );
+
+    return {
+      message: 'Variant attributes updated successfully',
+      data: attributes,
+    };
+  }
+
+  async browseProducts(filters: BrowseProductsDto) {
+    const { items, total } = await this.productsRepository.findPublic(filters);
+
+    return {
+      message: 'Products fetched successfully',
+      data: items,
+      meta: this.getMeta(filters.page, filters.limit, total),
+    };
+  }
+
+  async getProductDetail(id: string) {
+    const product = await this.productsRepository.findPublicById(id);
+    if (!product) {
+      throw new NotFoundException('Product not found');
+    }
+
+    return { message: 'Product fetched successfully', data: product };
+  }
+
+  async getAllProducts(filters: ProductFiltersDto) {
+    const { items, total } =
+      await this.productsRepository.findAllAdmin(filters);
+
+    return {
+      message: 'Products fetched successfully',
+      data: items,
+      meta: this.getMeta(filters.page, filters.limit, total),
+    };
+  }
+
+  async approveProduct(id: string) {
+    const existing = await this.productsRepository.findById(id);
+    if (!existing) {
+      throw new NotFoundException('Product not found');
+    }
+
+    const product = await this.productsRepository.update(id, {
+      status: ProductStatus.ACTIVE,
+      rejectionNote: null,
+    });
+
+    return { message: 'Product approved successfully', data: product };
+  }
+
+  async rejectProduct(id: string, dto: RejectProductDto) {
+    const existing = await this.productsRepository.findById(id);
+    if (!existing) {
+      throw new NotFoundException('Product not found');
+    }
+
+    const product = await this.productsRepository.update(id, {
+      status: ProductStatus.INACTIVE,
+      rejectionNote: dto.rejectionNote,
+    });
+
+    return { message: 'Product rejected successfully', data: product };
+  }
+
+  private async getVendorId(userId: string) {
+    const vendor = await this.productsRepository.findVendorByUserId(userId);
+    if (!vendor) {
+      throw new ForbiddenException('Approved vendor profile required');
+    }
+
+    return vendor.id;
+  }
+
+  private async verifyProductOwnership(userId: string, productId: string) {
+    const vendorId = await this.getVendorId(userId);
+    const product = await this.productsRepository.findByVendorAndId(
+      vendorId,
+      productId,
+    );
+
+    if (!product) {
+      throw new NotFoundException('Product not found');
+    }
+
+    return product;
+  }
+
+  private async verifyVariantOwnership(
+    userId: string,
+    productId: string,
+    variantId: string,
+  ) {
+    await this.verifyProductOwnership(userId, productId);
+    const variant = await this.productsRepository.findVariant(
+      variantId,
+      productId,
+    );
+
+    if (!variant) {
+      throw new NotFoundException('Variant not found');
+    }
+
+    return variant;
+  }
+
+  private async validateActiveCategory(categoryId: string) {
+    const category = await this.productsRepository.findCategoryById(categoryId);
+    if (!category) {
+      throw new NotFoundException('Category not found');
+    }
+  }
+
+  private async validateActiveBrand(brandId?: string) {
+    if (!brandId) {
+      return;
+    }
+
+    const brand = await this.productsRepository.findBrandById(brandId);
+    if (!brand) {
+      throw new NotFoundException('Brand not found');
+    }
+  }
+
+  private async validateUnits(primaryUnitId?: string, baseUnitId?: string) {
+    if (primaryUnitId) {
+      const primaryUnit =
+        await this.productsRepository.findUnitById(primaryUnitId);
+      if (!primaryUnit) {
+        throw new NotFoundException('Primary unit not found');
+      }
+    }
+
+    if (baseUnitId) {
+      const baseUnit = await this.productsRepository.findUnitById(baseUnitId);
+      if (!baseUnit) {
+        throw new NotFoundException('Base unit not found');
+      }
+    }
+  }
+
+  private validatePriceInvariant(
+    price: number,
+    sellingPrice: number,
+    costPrice?: number,
+  ) {
+    if (sellingPrice > price) {
+      throw new BadRequestException('Selling price cannot exceed price');
+    }
+
+    if (costPrice !== undefined && costPrice > price) {
+      throw new BadRequestException('Cost price cannot exceed price');
+    }
+  }
+
+  private validateReturnInvariant(
+    isReturnable: boolean,
+    returnWindowDays?: number,
+  ) {
+    if (!isReturnable && returnWindowDays !== undefined) {
+      throw new BadRequestException(
+        'Return window days can only be set for returnable products',
+      );
+    }
+
+    if (
+      isReturnable &&
+      (returnWindowDays === undefined || returnWindowDays <= 0)
+    ) {
+      throw new BadRequestException(
+        'Returnable products must have a positive return window',
+      );
+    }
+  }
+
+  private validateCoverageInvariant(
+    coverageArea?: number,
+    baseUnitId?: string,
+  ) {
+    if (coverageArea === undefined) {
+      return;
+    }
+
+    if (coverageArea <= 0) {
+      throw new BadRequestException('Coverage area must be greater than 0');
+    }
+
+    if (!baseUnitId) {
+      throw new BadRequestException('Base unit is required with coverage area');
+    }
+  }
+
+  private async validateAttributePayload(
+    attributes: { attributeId: string; value: string }[],
+  ) {
+    const attributeIds = attributes.map((attribute) => attribute.attributeId);
+    const uniqueAttributeIds = new Set(attributeIds);
+
+    if (uniqueAttributeIds.size !== attributeIds.length) {
+      throw new BadRequestException('Duplicate attribute IDs are not allowed');
+    }
+
+    const definitions =
+      await this.productsRepository.findAttributeDefinitionsByIds(attributeIds);
+
+    if (definitions.length !== uniqueAttributeIds.size) {
+      throw new NotFoundException('One or more attributes were not found');
+    }
+  }
+
+  private getMeta(page: number, limit: number, total: number) {
+    const { take } = paginate(page, limit);
+    return paginationMeta(page, take, total);
+  }
+}
