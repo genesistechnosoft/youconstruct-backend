@@ -12,6 +12,7 @@ import { CategoriesModule } from './modules/categories/categories.module';
 import { ProductsModule } from './modules/products/products.module';
 import { UnitsModule } from './modules/units/units.module';
 import { UsersModule } from './modules/users/users.module';
+import { VendorOnboardingModule } from './modules/vendor-onboarding/vendor-onboarding.module';
 import { PrismaModule } from './prisma/prisma.module';
 
 @Module({
@@ -31,6 +32,7 @@ import { PrismaModule } from './prisma/prisma.module';
     ProductsModule,
     UnitsModule,
     UsersModule,
+    VendorOnboardingModule,
   ],
   controllers: [AppController],
   providers: [

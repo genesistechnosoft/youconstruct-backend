@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   UnauthorizedException,
 } from '@nestjs/common';
@@ -9,7 +10,7 @@ import { JwtService, JwtSignOptions } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
 import { createHash, randomInt } from 'node:crypto';
 import { v4 as uuid } from 'uuid';
-import { UserRole } from '../../common/decorators/roles.decorator';
+import { UserRole } from '../../../generated/prisma/client.js';
 import { AuthRepository } from './auth.repository';
 
 @Injectable()
@@ -25,7 +26,14 @@ export class AuthService {
     email?: string;
     phone?: string;
     password?: string;
+    role?: UserRole;
   }) {
+    if (dto.role === UserRole.ADMIN) {
+      throw new ForbiddenException('Admin registration is not allowed');
+    }
+
+    const role = dto.role ?? UserRole.CUSTOMER;
+
     if (dto.email) {
       const existingEmail = await this.authRepository.findUserByEmail(
         dto.email,
@@ -54,7 +62,7 @@ export class AuthService {
       email: dto.email,
       phone: dto.phone,
       passwordHash,
-      role: UserRole.CUSTOMER,
+      role,
     });
 
     return this.generateTokens(user.id, user.role);

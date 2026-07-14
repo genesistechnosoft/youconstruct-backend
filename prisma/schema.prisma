@@ -55,6 +55,49 @@ enum SuggestionSourceType {
   CATEGORY
 }
 
+enum VendorOnboardingStatus {
+  DRAFT
+  SUBMITTED
+  APPROVED
+  REJECTED
+}
+
+enum VendorPlan {
+  FREE
+  PRO
+  ENTERPRISE
+}
+
+enum PayoutStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+enum PayoutTriggerType {
+  MANUAL
+  SCHEDULED
+}
+
+enum TransactionType {
+  CREDIT
+  DEBIT
+}
+
+enum TransactionReason {
+  ORDER_EARNING
+  PAYOUT
+  REFUND_DEDUCTION
+  ADJUSTMENT
+}
+
+enum PreferredPaymentMethod {
+  CASH
+  ONLINE
+  BOTH
+}
+
 // ─────────────────────────────────────────────
 // MODELS
 // ─────────────────────────────────────────────
@@ -143,7 +186,8 @@ model KycDocument {
   id            String          @id @default(uuid())
   userId        String
   documentType  KycDocumentType
-  documentNo    String
+  documentNo    String?
+  fileUrl       String?
   status        KycStatus       @default(PENDING)
   rejectionNote String?
   createdAt     DateTime        @default(now())
@@ -156,27 +200,168 @@ model KycDocument {
 }
 
 model VendorProfile {
-  id              String    @id @default(uuid())
-  userId          String    @unique
-  businessName    String
-  businessAddress String?
-  city            String?
-  state           String?
-  pincode         String?
-  latitude        Float?
-  longitude       Float?
-  gstNumber       String?
-  isApproved      Boolean   @default(false)
-  approvedAt      DateTime?
-  bio             String?
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
-  deletedAt       DateTime?
+  id               String                 @id @default(uuid())
+  userId           String                 @unique
+  businessName     String
+  businessAddress  String?
+  city             String?
+  state            String?
+  pincode          String?
+  latitude         Float?
+  longitude        Float?
+  gstNumber        String?
+  isApproved       Boolean                @default(false)
+  approvedAt       DateTime?
+  bio              String?
+  onboardingStatus VendorOnboardingStatus @default(DRAFT)
+  submittedAt      DateTime?
+  reviewedAt       DateTime?
+  rejectionReason  String?
+  createdAt        DateTime               @default(now())
+  updatedAt        DateTime               @updatedAt
+  deletedAt        DateTime?
 
-  user     User      @relation(fields: [userId], references: [id])
-  products Product[]
+  user          User                 @relation(fields: [userId], references: [id])
+  products      Product[]
+  storeSettings VendorStoreSettings?
+  membership    VendorMembership?
+  wallet        VendorWallet?
+  transactions  VendorTransaction[]
+  bankAccount   VendorBankAccount?
+  payouts       VendorPayout[]
 
   @@map("vendor_profiles")
+}
+
+model VendorStoreSettings {
+  id                     String                  @id @default(uuid())
+  vendorId               String                  @unique
+  shippingPolicy         String?
+  refundPolicy           String?
+  cancellationPolicy     String?
+  preferredPaymentMethod PreferredPaymentMethod?
+  supportPhone           String?
+  supportEmail           String?
+  supportAddressLine1    String?
+  supportAddressLine2    String?
+  supportCity            String?
+  supportState           String?
+  supportPincode         String?
+  seoTitle               String?
+  seoDescription         String?
+  seoKeywords            String?
+  ogTitle                String?
+  ogDescription          String?
+  twitterTitle           String?
+  twitterDescription     String?
+  socialInstagram        String?
+  socialFacebook         String?
+  socialTwitter          String?
+  socialYoutube          String?
+  socialLinkedin         String?
+  socialPinterest        String?
+  createdAt              DateTime                @default(now())
+  updatedAt              DateTime                @updatedAt
+
+  vendor VendorProfile @relation(fields: [vendorId], references: [id])
+
+  @@map("vendor_store_settings")
+}
+
+model VendorMembership {
+  id             String     @id @default(uuid())
+  vendorId       String     @unique
+  plan           VendorPlan @default(FREE)
+  startedAt      DateTime   @default(now())
+  expiresAt      DateTime?
+  isActive       Boolean    @default(true)
+  storageLimitMb Int        @default(0)
+  storageUsedMb  Float      @default(0)
+  productLimit   Int?
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+
+  vendor VendorProfile @relation(fields: [vendorId], references: [id])
+
+  @@map("vendor_memberships")
+}
+
+model VendorWallet {
+  id             String   @id @default(uuid())
+  vendorId       String   @unique
+  balance        Decimal  @default(0) @db.Decimal(12, 2)
+  lockedBalance  Decimal  @default(0) @db.Decimal(12, 2)
+  totalEarned    Decimal  @default(0) @db.Decimal(12, 2)
+  totalWithdrawn Decimal  @default(0) @db.Decimal(12, 2)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  vendor       VendorProfile       @relation(fields: [vendorId], references: [id])
+  transactions VendorTransaction[]
+  payouts      VendorPayout[]
+
+  @@map("vendor_wallets")
+}
+
+model VendorTransaction {
+  id            String            @id @default(uuid())
+  vendorId      String
+  walletId      String
+  type          TransactionType
+  reason        TransactionReason
+  amount        Decimal           @db.Decimal(12, 2)
+  balanceBefore Decimal           @db.Decimal(12, 2)
+  balanceAfter  Decimal           @db.Decimal(12, 2)
+  referenceId   String?
+  referenceType String?
+  note          String?
+  createdAt     DateTime          @default(now())
+
+  vendor VendorProfile @relation(fields: [vendorId], references: [id])
+  wallet VendorWallet  @relation(fields: [walletId], references: [id])
+
+  @@map("vendor_transactions")
+}
+
+model VendorBankAccount {
+  id                String    @id @default(uuid())
+  vendorId          String    @unique
+  accountHolderName String
+  accountNumber     String
+  ifscCode          String
+  bankName          String
+  branchName        String?
+  isVerified        Boolean   @default(false)
+  verifiedAt        DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  vendor  VendorProfile  @relation(fields: [vendorId], references: [id])
+  payouts VendorPayout[]
+
+  @@map("vendor_bank_accounts")
+}
+
+model VendorPayout {
+  id               String            @id @default(uuid())
+  vendorId         String
+  walletId         String
+  bankAccountId    String
+  amount           Decimal           @db.Decimal(12, 2)
+  status           PayoutStatus      @default(PENDING)
+  triggerType      PayoutTriggerType
+  scheduledFor     DateTime?
+  processedAt      DateTime?
+  failureReason    String?
+  razorpayPayoutId String?
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+
+  vendor      VendorProfile     @relation(fields: [vendorId], references: [id])
+  wallet      VendorWallet      @relation(fields: [walletId], references: [id])
+  bankAccount VendorBankAccount @relation(fields: [bankAccountId], references: [id])
+
+  @@map("vendor_payouts")
 }
 
 model ProfessionalProfile {

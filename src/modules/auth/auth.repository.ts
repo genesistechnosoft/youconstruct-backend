@@ -3,7 +3,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma } from '../../../generated/prisma/client.js';
+import { Prisma, UserRole } from '../../../generated/prisma/client.js';
 import { PrismaService } from '../../prisma/prisma.service';
 
 @Injectable()
@@ -82,22 +82,36 @@ export class AuthRepository {
     email?: string;
     phone?: string;
     passwordHash?: string;
-    role?: string;
+    role?: UserRole;
     provider?: string;
     googleId?: string;
     avatarUrl?: string;
   }) {
     try {
-      return await this.prisma.user.create({
-        data: data as Prisma.UserCreateInput,
-        select: {
-          id: true,
-          name: true,
-          email: true,
-          phone: true,
-          role: true,
-          provider: true,
-        },
+      return await this.prisma.$transaction(async (tx) => {
+        const user = await tx.user.create({
+          data: data as Prisma.UserCreateInput,
+          select: {
+            id: true,
+            name: true,
+            email: true,
+            phone: true,
+            role: true,
+            provider: true,
+          },
+        });
+
+        if (user.role === UserRole.VENDOR) {
+          await tx.vendorProfile.create({
+            data: {
+              userId: user.id,
+              businessName: user.name,
+            },
+            select: { id: true },
+          });
+        }
+
+        return user;
       });
     } catch (error) {
       this.handlePrismaError(error);
