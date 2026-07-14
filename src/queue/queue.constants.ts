@@ -1,0 +1,2 @@
+export const MEDIA_QUEUE = 'MEDIA_QUEUE';
+export const PROCESS_MEDIA_JOB = 'PROCESS_MEDIA';

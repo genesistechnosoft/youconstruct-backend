@@ -98,6 +98,28 @@ enum PreferredPaymentMethod {
   BOTH
 }
 
+enum MediaFileType {
+  IMAGE
+  VIDEO
+  DOCUMENT
+}
+
+enum StorageDriver {
+  LOCAL
+  R2
+}
+
+enum MediaVisibility {
+  PUBLIC
+  PRIVATE
+}
+
+enum MediaProcessingStatus {
+  PENDING
+  READY
+  FAILED
+}
+
 // ─────────────────────────────────────────────
 // MODELS
 // ─────────────────────────────────────────────
@@ -124,6 +146,7 @@ model User {
   refreshTokens    RefreshToken[]
   otpVerifications OtpVerification[]
   kycDocuments     KycDocument[]
+  media            Media[]
   vendorProfile    VendorProfile?
   professionalProfile ProfessionalProfile?
 
@@ -570,4 +593,68 @@ model QuantityCalculatorConfig {
   category Category @relation(fields: [categoryId], references: [id])
 
   @@map("quantity_calculator_configs")
+}
+
+// ─────────────────────────────────────────────
+// MODULE 6 — MEDIA
+// ─────────────────────────────────────────────
+
+model Media {
+  id               String                @id @default(uuid())
+  uploadedById     String
+  fileName         String
+  fileType         MediaFileType
+  visibility       MediaVisibility
+  checksum         String?
+  metadata         Json?
+  processingStatus MediaProcessingStatus @default(PENDING)
+  createdAt        DateTime              @default(now())
+  updatedAt        DateTime              @updatedAt
+  deletedAt        DateTime?
+
+  uploadedBy User         @relation(fields: [uploadedById], references: [id])
+  assets     MediaAsset[]
+  links      MediaLink[]
+
+  @@index([uploadedById, createdAt])
+  @@index([processingStatus])
+  @@map("media")
+}
+
+model MediaAsset {
+  id            String        @id @default(uuid())
+  mediaId       String
+  variantType   String
+  storageDriver StorageDriver @default(LOCAL)
+  storageKey    String
+  mimeType      String
+  sizeBytes     BigInt
+  width         Int?
+  height        Int?
+  createdAt     DateTime      @default(now())
+
+  media Media @relation(fields: [mediaId], references: [id])
+
+  @@unique([mediaId, variantType])
+  @@index([mediaId, variantType])
+  @@index([storageDriver, storageKey])
+  @@map("media_assets")
+}
+
+model MediaLink {
+  id         String    @id @default(uuid())
+  mediaId    String
+  entityType String
+  entityId   String
+  context    String?
+  isPrimary  Boolean   @default(false)
+  sortOrder  Int       @default(0)
+  createdAt  DateTime  @default(now())
+  deletedAt  DateTime?
+
+  media Media @relation(fields: [mediaId], references: [id])
+
+  @@index([mediaId])
+  @@index([entityType, entityId, context, sortOrder])
+  @@map("media_links")
 }

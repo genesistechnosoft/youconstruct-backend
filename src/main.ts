@@ -35,7 +35,12 @@ async function bootstrap() {
   const swaggerEnabled = config.get<string>('SWAGGER_ENABLED') === 'true';
   const corsOrigins = config.get<string>('CORS_ORIGINS');
 
-  app.use(helmet());
+  // app.use(helmet());
+  app.use(
+    helmet({
+      contentSecurityPolicy: swaggerEnabled ? false : undefined,
+    }),
+  );
   app.setGlobalPrefix(apiPrefix);
   app.enableCors({
     origin: corsOrigins
