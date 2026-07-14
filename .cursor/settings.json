@@ -2,6 +2,9 @@
   "plugins": {
     "caveman/caveman": {
       "enabled": true
+    },
+    "cloudflare": {
+      "enabled": true
     }
   }
 }
