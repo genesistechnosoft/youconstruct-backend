@@ -14,6 +14,9 @@ import { UnitsModule } from './modules/units/units.module';
 import { UsersModule } from './modules/users/users.module';
 import { VendorOnboardingModule } from './modules/vendor-onboarding/vendor-onboarding.module';
 import { PrismaModule } from './prisma/prisma.module';
+import { MediaModule } from './modules/media/media.module';
+import { QueueModule } from './queue/queue.module';
+import { StorageModule } from './storage/storage.module';
 
 @Module({
   imports: [
@@ -26,9 +29,12 @@ import { PrismaModule } from './prisma/prisma.module';
     ]),
     PassportModule,
     PrismaModule,
+    StorageModule,
+    QueueModule,
     AuthModule,
     BrandsModule,
     CategoriesModule,
+    MediaModule,
     ProductsModule,
     UnitsModule,
     UsersModule,

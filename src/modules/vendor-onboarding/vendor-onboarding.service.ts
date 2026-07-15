@@ -6,12 +6,15 @@ import {
 } from '@nestjs/common';
 import {
   KycDocumentType,
+  MediaOwnerType,
   UserRole,
   VendorOnboardingStatus,
 } from '../../../generated/prisma/client.js';
 import { paginationMeta } from '../../common/utils/pagination.util';
+import { MediaService } from '../media/media.service';
 import { RejectVendorDto } from './dto/reject-vendor.dto';
 import { UpdateVendorProfileDto } from './dto/update-vendor-profile.dto';
+import { UploadKycDocumentDto } from './dto/upload-kyc-document.dto';
 import { UpsertKycDocumentDto } from './dto/upsert-kyc-document.dto';
 import { VendorFiltersDto } from './dto/vendor-filters.dto';
 import { VendorOnboardingRepository } from './vendor-onboarding.repository';
@@ -44,6 +47,7 @@ type VendorForValidation = {
 export class VendorOnboardingService {
   constructor(
     private readonly vendorOnboardingRepository: VendorOnboardingRepository,
+    private readonly mediaService: MediaService,
   ) {}
 
   async getMyOnboarding(userId: string) {
@@ -108,6 +112,44 @@ export class VendorOnboardingService {
 
     return {
       message: 'KYC document saved successfully',
+      data: document,
+    };
+  }
+
+  async uploadKycDocument(
+    userId: string,
+    documentType: KycDocumentType,
+    file: Express.Multer.File | undefined,
+    dto: UploadKycDocumentDto,
+  ) {
+    const vendor = await this.ensureVendorProfile(userId);
+    this.ensureVendorCanEdit(vendor.onboardingStatus);
+
+    const media = await this.mediaService.uploadPrivateDocument(
+      userId,
+      { ownerType: MediaOwnerType.VENDOR, ownerId: vendor.id },
+      file,
+      `kyc/${userId}/${documentType}`,
+    );
+    const mediaWithUrls = await this.mediaService.withUrls(media);
+    const document = await this.vendorOnboardingRepository.upsertKycDocument(
+      userId,
+      documentType,
+      {
+        fileUrl: mediaWithUrls.originalUrl,
+        mediaId: media.id,
+        documentNo: dto.documentNo,
+      },
+    );
+
+    if (vendor.onboardingStatus === VendorOnboardingStatus.REJECTED) {
+      await this.vendorOnboardingRepository.updateProfile(vendor.id, {
+        onboardingStatus: VendorOnboardingStatus.DRAFT,
+      });
+    }
+
+    return {
+      message: 'KYC document uploaded successfully',
       data: document,
     };
   }

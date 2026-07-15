@@ -98,6 +98,72 @@ enum PreferredPaymentMethod {
   BOTH
 }
 
+enum MediaOwnerType {
+  VENDOR
+  PROFESSIONAL
+  ADMIN
+}
+
+enum MediaAccessLevel {
+  PUBLIC
+  PRIVATE
+  SIGNED
+}
+
+enum MediaFileType {
+  IMAGE
+  VIDEO
+  DOCUMENT
+}
+
+enum StorageDriver {
+  LOCAL
+  R2
+}
+
+enum MediaProcessingStatus {
+  PENDING
+  PROCESSING
+  READY
+  FAILED
+}
+
+enum MediaEntityType {
+  PRODUCT
+  PRODUCT_VARIANT
+  VENDOR_PROFILE
+  PROFESSIONAL_PROFILE
+  CATEGORY
+  BRAND
+  HOMEPAGE_BANNER
+}
+
+enum MediaContext {
+  GALLERY
+  PRIMARY
+  LOGO
+  BANNER
+  THUMBNAIL
+  CATEGORY_IMAGE
+  BRAND_LOGO
+  PROFILE_PHOTO
+  PROJECT_PHOTO
+  REEL
+}
+
+enum MediaProcessingJobType {
+  IMAGE_COMPRESS
+  THUMBNAIL_GENERATE
+  VIDEO_TRANSCODE
+}
+
+enum MediaProcessingJobStatus {
+  QUEUED
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
 // ─────────────────────────────────────────────
 // MODELS
 // ─────────────────────────────────────────────
@@ -120,11 +186,12 @@ model User {
   updatedAt       DateTime     @updatedAt
   deletedAt       DateTime?
 
-  addresses        Address[]
-  refreshTokens    RefreshToken[]
-  otpVerifications OtpVerification[]
-  kycDocuments     KycDocument[]
-  vendorProfile    VendorProfile?
+  addresses           Address[]
+  refreshTokens       RefreshToken[]
+  otpVerifications    OtpVerification[]
+  kycDocuments        KycDocument[]
+  uploadedMedia       Media[]
+  vendorProfile       VendorProfile?
   professionalProfile ProfessionalProfile?
 
   @@map("users")
@@ -185,6 +252,7 @@ model OtpVerification {
 model KycDocument {
   id            String          @id @default(uuid())
   userId        String
+  mediaId       String?
   documentType  KycDocumentType
   documentNo    String?
   fileUrl       String?
@@ -193,9 +261,11 @@ model KycDocument {
   createdAt     DateTime        @default(now())
   updatedAt     DateTime        @updatedAt
 
-  user User @relation(fields: [userId], references: [id])
+  user  User   @relation(fields: [userId], references: [id])
+  media Media? @relation(fields: [mediaId], references: [id])
 
   @@unique([userId, documentType])
+  @@index([mediaId])
   @@map("kyc_documents")
 }
 
@@ -392,6 +462,107 @@ model ProfessionalProfile {
 }
 
 // ─────────────────────────────────────────────
+// MODULE 6 — MEDIA
+// ─────────────────────────────────────────────
+
+model Media {
+  id               String                @id @default(uuid())
+  uploadedBy       String
+  ownerType        MediaOwnerType
+  ownerId          String
+  folderId         String?
+  fileName         String
+  originalName     String
+  fileType         MediaFileType
+  mimeType         String
+  sizeBytes        Int
+  width            Int?
+  height           Int?
+  durationSeconds  Float?
+  storageDriver    StorageDriver
+  originalKey      String
+  optimizedKey     String?
+  thumbnailKey     String?
+  accessLevel      MediaAccessLevel      @default(PUBLIC)
+  processingStatus MediaProcessingStatus @default(PENDING)
+  createdAt        DateTime              @default(now())
+  updatedAt        DateTime              @updatedAt
+  deletedAt        DateTime?
+
+  uploader       User                 @relation(fields: [uploadedBy], references: [id])
+  folder         MediaFolder?         @relation(fields: [folderId], references: [id])
+  links          MediaLink[]
+  processingJobs MediaProcessingJob[]
+  kycDocuments   KycDocument[]
+
+  @@index([uploadedBy])
+  @@index([ownerType, ownerId])
+  @@index([folderId])
+  @@index([fileType])
+  @@index([processingStatus])
+  @@map("media")
+}
+
+model MediaFolder {
+  id        String         @id @default(uuid())
+  ownerType MediaOwnerType
+  ownerId   String
+  name      String
+  parentId  String?
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+  deletedAt DateTime?
+
+  parent   MediaFolder?  @relation("FolderTree", fields: [parentId], references: [id])
+  children MediaFolder[] @relation("FolderTree")
+  media    Media[]
+
+  @@index([ownerType, ownerId])
+  @@index([parentId])
+  @@map("media_folders")
+}
+
+model MediaLink {
+  id         String          @id @default(uuid())
+  mediaId    String
+  entityType MediaEntityType
+  entityId   String
+  context    MediaContext?
+  isPrimary  Boolean         @default(false)
+  sortOrder  Int             @default(0)
+  createdAt  DateTime        @default(now())
+  deletedAt  DateTime?
+
+  media Media @relation(fields: [mediaId], references: [id])
+
+  @@index([mediaId])
+  @@index([entityType, entityId])
+  @@index([entityType, entityId, context])
+  @@map("media_links")
+}
+
+model MediaProcessingJob {
+  id           String                   @id @default(uuid())
+  mediaId      String
+  jobType      MediaProcessingJobType
+  status       MediaProcessingJobStatus @default(QUEUED)
+  attempts     Int                      @default(0)
+  errorMessage String?
+  startedAt    DateTime?
+  completedAt  DateTime?
+  createdAt    DateTime                 @default(now())
+  updatedAt    DateTime                 @updatedAt
+  deletedAt    DateTime?
+
+  media Media @relation(fields: [mediaId], references: [id])
+
+  @@index([mediaId])
+  @@index([status])
+  @@index([jobType])
+  @@map("media_processing_jobs")
+}
+
+// ─────────────────────────────────────────────
 // MODULE 2 — CATALOG
 // ─────────────────────────────────────────────
 
@@ -431,31 +602,31 @@ model Brand {
 }
 
 model Product {
-  id                String        @id @default(uuid())
-  vendorId          String
-  categoryId        String
-  brandId           String?
-  name              String
-  slug              String        @unique
-  description       String
-  shortDescription  String
-  status            ProductStatus @default(DRAFT)
-  isReturnable      Boolean       @default(false)
-  returnWindowDays  Int?
-  tags              String[]
-  metaTitle         String
-  metaDescription   String
-  rejectionNote     String?
-  createdAt         DateTime      @default(now())
-  updatedAt         DateTime      @updatedAt
-  deletedAt         DateTime?
+  id               String        @id @default(uuid())
+  vendorId         String
+  categoryId       String
+  brandId          String?
+  name             String
+  slug             String        @unique
+  description      String
+  shortDescription String
+  status           ProductStatus @default(DRAFT)
+  isReturnable     Boolean       @default(false)
+  returnWindowDays Int?
+  tags             String[]
+  metaTitle        String
+  metaDescription  String
+  rejectionNote    String?
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+  deletedAt        DateTime?
 
-  vendor             VendorProfile           @relation(fields: [vendorId], references: [id])
-  category           Category                @relation(fields: [categoryId], references: [id])
-  brand              Brand?                  @relation(fields: [brandId], references: [id])
+  vendor             VendorProfile       @relation(fields: [vendorId], references: [id])
+  category           Category            @relation(fields: [categoryId], references: [id])
+  brand              Brand?              @relation(fields: [brandId], references: [id])
   variants           ProductVariant[]
   // shippingOverride ProductShippingOverride?
-  productSuggestions ProductSuggestion[]     @relation("ProductSuggestions")
+  productSuggestions ProductSuggestion[] @relation("ProductSuggestions")
 
   @@map("products")
 }
@@ -505,9 +676,9 @@ model ProductVariant {
   updatedAt     DateTime  @updatedAt
   deletedAt     DateTime?
 
-  product     Product             @relation(fields: [productId], references: [id])
-  primaryUnit Unit                @relation("PrimaryUnit", fields: [primaryUnitId], references: [id])
-  baseUnit    Unit?               @relation("BaseUnit", fields: [baseUnitId], references: [id])
+  product     Product            @relation(fields: [productId], references: [id])
+  primaryUnit Unit               @relation("PrimaryUnit", fields: [primaryUnitId], references: [id])
+  baseUnit    Unit?              @relation("BaseUnit", fields: [baseUnitId], references: [id])
   attributes  VariantAttribute[]
   inventory   ProductInventory?
   // cartItems  CartItem[]        // added in Module 5

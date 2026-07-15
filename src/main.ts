@@ -7,6 +7,8 @@ import { ResponseInterceptor } from './common/interceptors/response.interceptor'
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import helmet from 'helmet';
 import { ValidationError } from 'class-validator';
+import express from 'express';
+import { join } from 'node:path';
 
 function flattenValidationErrors(
   errors: ValidationError[],
@@ -36,6 +38,7 @@ async function bootstrap() {
   const corsOrigins = config.get<string>('CORS_ORIGINS');
 
   app.use(helmet());
+  app.use('/uploads', express.static(join(process.cwd(), 'uploads')));
   app.setGlobalPrefix(apiPrefix);
   app.enableCors({
     origin: corsOrigins
