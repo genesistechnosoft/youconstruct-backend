@@ -10,9 +10,19 @@ import {
   Post,
   Put,
   Query,
+  UploadedFile,
   UseGuards,
+  UseInterceptors,
 } from '@nestjs/common';
-import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { FileInterceptor } from '@nestjs/platform-express';
+import {
+  ApiBearerAuth,
+  ApiBody,
+  ApiConsumes,
+  ApiOperation,
+  ApiTags,
+} from '@nestjs/swagger';
+import { memoryStorage } from 'multer';
 import { KycDocumentType } from '../../../generated/prisma/client.js';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles, UserRole } from '../../common/decorators/roles.decorator';
@@ -20,6 +30,7 @@ import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { RejectVendorDto } from './dto/reject-vendor.dto';
 import { UpdateVendorProfileDto } from './dto/update-vendor-profile.dto';
+import { UploadKycDocumentDto } from './dto/upload-kyc-document.dto';
 import { UpsertKycDocumentDto } from './dto/upsert-kyc-document.dto';
 import { VendorFiltersDto } from './dto/vendor-filters.dto';
 import { VendorOnboardingService } from './vendor-onboarding.service';
@@ -67,6 +78,35 @@ export class VendorOnboardingController {
     return this.vendorOnboardingService.upsertKycDocument(
       user.userId,
       documentType,
+      dto,
+    );
+  }
+
+  @Put('kyc/:documentType/upload')
+  @HttpCode(200)
+  @UseInterceptors(FileInterceptor('file', { storage: memoryStorage() }))
+  @ApiConsumes('multipart/form-data')
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        file: { type: 'string', format: 'binary' },
+        documentNo: { type: 'string' },
+      },
+    },
+  })
+  @ApiOperation({ summary: 'Upload or replace a private KYC document file' })
+  uploadKycDocument(
+    @CurrentUser() user: AuthUser,
+    @Param('documentType', new ParseEnumPipe(KycDocumentType))
+    documentType: KycDocumentType,
+    @UploadedFile() file: Express.Multer.File | undefined,
+    @Body() dto: UploadKycDocumentDto,
+  ) {
+    return this.vendorOnboardingService.uploadKycDocument(
+      user.userId,
+      documentType,
+      file,
       dto,
     );
   }

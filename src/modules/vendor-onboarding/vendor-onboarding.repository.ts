@@ -16,6 +16,7 @@ import { VendorFiltersDto } from './dto/vendor-filters.dto';
 const KYC_DOCUMENT_SELECT = {
   id: true,
   userId: true,
+  mediaId: true,
   documentType: true,
   documentNo: true,
   fileUrl: true,
@@ -177,13 +178,14 @@ export class VendorOnboardingRepository {
   async upsertKycDocument(
     userId: string,
     documentType: KycDocumentType,
-    data: { fileUrl: string; documentNo?: string },
+    data: { fileUrl: string; documentNo?: string; mediaId?: string },
   ) {
     try {
       return await this.prisma.kycDocument.upsert({
         where: { userId_documentType: { userId, documentType } },
         update: {
           fileUrl: data.fileUrl,
+          mediaId: data.mediaId,
           documentNo: data.documentNo,
           status: KycStatus.SUBMITTED,
           rejectionNote: null,
@@ -192,6 +194,7 @@ export class VendorOnboardingRepository {
           userId,
           documentType,
           fileUrl: data.fileUrl,
+          mediaId: data.mediaId,
           documentNo: data.documentNo,
           status: KycStatus.SUBMITTED,
         },

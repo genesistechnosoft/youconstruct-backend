@@ -5,9 +5,17 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma, ProductStatus } from '../../../generated/prisma/client.js';
+import {
+  MediaEntityType,
+  MediaOwnerType,
+  Prisma,
+  ProductStatus,
+} from '../../../generated/prisma/client.js';
 import { paginate, paginationMeta } from '../../common/utils/pagination.util';
 import { generateSlug } from '../../common/utils/slug.util';
+import { LinkMediaDto } from '../media/dto/link-media.dto';
+import { ReorderMediaLinksDto } from '../media/dto/reorder-media-links.dto';
+import { MediaService } from '../media/media.service';
 import { BrowseProductsDto } from './dto/browse-products.dto';
 import { CreateProductDto } from './dto/create-product.dto';
 import { CreateVariantDto } from './dto/create-variant.dto';
@@ -21,7 +29,10 @@ import { ProductsRepository } from './products.repository';
 
 @Injectable()
 export class ProductsService {
-  constructor(private readonly productsRepository: ProductsRepository) {}
+  constructor(
+    private readonly productsRepository: ProductsRepository,
+    private readonly mediaService: MediaService,
+  ) {}
 
   async getMyProducts(userId: string, filters: ProductFiltersDto) {
     const vendorId = await this.getVendorId(userId);
@@ -32,14 +43,17 @@ export class ProductsService {
 
     return {
       message: 'Products fetched successfully',
-      data: items,
+      data: await this.withProductsMedia(items),
       meta: this.getMeta(filters.page, filters.limit, total),
     };
   }
 
   async getMyProduct(userId: string, productId: string) {
     const product = await this.verifyProductOwnership(userId, productId);
-    return { message: 'Product fetched successfully', data: product };
+    return {
+      message: 'Product fetched successfully',
+      data: await this.withProductMedia(product),
+    };
   }
 
   async createProduct(userId: string, dto: CreateProductDto) {
@@ -353,12 +367,146 @@ export class ProductsService {
     };
   }
 
+  async uploadProductGalleryMedia(
+    userId: string,
+    productId: string,
+    file: Express.Multer.File | undefined,
+  ) {
+    const product = await this.verifyProductOwnership(userId, productId);
+    this.ensureVendorCanMutateProduct(product.status);
+
+    return this.mediaService.uploadVendorMediaForEntity(
+      userId,
+      product.vendorId,
+      file,
+      MediaEntityType.PRODUCT,
+      productId,
+    );
+  }
+
+  async linkProductGalleryMedia(
+    userId: string,
+    productId: string,
+    dto: LinkMediaDto,
+  ) {
+    const product = await this.verifyProductOwnership(userId, productId);
+    this.ensureVendorCanMutateProduct(product.status);
+
+    return this.mediaService.linkMediaToEntity(
+      { ownerType: MediaOwnerType.VENDOR, ownerId: product.vendorId },
+      MediaEntityType.PRODUCT,
+      productId,
+      dto,
+    );
+  }
+
+  async reorderProductGalleryMedia(
+    userId: string,
+    productId: string,
+    dto: ReorderMediaLinksDto,
+  ) {
+    const product = await this.verifyProductOwnership(userId, productId);
+    this.ensureVendorCanMutateProduct(product.status);
+
+    return this.mediaService.reorderEntityMedia(
+      MediaEntityType.PRODUCT,
+      productId,
+      dto,
+    );
+  }
+
+  async unlinkProductGalleryMedia(
+    userId: string,
+    productId: string,
+    mediaId: string,
+  ) {
+    const product = await this.verifyProductOwnership(userId, productId);
+    this.ensureVendorCanMutateProduct(product.status);
+
+    return this.mediaService.unlinkMediaFromEntity(
+      MediaEntityType.PRODUCT,
+      productId,
+      mediaId,
+    );
+  }
+
+  async uploadVariantGalleryMedia(
+    userId: string,
+    productId: string,
+    variantId: string,
+    file: Express.Multer.File | undefined,
+  ) {
+    const product = await this.verifyProductOwnership(userId, productId);
+    this.ensureVendorCanMutateProduct(product.status);
+    await this.verifyVariantOwnership(userId, productId, variantId);
+
+    return this.mediaService.uploadVendorMediaForEntity(
+      userId,
+      product.vendorId,
+      file,
+      MediaEntityType.PRODUCT_VARIANT,
+      variantId,
+    );
+  }
+
+  async linkVariantGalleryMedia(
+    userId: string,
+    productId: string,
+    variantId: string,
+    dto: LinkMediaDto,
+  ) {
+    const product = await this.verifyProductOwnership(userId, productId);
+    this.ensureVendorCanMutateProduct(product.status);
+    await this.verifyVariantOwnership(userId, productId, variantId);
+
+    return this.mediaService.linkMediaToEntity(
+      { ownerType: MediaOwnerType.VENDOR, ownerId: product.vendorId },
+      MediaEntityType.PRODUCT_VARIANT,
+      variantId,
+      dto,
+    );
+  }
+
+  async reorderVariantGalleryMedia(
+    userId: string,
+    productId: string,
+    variantId: string,
+    dto: ReorderMediaLinksDto,
+  ) {
+    const product = await this.verifyProductOwnership(userId, productId);
+    this.ensureVendorCanMutateProduct(product.status);
+    await this.verifyVariantOwnership(userId, productId, variantId);
+
+    return this.mediaService.reorderEntityMedia(
+      MediaEntityType.PRODUCT_VARIANT,
+      variantId,
+      dto,
+    );
+  }
+
+  async unlinkVariantGalleryMedia(
+    userId: string,
+    productId: string,
+    variantId: string,
+    mediaId: string,
+  ) {
+    const product = await this.verifyProductOwnership(userId, productId);
+    this.ensureVendorCanMutateProduct(product.status);
+    await this.verifyVariantOwnership(userId, productId, variantId);
+
+    return this.mediaService.unlinkMediaFromEntity(
+      MediaEntityType.PRODUCT_VARIANT,
+      variantId,
+      mediaId,
+    );
+  }
+
   async browseProducts(filters: BrowseProductsDto) {
     const { items, total } = await this.productsRepository.findPublic(filters);
 
     return {
       message: 'Products fetched successfully',
-      data: items,
+      data: await this.withProductsMedia(items),
       meta: this.getMeta(filters.page, filters.limit, total),
     };
   }
@@ -369,7 +517,10 @@ export class ProductsService {
       throw new NotFoundException('Product not found');
     }
 
-    return { message: 'Product fetched successfully', data: product };
+    return {
+      message: 'Product fetched successfully',
+      data: await this.withProductMedia(product),
+    };
   }
 
   async getAllProducts(filters: ProductFiltersDto) {
@@ -378,7 +529,7 @@ export class ProductsService {
 
     return {
       message: 'Products fetched successfully',
-      data: items,
+      data: await this.withProductsMedia(items),
       meta: this.getMeta(filters.page, filters.limit, total),
     };
   }
@@ -389,7 +540,10 @@ export class ProductsService {
       throw new NotFoundException('Product not found');
     }
 
-    return { message: 'Product fetched successfully', data: product };
+    return {
+      message: 'Product fetched successfully',
+      data: await this.withProductMedia(product),
+    };
   }
 
   async approveProduct(id: string) {
@@ -501,9 +655,13 @@ export class ProductsService {
   }
 
   private async validateProductCanGoLive(productId: string) {
-    const [activeVariants, defaultVariants] = await Promise.all([
+    const [activeVariants, defaultVariants, galleryImages] = await Promise.all([
       this.productsRepository.countActiveVariants(productId),
       this.productsRepository.countActiveDefaultVariants(productId),
+      this.mediaService.countReadyGalleryLinks(
+        MediaEntityType.PRODUCT,
+        productId,
+      ),
     ]);
 
     if (activeVariants === 0) {
@@ -515,6 +673,12 @@ export class ProductsService {
     if (defaultVariants !== 1) {
       throw new BadRequestException(
         'Product must have exactly one active default variant',
+      );
+    }
+
+    if (galleryImages === 0) {
+      throw new BadRequestException(
+        'Product must have at least one ready gallery image',
       );
     }
   }
@@ -622,5 +786,36 @@ export class ProductsService {
   private getMeta(page: number, limit: number, total: number) {
     const { take } = paginate(page, limit);
     return paginationMeta(page, take, total);
+  }
+
+  private async withProductsMedia<T extends { id: string }>(products: T[]) {
+    return Promise.all(
+      products.map((product) => this.withProductMedia(product)),
+    );
+  }
+
+  private async withProductMedia<
+    T extends { id: string; variants?: { id: string }[] },
+  >(product: T) {
+    const media = await this.mediaService.getEntityGallery(
+      MediaEntityType.PRODUCT,
+      product.id,
+    );
+
+    if (!product.variants) {
+      return { ...product, media };
+    }
+
+    const variants = await Promise.all(
+      product.variants.map(async (variant) => ({
+        ...variant,
+        media: await this.mediaService.getEntityGallery(
+          MediaEntityType.PRODUCT_VARIANT,
+          variant.id,
+        ),
+      })),
+    );
+
+    return { ...product, media, variants };
   }
 }

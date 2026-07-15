@@ -1,0 +1,630 @@
+import {
+  BadRequestException,
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
+import { InjectQueue } from '@nestjs/bullmq';
+import { Queue } from 'bullmq';
+import { randomUUID } from 'node:crypto';
+import { extname } from 'node:path';
+import sharp from 'sharp';
+import {
+  MediaAccessLevel,
+  MediaContext,
+  MediaEntityType,
+  MediaFileType,
+  MediaOwnerType,
+  MediaProcessingJobType,
+  MediaProcessingStatus,
+} from '../../../generated/prisma/client.js';
+import { paginationMeta } from '../../common/utils/pagination.util';
+import { MEDIA_PROCESSING_QUEUE } from '../../queue/queue.constants';
+import { StorageService } from '../../storage/storage.service';
+import { CreateMediaFolderDto } from './dto/create-media-folder.dto';
+import { LinkMediaDto } from './dto/link-media.dto';
+import { MediaFiltersDto } from './dto/media-filters.dto';
+import { ReorderMediaLinksDto } from './dto/reorder-media-links.dto';
+import { UpdateMediaDto } from './dto/update-media.dto';
+import { UpdateMediaFolderDto } from './dto/update-media-folder.dto';
+import { UploadMediaDto } from './dto/upload-media.dto';
+import { MediaRepository } from './media.repository';
+
+const IMAGE_MIME_TYPES = new Set([
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+  'image/gif',
+]);
+const VIDEO_MIME_TYPES = new Set(['video/mp4', 'video/quicktime']);
+const DOCUMENT_MIME_TYPES = new Set(['application/pdf']);
+
+const IMAGE_LIMIT_BYTES = 10 * 1024 * 1024;
+const VIDEO_LIMIT_BYTES = 200 * 1024 * 1024;
+const DOCUMENT_LIMIT_BYTES = 20 * 1024 * 1024;
+
+export interface MediaOwner {
+  ownerType: MediaOwnerType;
+  ownerId: string;
+}
+
+@Injectable()
+export class MediaService {
+  constructor(
+    private readonly mediaRepository: MediaRepository,
+    private readonly storageService: StorageService,
+    @InjectQueue(MEDIA_PROCESSING_QUEUE)
+    private readonly mediaQueue: Queue,
+  ) {}
+
+  async listVendorMedia(userId: string, filters: MediaFiltersDto) {
+    const owner = await this.getApprovedVendorOwner(userId);
+    const { items, total } = await this.mediaRepository.findManyMedia(
+      owner.ownerType,
+      owner.ownerId,
+      filters,
+    );
+
+    return {
+      message: 'Media fetched successfully',
+      data: await Promise.all(items.map((media) => this.withUrls(media))),
+      meta: paginationMeta(filters.page ?? 1, filters.limit ?? 20, total),
+    };
+  }
+
+  async uploadVendorMedia(
+    userId: string,
+    file: Express.Multer.File | undefined,
+    dto: UploadMediaDto,
+  ) {
+    const owner = await this.getApprovedVendorOwner(userId);
+    const media = await this.uploadMedia({
+      userId,
+      owner,
+      file,
+      folderId: dto.folderId,
+      accessLevel: dto.accessLevel ?? MediaAccessLevel.PUBLIC,
+      keyPrefix: `vendors/${owner.ownerId}/media`,
+      allowedFileTypes: [MediaFileType.IMAGE, MediaFileType.VIDEO],
+    });
+
+    return {
+      message: 'Media uploaded successfully',
+      data: await this.withUrls(media),
+    };
+  }
+
+  async uploadVendorMediaForEntity(
+    userId: string,
+    vendorId: string,
+    file: Express.Multer.File | undefined,
+    entityType: MediaEntityType,
+    entityId: string,
+  ) {
+    await this.ensureVendorMatchesUser(userId, vendorId);
+    const media = await this.uploadMedia({
+      userId,
+      owner: { ownerType: MediaOwnerType.VENDOR, ownerId: vendorId },
+      file,
+      accessLevel: MediaAccessLevel.PUBLIC,
+      keyPrefix: `vendors/${vendorId}/media`,
+      allowedFileTypes: [MediaFileType.IMAGE, MediaFileType.VIDEO],
+    });
+
+    await this.linkMediaToEntity(
+      { ownerType: MediaOwnerType.VENDOR, ownerId: vendorId },
+      entityType,
+      entityId,
+      { mediaIds: [media.id] },
+    );
+
+    return {
+      message: 'Media uploaded and linked successfully',
+      data: await this.withUrls(media),
+    };
+  }
+
+  async uploadPrivateDocument(
+    userId: string,
+    owner: MediaOwner,
+    file: Express.Multer.File | undefined,
+    keyPrefix: string,
+  ) {
+    return this.uploadMedia({
+      userId,
+      owner,
+      file,
+      accessLevel: MediaAccessLevel.PRIVATE,
+      keyPrefix,
+      allowedFileTypes: [MediaFileType.DOCUMENT],
+    });
+  }
+
+  async listVendorFolders(userId: string) {
+    const owner = await this.getApprovedVendorOwner(userId);
+    const folders = await this.mediaRepository.listFolders(
+      owner.ownerType,
+      owner.ownerId,
+    );
+
+    return { message: 'Media folders fetched successfully', data: folders };
+  }
+
+  async createVendorFolder(userId: string, dto: CreateMediaFolderDto) {
+    const owner = await this.getApprovedVendorOwner(userId);
+    await this.validateFolderParent(owner, dto.parentId);
+
+    const folder = await this.mediaRepository.createFolder({
+      ownerType: owner.ownerType,
+      ownerId: owner.ownerId,
+      name: dto.name,
+      parentId: dto.parentId,
+    });
+
+    return { message: 'Media folder created successfully', data: folder };
+  }
+
+  async updateVendorFolder(
+    userId: string,
+    folderId: string,
+    dto: UpdateMediaFolderDto,
+  ) {
+    const owner = await this.getApprovedVendorOwner(userId);
+    await this.getFolderOrThrow(owner, folderId);
+
+    if (dto.parentId === folderId) {
+      throw new BadRequestException('Folder cannot be moved into itself');
+    }
+
+    if (dto.parentId !== undefined) {
+      await this.validateFolderParent(owner, dto.parentId);
+    }
+
+    const folder = await this.mediaRepository.updateFolder(folderId, {
+      ...(dto.name !== undefined && { name: dto.name }),
+      ...(dto.parentId !== undefined && { parentId: dto.parentId }),
+    });
+
+    return { message: 'Media folder updated successfully', data: folder };
+  }
+
+  async deleteVendorFolder(userId: string, folderId: string) {
+    const owner = await this.getApprovedVendorOwner(userId);
+    await this.getFolderOrThrow(owner, folderId);
+
+    const [mediaCount, childCount] = await Promise.all([
+      this.mediaRepository.countFolderMedia(folderId),
+      this.mediaRepository.countFolderChildren(folderId),
+    ]);
+
+    if (mediaCount > 0 || childCount > 0) {
+      throw new BadRequestException(
+        'Folder cannot be deleted while it contains media or subfolders',
+      );
+    }
+
+    await this.mediaRepository.softDeleteFolder(folderId);
+    return { message: 'Media folder deleted successfully', data: null };
+  }
+
+  async updateVendorMedia(
+    userId: string,
+    mediaId: string,
+    dto: UpdateMediaDto,
+  ) {
+    const owner = await this.getApprovedVendorOwner(userId);
+    await this.getMediaOrThrow(owner, mediaId);
+
+    if (dto.folderId !== undefined) {
+      await this.validateFolderParent(owner, dto.folderId);
+    }
+
+    const media = await this.mediaRepository.updateMedia(mediaId, {
+      ...(dto.fileName !== undefined && { fileName: dto.fileName }),
+      ...(dto.folderId !== undefined && { folderId: dto.folderId }),
+    });
+
+    return {
+      message: 'Media updated successfully',
+      data: await this.withUrls(media),
+    };
+  }
+
+  async deleteVendorMedia(userId: string, mediaId: string) {
+    const owner = await this.getApprovedVendorOwner(userId);
+    const media = await this.getMediaOrThrow(owner, mediaId);
+    const activeLinks = await this.mediaRepository.countActiveLinks(mediaId);
+
+    if (activeLinks > 0) {
+      throw new BadRequestException(
+        'Media is linked to an entity. Unlink it before deleting',
+      );
+    }
+
+    await this.mediaRepository.softDeleteMedia(mediaId);
+    await this.deleteStoredObjects(media);
+    await this.mediaRepository.decrementVendorStorageUsed(
+      owner.ownerId,
+      media.sizeBytes,
+    );
+
+    return { message: 'Media deleted successfully', data: null };
+  }
+
+  async linkMediaToEntity(
+    owner: MediaOwner,
+    entityType: MediaEntityType,
+    entityId: string,
+    dto: LinkMediaDto,
+  ) {
+    const media = await this.mediaRepository.findMediaByIds(
+      owner.ownerType,
+      owner.ownerId,
+      dto.mediaIds,
+    );
+
+    if (media.length !== dto.mediaIds.length) {
+      throw new NotFoundException('One or more media records were not found');
+    }
+
+    const links = await this.mediaRepository.createLinks(
+      dto.mediaIds,
+      entityType,
+      entityId,
+      MediaContext.GALLERY,
+    );
+
+    return {
+      message: 'Media linked successfully',
+      data: await Promise.all(
+        links.map((link) => this.withMediaLinkUrls(link)),
+      ),
+    };
+  }
+
+  async unlinkMediaFromEntity(
+    entityType: MediaEntityType,
+    entityId: string,
+    mediaId: string,
+  ) {
+    await this.mediaRepository.softDeleteLink(
+      mediaId,
+      entityType,
+      entityId,
+      MediaContext.GALLERY,
+    );
+
+    return { message: 'Media unlinked successfully', data: null };
+  }
+
+  async reorderEntityMedia(
+    entityType: MediaEntityType,
+    entityId: string,
+    dto: ReorderMediaLinksDto,
+  ) {
+    const links = await this.mediaRepository.reorderLinks(
+      entityType,
+      entityId,
+      dto.items,
+    );
+
+    return {
+      message: 'Media links reordered successfully',
+      data: await Promise.all(
+        links.map((link) => this.withMediaLinkUrls(link)),
+      ),
+    };
+  }
+
+  countReadyGalleryLinks(entityType: MediaEntityType, entityId: string) {
+    return this.mediaRepository.countReadyLinks(entityType, entityId);
+  }
+
+  async getEntityGallery(entityType: MediaEntityType, entityId: string) {
+    const links = await this.mediaRepository.findLinks(
+      entityType,
+      entityId,
+      MediaContext.GALLERY,
+    );
+
+    return Promise.all(links.map((link) => this.withMediaLinkUrls(link)));
+  }
+
+  async withUrls<
+    T extends {
+      originalKey: string;
+      optimizedKey: string | null;
+      thumbnailKey: string | null;
+      accessLevel: MediaAccessLevel;
+    },
+  >(media: T) {
+    return {
+      ...media,
+      originalUrl: await this.storageService.getUrl(
+        media.originalKey,
+        media.accessLevel,
+      ),
+      optimizedUrl: media.optimizedKey
+        ? await this.storageService.getUrl(
+            media.optimizedKey,
+            media.accessLevel,
+          )
+        : null,
+      thumbnailUrl: media.thumbnailKey
+        ? await this.storageService.getUrl(
+            media.thumbnailKey,
+            media.accessLevel,
+          )
+        : null,
+    };
+  }
+
+  private async uploadMedia(input: {
+    userId: string;
+    owner: MediaOwner;
+    file: Express.Multer.File | undefined;
+    folderId?: string;
+    accessLevel: MediaAccessLevel;
+    keyPrefix: string;
+    allowedFileTypes: MediaFileType[];
+  }) {
+    if (!input.file) {
+      throw new BadRequestException('File is required');
+    }
+
+    if (input.folderId) {
+      await this.validateFolderParent(input.owner, input.folderId);
+    }
+
+    const fileType = this.getFileType(input.file);
+    if (!input.allowedFileTypes.includes(fileType)) {
+      throw new BadRequestException('File type is not allowed for this upload');
+    }
+
+    this.validateFileSize(input.file, fileType);
+    this.validateMagicBytes(input.file, fileType);
+
+    const id = randomUUID();
+    const extension = this.getExtension(
+      input.file.originalname,
+      input.file.mimetype,
+    );
+    const originalKey = `${input.keyPrefix}/${id}/original${extension}`;
+    const dimensions =
+      fileType === MediaFileType.IMAGE
+        ? await this.getImageDimensions(input.file.buffer)
+        : {};
+
+    await this.storageService.putObject(
+      originalKey,
+      input.file.buffer,
+      input.file.mimetype,
+    );
+
+    const media = await this.mediaRepository.createMedia({
+      id,
+      uploadedBy: input.userId,
+      ownerType: input.owner.ownerType,
+      ownerId: input.owner.ownerId,
+      folderId: input.folderId,
+      fileName: this.toDisplayName(input.file.originalname),
+      originalName: input.file.originalname,
+      fileType,
+      mimeType: input.file.mimetype,
+      sizeBytes: input.file.size,
+      storageDriver: this.storageService.driver,
+      originalKey,
+      accessLevel: input.accessLevel,
+      processingStatus:
+        fileType === MediaFileType.IMAGE
+          ? MediaProcessingStatus.PROCESSING
+          : MediaProcessingStatus.READY,
+      ...dimensions,
+    });
+
+    if (input.owner.ownerType === MediaOwnerType.VENDOR) {
+      await this.mediaRepository.incrementVendorStorageUsed(
+        input.owner.ownerId,
+        input.file.size,
+      );
+    }
+
+    if (fileType === MediaFileType.IMAGE) {
+      await this.queueImageProcessingJobs(media.id);
+    }
+
+    return media;
+  }
+
+  private async queueImageProcessingJobs(mediaId: string) {
+    const jobTypes = [
+      MediaProcessingJobType.IMAGE_COMPRESS,
+      MediaProcessingJobType.THUMBNAIL_GENERATE,
+    ];
+
+    await Promise.all(
+      jobTypes.map(async (jobType) => {
+        const job = await this.mediaRepository.createProcessingJob({
+          mediaId,
+          jobType,
+        });
+        await this.mediaQueue.add(
+          jobType,
+          { processingJobId: job.id, mediaId },
+          {
+            attempts: 3,
+            backoff: { type: 'exponential', delay: 2000 },
+          },
+        );
+      }),
+    );
+  }
+
+  private async getApprovedVendorOwner(userId: string): Promise<MediaOwner> {
+    const vendor =
+      await this.mediaRepository.findApprovedVendorByUserId(userId);
+    if (!vendor) {
+      throw new ForbiddenException('Approved vendor profile required');
+    }
+
+    return { ownerType: MediaOwnerType.VENDOR, ownerId: vendor.id };
+  }
+
+  private async ensureVendorMatchesUser(userId: string, vendorId: string) {
+    const owner = await this.getApprovedVendorOwner(userId);
+    if (owner.ownerId !== vendorId) {
+      throw new ForbiddenException('Vendor media owner mismatch');
+    }
+  }
+
+  private async validateFolderParent(owner: MediaOwner, folderId?: string) {
+    if (!folderId) {
+      return;
+    }
+
+    await this.getFolderOrThrow(owner, folderId);
+  }
+
+  private async getFolderOrThrow(owner: MediaOwner, folderId: string) {
+    const folder = await this.mediaRepository.findFolderByOwner(
+      folderId,
+      owner.ownerType,
+      owner.ownerId,
+    );
+    if (!folder) {
+      throw new NotFoundException('Media folder not found');
+    }
+
+    return folder;
+  }
+
+  private async getMediaOrThrow(owner: MediaOwner, mediaId: string) {
+    const media = await this.mediaRepository.findMediaByOwner(
+      mediaId,
+      owner.ownerType,
+      owner.ownerId,
+    );
+    if (!media) {
+      throw new NotFoundException('Media not found');
+    }
+
+    return media;
+  }
+
+  private async withMediaLinkUrls<
+    T extends { media: Parameters<MediaService['withUrls']>[0] },
+  >(link: T) {
+    return { ...link, media: await this.withUrls(link.media) };
+  }
+
+  private getFileType(file: Express.Multer.File) {
+    if (IMAGE_MIME_TYPES.has(file.mimetype)) {
+      return MediaFileType.IMAGE;
+    }
+    if (VIDEO_MIME_TYPES.has(file.mimetype)) {
+      return MediaFileType.VIDEO;
+    }
+    if (DOCUMENT_MIME_TYPES.has(file.mimetype)) {
+      return MediaFileType.DOCUMENT;
+    }
+
+    throw new BadRequestException('Unsupported file type');
+  }
+
+  private validateFileSize(file: Express.Multer.File, fileType: MediaFileType) {
+    const limit =
+      fileType === MediaFileType.IMAGE
+        ? IMAGE_LIMIT_BYTES
+        : fileType === MediaFileType.VIDEO
+          ? VIDEO_LIMIT_BYTES
+          : DOCUMENT_LIMIT_BYTES;
+
+    if (file.size > limit) {
+      throw new BadRequestException('File exceeds the allowed size limit');
+    }
+  }
+
+  private validateMagicBytes(
+    file: Express.Multer.File,
+    fileType: MediaFileType,
+  ) {
+    const buffer = file.buffer;
+    const isValid =
+      fileType === MediaFileType.IMAGE
+        ? this.hasImageSignature(buffer, file.mimetype)
+        : fileType === MediaFileType.VIDEO
+          ? buffer.subarray(4, 8).toString('ascii') === 'ftyp'
+          : buffer.subarray(0, 4).toString('ascii') === '%PDF';
+
+    if (!isValid) {
+      throw new BadRequestException('File content does not match its type');
+    }
+  }
+
+  private hasImageSignature(buffer: Buffer, mimeType: string) {
+    if (mimeType === 'image/jpeg') {
+      return buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+    }
+    if (mimeType === 'image/png') {
+      return buffer
+        .subarray(0, 8)
+        .equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+    }
+    if (mimeType === 'image/webp') {
+      return (
+        buffer.subarray(0, 4).toString('ascii') === 'RIFF' &&
+        buffer.subarray(8, 12).toString('ascii') === 'WEBP'
+      );
+    }
+    if (mimeType === 'image/gif') {
+      return buffer.subarray(0, 3).toString('ascii') === 'GIF';
+    }
+
+    return false;
+  }
+
+  private async getImageDimensions(buffer: Buffer) {
+    try {
+      const metadata = await sharp(buffer).metadata();
+      return { width: metadata.width, height: metadata.height };
+    } catch {
+      return {};
+    }
+  }
+
+  private getExtension(originalName: string, mimeType: string) {
+    const extension = extname(originalName).toLowerCase();
+    if (extension) {
+      return extension;
+    }
+
+    const fallback: Record<string, string> = {
+      'image/jpeg': '.jpg',
+      'image/png': '.png',
+      'image/webp': '.webp',
+      'image/gif': '.gif',
+      'video/mp4': '.mp4',
+      'video/quicktime': '.mov',
+      'application/pdf': '.pdf',
+    };
+
+    return fallback[mimeType] ?? '';
+  }
+
+  private toDisplayName(originalName: string) {
+    return originalName.replace(/\.[^/.]+$/, '');
+  }
+
+  private async deleteStoredObjects(media: {
+    originalKey: string;
+    optimizedKey: string | null;
+    thumbnailKey: string | null;
+  }) {
+    const keys = [
+      media.originalKey,
+      media.optimizedKey,
+      media.thumbnailKey,
+    ].filter((key): key is string => Boolean(key));
+    await Promise.all(keys.map((key) => this.storageService.deleteObject(key)));
+  }
+}
