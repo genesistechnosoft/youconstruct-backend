@@ -17,7 +17,9 @@
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
-    "test:e2e": "jest --config ./test/jest-e2e.json"
+    "test:e2e": "jest --config ./test/jest-e2e.json",
+    "db:reset:dev": "prisma migrate reset --force",
+    "bootstrap:super-admin": "ts-node -r ./prisma/register.cjs prisma/bootstrap-super-admin.ts"
   },
   "prisma": {
     "seed": "ts-node -r ./prisma/register.cjs prisma/seed.ts"

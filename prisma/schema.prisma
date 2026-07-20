@@ -17,11 +17,31 @@ datasource db {
 // ENUMS
 // ─────────────────────────────────────────────
 
-enum UserRole {
+enum PlatformRole {
+  SUPER_ADMIN
+  ADMIN
+  SUPPORT
   CUSTOMER
   VENDOR
   PROFESSIONAL
+}
+
+enum PermissionScope {
   ADMIN
+  VENDOR
+  PROFESSIONAL
+}
+
+enum TeamMemberStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum InvitationStatus {
+  PENDING
+  ACCEPTED
+  REVOKED
+  EXPIRED
 }
 
 enum AuthProvider {
@@ -102,6 +122,8 @@ enum MediaOwnerType {
   VENDOR
   PROFESSIONAL
   ADMIN
+  /// Compliance / KYC docs owned by the user, never listed in store media libraries
+  USER
 }
 
 enum MediaAccessLevel {
@@ -174,7 +196,7 @@ model User {
   email           String?      @unique
   phone           String?      @unique
   passwordHash    String?
-  role            UserRole     @default(CUSTOMER)
+  platformRole    PlatformRole @default(CUSTOMER)
   provider        AuthProvider @default(EMAIL)
   googleId        String?      @unique
   avatarUrl       String?
@@ -182,19 +204,169 @@ model User {
   isPhoneVerified Boolean      @default(false)
   isActive        Boolean      @default(true)
   fcmToken        String?
+  /// MFA-ready fields (MFA not required yet; reserved for future platform staff hardening)
+  mfaEnabled      Boolean      @default(false)
+  mfaSecret       String?
+  mfaBackupCodes  String[]     @default([])
+  mfaVerifiedAt   DateTime?
   createdAt       DateTime     @default(now())
   updatedAt       DateTime     @updatedAt
   deletedAt       DateTime?
 
-  addresses           Address[]
-  refreshTokens       RefreshToken[]
-  otpVerifications    OtpVerification[]
-  kycDocuments        KycDocument[]
-  uploadedMedia       Media[]
-  vendorProfile       VendorProfile?
-  professionalProfile ProfessionalProfile?
+  addresses              Address[]
+  refreshTokens          RefreshToken[]
+  otpVerifications       OtpVerification[]
+  kycDocuments           KycDocument[]
+  uploadedMedia          Media[]
+  vendorProfile          VendorProfile?
+  professionalProfile    ProfessionalProfile?
+  customRolesCreated     CustomRole[]         @relation("CustomRolesCreated")
+  teamMemberships        TeamMember[]
+  invitationsSent        Invitation[]         @relation("InvitationsSent")
+  impersonationsAsAdmin  ImpersonationLog[]   @relation("ImpersonationAdmin")
+  impersonationsAsTarget ImpersonationLog[]   @relation("ImpersonationTarget")
+  auditLogsAsActor       SecurityAuditLog[]   @relation("SecurityAuditActor")
 
   @@map("users")
+}
+
+model Permission {
+  id          String          @id @default(uuid())
+  key         String
+  name        String
+  group       String
+  scope       PermissionScope
+  description String?
+  isElevated  Boolean         @default(false)
+  createdAt   DateTime        @default(now())
+
+  rolePermissions RolePermission[]
+
+  @@unique([scope, key])
+  @@index([scope])
+  @@index([scope, group])
+  @@map("permissions")
+}
+
+model CustomRole {
+  id            String          @id @default(uuid())
+  name          String
+  scope         PermissionScope
+  scopeEntityId String?
+  isSystem      Boolean         @default(false)
+  createdById   String?
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+  deletedAt     DateTime?
+
+  createdBy       User?            @relation("CustomRolesCreated", fields: [createdById], references: [id])
+  rolePermissions RolePermission[]
+  teamMembers     TeamMember[]
+  invitations     Invitation[]
+
+  @@index([scope, scopeEntityId])
+  @@map("custom_roles")
+}
+
+model RolePermission {
+  id           String   @id @default(uuid())
+  customRoleId String
+  permissionId String
+  createdAt    DateTime @default(now())
+
+  customRole CustomRole @relation(fields: [customRoleId], references: [id])
+  permission Permission @relation(fields: [permissionId], references: [id])
+
+  @@unique([customRoleId, permissionId])
+  @@map("role_permissions")
+}
+
+model TeamMember {
+  id            String           @id @default(uuid())
+  userId        String
+  customRoleId  String
+  scope         PermissionScope
+  scopeEntityId String?
+  status        TeamMemberStatus @default(ACTIVE)
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+  deletedAt     DateTime?
+
+  user       User       @relation(fields: [userId], references: [id])
+  customRole CustomRole @relation(fields: [customRoleId], references: [id])
+
+  @@index([userId])
+  @@index([scope, scopeEntityId])
+  @@map("team_members")
+}
+
+model Invitation {
+  id            String           @id @default(uuid())
+  email         String
+  tokenHash     String           @unique
+  customRoleId  String
+  scope         PermissionScope
+  scopeEntityId String?
+  invitedById   String
+  acceptedById  String?
+  platformRole  PlatformRole?
+  status        InvitationStatus @default(PENDING)
+  expiresAt     DateTime
+  acceptedAt    DateTime?
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+
+  customRole CustomRole @relation(fields: [customRoleId], references: [id])
+  invitedBy  User       @relation("InvitationsSent", fields: [invitedById], references: [id])
+
+  @@index([email, status])
+  @@index([acceptedById])
+  @@index([scope, scopeEntityId])
+  @@map("invitations")
+}
+
+model ImpersonationLog {
+  id           String   @id @default(uuid())
+  adminId      String
+  targetUserId String
+  action       String
+  method       String?
+  path         String?
+  ip           String?
+  userAgent    String?
+  createdAt    DateTime @default(now())
+
+  admin  User @relation("ImpersonationAdmin", fields: [adminId], references: [id])
+  target User @relation("ImpersonationTarget", fields: [targetUserId], references: [id])
+
+  @@index([adminId, createdAt])
+  @@index([targetUserId, createdAt])
+  @@map("impersonation_logs")
+}
+
+model SecurityAuditLog {
+  id             String        @id @default(uuid())
+  actorUserId    String?
+  actorRole      PlatformRole?
+  targetUserId   String?
+  targetType     String?
+  targetId       String?
+  action         String
+  result         String
+  method         String?
+  path           String?
+  ip             String?
+  userAgent      String?
+  metadata       Json?
+  impersonatedBy String?
+  createdAt      DateTime      @default(now())
+
+  actor User? @relation("SecurityAuditActor", fields: [actorUserId], references: [id])
+
+  @@index([actorUserId, createdAt])
+  @@index([targetType, targetId, createdAt])
+  @@index([action, createdAt])
+  @@map("security_audit_logs")
 }
 
 model Address {

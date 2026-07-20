@@ -9,14 +9,15 @@ import {
   Patch,
   Post,
   Query,
-  UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { PermissionScope } from '../../../generated/prisma/client.js';
+import { Permissions } from '../../common/decorators/permissions.decorator';
 import { Public } from '../../common/decorators/public.decorator';
-import { Roles, UserRole } from '../../common/decorators/roles.decorator';
-import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
-import { RolesGuard } from '../../common/guards/roles.guard';
+import { RequireActiveContext } from '../../common/decorators/require-active-context.decorator';
+import { PlatformRole, Roles } from '../../common/decorators/roles.decorator';
 import { PaginationQueryDto } from '../../common/dto/pagination-query.dto';
+import { PERMISSIONS } from '../rbac/permissions.constants';
 import { CategoriesService } from './categories.service';
 import { CreateCategoryDto } from './dto/create-category.dto';
 import { UpdateCategoryDto } from './dto/update-category.dto';
@@ -44,8 +45,9 @@ export class CategoriesController {
 
 @ApiTags('Admin - Categories')
 @Controller('admin/categories')
-@UseGuards(JwtAuthGuard, RolesGuard)
-@Roles(UserRole.ADMIN)
+@Roles(PlatformRole.ADMIN, PlatformRole.SUPPORT)
+@RequireActiveContext(PermissionScope.ADMIN)
+@Permissions(PERMISSIONS.ADMIN.CATALOG_MANAGE)
 @ApiBearerAuth()
 export class AdminCategoriesController {
   constructor(private readonly categoriesService: CategoriesService) {}

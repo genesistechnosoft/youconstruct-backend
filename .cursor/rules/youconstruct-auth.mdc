@@ -1,37 +1,120 @@
 ---
 description: JWT auth, roles, guards, and OTP conventions
-globs: src/modules/auth/**,src/common/guards/**,src/common/decorators/**
+globs: src/modules/auth/**,src/common/guards/**,src/common/decorators/**,src/modules/rbac/**
 alwaysApply: false
 ---
 
-# Auth
+# Auth & RBAC
 
 ```typescript
-enum UserRole {
+enum PlatformRole {
+  SUPER_ADMIN = 'SUPER_ADMIN',
+  ADMIN = 'ADMIN',
+  SUPPORT = 'SUPPORT',
   CUSTOMER = 'CUSTOMER',
   VENDOR = 'VENDOR',
   PROFESSIONAL = 'PROFESSIONAL',
-  ADMIN = 'ADMIN',
 }
 ```
 
-- Protect routes: `@UseGuards(JwtAuthGuard)`
-- Role routes: `@UseGuards(JwtAuthGuard, RolesGuard)` + `@Roles(UserRole.VENDOR)`
-- Current user: `@CurrentUser()` decorator
+## One identity per email
 
-## Tokens
+- One email = one lane: customer **or** store **or** professional **or** admin — never combine.
+- Owners and staff share the same platform role (`VENDOR` / `PROFESSIONAL` / `ADMIN` / `SUPPORT`).
+- Owner = has `VendorProfile` / `ProfessionalProfile` + system Owner membership (full access in own entity).
+- Staff = same `platformRole`, **no** profile, one `TeamMember` + custom role.
+- At most one active `TeamMember` per user.
+- Customer APIs are `CUSTOMER`-only with ownership checks (no RBAC permissions).
 
-| Token | Expiry | Storage |
-|---|---|---|
-| Access | 15 min | Stateless JWT |
-| Refresh | 30 days | `refresh_tokens` table, rotated on every use |
+## Login endpoints
 
-JWT payload only: `{ userId, role, vendorId? }` — no sensitive data.
+- `POST /auth/login` — customer app (`CUSTOMER` only)
+- `POST /auth/dashboard/login` — dashboard (`VENDOR`, `PROFESSIONAL`, `ADMIN`, `SUPPORT`, `SUPER_ADMIN`)
+
+## Guard chain
+
+```
+Throttler → JwtAuthGuard → RolesGuard → PermissionsGuard → ActiveContextGuard → OwnerOnlyGuard → OnboardingOnlyGuard
+```
+
+- `@Public()` — skip JWT
+- `@Roles(PlatformRole.ADMIN)` — platform role; `SUPER_ADMIN` always passes
+- `@Permissions('products:create')` — required for `/vendor|/admin|/professional` routes (default-deny)
+- `@OwnerOnly()` — business owner only (or Super Admin)
+- `@OnboardingOnly()` — pre-approval owner onboarding routes only
+- `@RequireActiveContext(PermissionScope.VENDOR)` — matching server-derived context
+- Owner system role = full access in own vendor/professional entity (not Platform Admin)
+- `SUPER_ADMIN` = only unrestricted platform principal
+- `@CurrentUser()` → `AuthenticatedUser`
+
+## JWT (identity-only)
+
+`{ userId, platformRole, impersonatedBy?, isImpersonation? }`
+
+Never trust permissions or business context from the JWT.
+`activeContext` is resolved server-side on every request from DB membership/owner state.
+
+Vendor staff resolve store via `activeContext.entityId` (not `userId`).
+Pre-approval vendors: onboarding-only until approved; Owner membership created on approval.
+
+## Session (frontend)
+
+Auth success (login / dashboard login / register / refresh / OTP verify) returns:
+
+`{ accessToken, refreshToken, session }`
+
+`GET /auth/session` returns the same `session` object (for app boot / hard refresh).
+
+```typescript
+session: {
+  user: { id, name, email, platformRole },
+  activeContext: { type, entityId, customRoleId, roleName, isOwner } | null,
+  permissions: string[], // concrete keys; Owner = all scope keys; SUPER_ADMIN = all ADMIN keys
+  flags: { needsOnboarding, isImpersonating }
+}
+```
+
+- No top-level `activeContext` on auth responses (use `session.activeContext`)
+- No sidebar/menu from API — frontend maps `permissions` + flags to nav
+- `needsOnboarding`: VENDOR/PROFESSIONAL with no context
+- Impersonation start also returns `session` for the target (`flags.isImpersonating: true`)
+
+## Context
+
+- `GET /auth/contexts` — returns the single derived context (no switch)
+- Context switching is disabled
+
+## Impersonation
+
+`POST /admin/impersonate/:userId` — Super Admin or elevated Admin (`users:impersonate`).
+15m token, no refresh, cannot target platform staff, no nested impersonation.
+Response includes target `session`. Audit start success/failure and every API call success/failure.
+
+## Elevated permissions
+
+Only in ADMIN scope. Only Super Admin may assign `isElevated` permissions.
+
+## Invitations
+
+- Vendor/professional staff: invite-only
+- Platform staff: Super Admin invite only; recipient sets password
+- Existing same-lane users accept while logged in (`POST /invitations/accept-existing`)
+- Tokens hashed (SHA-256), single-use, expiring
 
 ## OTP
 
-6-digit numeric · 5 min expiry · max 3 attempts before lockout
+6-digit numeric · 5 min expiry · max 3 failed attempts across recent OTP rows (15m window)
+New OTP send cannot reset lockout.
 
-## Security on auth endpoints
+## Bootstrap / seed
 
-Rate limit login, OTP send, and OTP verify. Never log passwords or tokens.
+- Demo seed: requires `SEED_ALLOW_DEV_RESET=true`, blocked in production
+- Password overwrite on seed only if `SEED_RESET_PASSWORDS=true`
+- Production bootstrap: `pnpm bootstrap:super-admin` with `BOOTSTRAP_SUPER_ADMIN=true`
+- Never reset existing SUPER_ADMIN password via bootstrap
+
+## Security
+
+Rate limit login, OTP send, OTP verify, register. Never log passwords or tokens.
+`SUPER_ADMIN`, `ADMIN`, `SUPPORT` cannot self-register.
+Identical login failure messages (no account-status enumeration).

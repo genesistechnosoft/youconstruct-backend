@@ -10,7 +10,6 @@ import {
   Post,
   Query,
   UploadedFile,
-  UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
@@ -22,11 +21,15 @@ import {
   ApiTags,
 } from '@nestjs/swagger';
 import { memoryStorage } from 'multer';
+import { PermissionScope } from '../../../generated/prisma/client.js';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import { Permissions } from '../../common/decorators/permissions.decorator';
 import { Public } from '../../common/decorators/public.decorator';
-import { Roles, UserRole } from '../../common/decorators/roles.decorator';
-import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
-import { RolesGuard } from '../../common/guards/roles.guard';
+import { RequireActiveContext } from '../../common/decorators/require-active-context.decorator';
+import { PlatformRole, Roles } from '../../common/decorators/roles.decorator';
+import type { AuthenticatedUser } from '../../common/types/auth-user.type';
+import { requireVendorEntityId } from '../../common/utils/active-context.util';
+import { PERMISSIONS } from '../rbac/permissions.constants';
 import { LinkMediaDto } from '../media/dto/link-media.dto';
 import { ReorderMediaLinksDto } from '../media/dto/reorder-media-links.dto';
 import { BrowseProductsDto } from './dto/browse-products.dto';
@@ -39,10 +42,6 @@ import { UpdateInventoryDto } from './dto/update-inventory.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
 import { UpdateVariantDto } from './dto/update-variant.dto';
 import { ProductsService } from './products.service';
-
-interface AuthUser {
-  userId: string;
-}
 
 @ApiTags('Products')
 @Public()
@@ -67,72 +66,95 @@ export class ProductsController {
 
 @ApiTags('Vendor - Products')
 @Controller('vendor/products')
-@UseGuards(JwtAuthGuard, RolesGuard)
-@Roles(UserRole.VENDOR)
+@Roles(PlatformRole.VENDOR)
+@RequireActiveContext(PermissionScope.VENDOR)
 @ApiBearerAuth()
 export class VendorProductsController {
   constructor(private readonly productsService: ProductsService) {}
 
   @Get()
   @HttpCode(200)
+  @Permissions(PERMISSIONS.VENDOR.PRODUCTS_VIEW)
   @ApiOperation({ summary: 'List my products' })
   getMyProducts(
-    @CurrentUser() user: AuthUser,
+    @CurrentUser() user: AuthenticatedUser,
     @Query() filters: ProductFiltersDto,
   ) {
-    return this.productsService.getMyProducts(user.userId, filters);
+    return this.productsService.getMyProducts(
+      requireVendorEntityId(user),
+      filters,
+    );
   }
 
   @Post()
   @HttpCode(200)
+  @Permissions(PERMISSIONS.VENDOR.PRODUCTS_CREATE)
   @ApiOperation({ summary: 'Create a product' })
-  createProduct(@CurrentUser() user: AuthUser, @Body() dto: CreateProductDto) {
-    return this.productsService.createProduct(user.userId, dto);
+  createProduct(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: CreateProductDto,
+  ) {
+    return this.productsService.createProduct(requireVendorEntityId(user), dto);
   }
 
   @Get(':id')
   @HttpCode(200)
+  @Permissions(PERMISSIONS.VENDOR.PRODUCTS_VIEW)
   @ApiOperation({ summary: 'Get my product detail' })
   getMyProduct(
-    @CurrentUser() user: AuthUser,
+    @CurrentUser() user: AuthenticatedUser,
     @Param('id', ParseUUIDPipe) id: string,
   ) {
-    return this.productsService.getMyProduct(user.userId, id);
+    return this.productsService.getMyProduct(requireVendorEntityId(user), id);
   }
 
   @Patch(':id')
   @HttpCode(200)
+  @Permissions(PERMISSIONS.VENDOR.PRODUCTS_EDIT)
   @ApiOperation({ summary: 'Update a product' })
   updateProduct(
-    @CurrentUser() user: AuthUser,
+    @CurrentUser() user: AuthenticatedUser,
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UpdateProductDto,
   ) {
-    return this.productsService.updateProduct(user.userId, id, dto);
+    return this.productsService.updateProduct(
+      requireVendorEntityId(user),
+      id,
+      dto,
+    );
   }
 
   @Delete(':id')
   @HttpCode(200)
+  @Permissions(PERMISSIONS.VENDOR.PRODUCTS_DELETE)
   @ApiOperation({ summary: 'Delete a product' })
   deleteProduct(
-    @CurrentUser() user: AuthUser,
+    @CurrentUser() user: AuthenticatedUser,
     @Param('id', ParseUUIDPipe) id: string,
   ) {
-    return this.productsService.deleteProduct(user.userId, id);
+    return this.productsService.deleteProduct(requireVendorEntityId(user), id);
   }
 
   @Post(':id/submit')
   @HttpCode(200)
+  @Permissions(PERMISSIONS.VENDOR.PRODUCTS_EDIT)
   @ApiOperation({ summary: 'Submit product for approval' })
   submitForApproval(
-    @CurrentUser() user: AuthUser,
+    @CurrentUser() user: AuthenticatedUser,
     @Param('id', ParseUUIDPipe) id: string,
   ) {
-    return this.productsService.submitForApproval(user.userId, id);
+    return this.productsService.submitForApproval(
+      requireVendorEntityId(user),
+      id,
+    );
   }
 
   @Post(':id/gallery/upload')
   @HttpCode(200)
+  @Permissions(
+    PERMISSIONS.VENDOR.PRODUCTS_EDIT,
+    PERMISSIONS.VENDOR.MEDIA_UPLOAD,
+  )
   @UseInterceptors(FileInterceptor('file', { storage: memoryStorage() }))
   @ApiConsumes('multipart/form-data')
   @ApiBody({
@@ -143,11 +165,12 @@ export class VendorProductsController {
   })
   @ApiOperation({ summary: 'Upload and link product gallery media' })
   uploadProductGalleryMedia(
-    @CurrentUser() user: AuthUser,
+    @CurrentUser() user: AuthenticatedUser,
     @Param('id', ParseUUIDPipe) id: string,
     @UploadedFile() file: Express.Multer.File | undefined,
   ) {
     return this.productsService.uploadProductGalleryMedia(
+      requireVendorEntityId(user),
       user.userId,
       id,
       file,
@@ -156,25 +179,34 @@ export class VendorProductsController {
 
   @Post(':id/gallery')
   @HttpCode(200)
+  @Permissions(
+    PERMISSIONS.VENDOR.PRODUCTS_EDIT,
+    PERMISSIONS.VENDOR.MEDIA_UPLOAD,
+  )
   @ApiOperation({ summary: 'Link existing media to product gallery' })
   linkProductGalleryMedia(
-    @CurrentUser() user: AuthUser,
+    @CurrentUser() user: AuthenticatedUser,
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: LinkMediaDto,
   ) {
-    return this.productsService.linkProductGalleryMedia(user.userId, id, dto);
+    return this.productsService.linkProductGalleryMedia(
+      requireVendorEntityId(user),
+      id,
+      dto,
+    );
   }
 
   @Patch(':id/gallery/reorder')
   @HttpCode(200)
+  @Permissions(PERMISSIONS.VENDOR.PRODUCTS_EDIT)
   @ApiOperation({ summary: 'Reorder product gallery media' })
   reorderProductGalleryMedia(
-    @CurrentUser() user: AuthUser,
+    @CurrentUser() user: AuthenticatedUser,
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: ReorderMediaLinksDto,
   ) {
     return this.productsService.reorderProductGalleryMedia(
-      user.userId,
+      requireVendorEntityId(user),
       id,
       dto,
     );
@@ -182,14 +214,15 @@ export class VendorProductsController {
 
   @Delete(':id/gallery/:mediaId')
   @HttpCode(200)
+  @Permissions(PERMISSIONS.VENDOR.PRODUCTS_EDIT)
   @ApiOperation({ summary: 'Unlink media from product gallery' })
   unlinkProductGalleryMedia(
-    @CurrentUser() user: AuthUser,
+    @CurrentUser() user: AuthenticatedUser,
     @Param('id', ParseUUIDPipe) id: string,
     @Param('mediaId', ParseUUIDPipe) mediaId: string,
   ) {
     return this.productsService.unlinkProductGalleryMedia(
-      user.userId,
+      requireVendorEntityId(user),
       id,
       mediaId,
     );
@@ -197,49 +230,66 @@ export class VendorProductsController {
 
   @Post(':id/variants')
   @HttpCode(200)
+  @Permissions(PERMISSIONS.VENDOR.PRODUCTS_EDIT)
   @ApiOperation({ summary: 'Add product variant' })
   addVariant(
-    @CurrentUser() user: AuthUser,
+    @CurrentUser() user: AuthenticatedUser,
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: CreateVariantDto,
   ) {
-    return this.productsService.addVariant(user.userId, id, dto);
+    return this.productsService.addVariant(
+      requireVendorEntityId(user),
+      id,
+      dto,
+    );
   }
 
   @Patch(':id/variants/:variantId')
   @HttpCode(200)
+  @Permissions(PERMISSIONS.VENDOR.PRODUCTS_EDIT)
   @ApiOperation({ summary: 'Update product variant' })
   updateVariant(
-    @CurrentUser() user: AuthUser,
+    @CurrentUser() user: AuthenticatedUser,
     @Param('id', ParseUUIDPipe) id: string,
     @Param('variantId', ParseUUIDPipe) variantId: string,
     @Body() dto: UpdateVariantDto,
   ) {
-    return this.productsService.updateVariant(user.userId, id, variantId, dto);
+    return this.productsService.updateVariant(
+      requireVendorEntityId(user),
+      id,
+      variantId,
+      dto,
+    );
   }
 
   @Delete(':id/variants/:variantId')
   @HttpCode(200)
+  @Permissions(PERMISSIONS.VENDOR.PRODUCTS_DELETE)
   @ApiOperation({ summary: 'Delete product variant' })
   deleteVariant(
-    @CurrentUser() user: AuthUser,
+    @CurrentUser() user: AuthenticatedUser,
     @Param('id', ParseUUIDPipe) id: string,
     @Param('variantId', ParseUUIDPipe) variantId: string,
   ) {
-    return this.productsService.deleteVariant(user.userId, id, variantId);
+    return this.productsService.deleteVariant(
+      requireVendorEntityId(user),
+      id,
+      variantId,
+    );
   }
 
   @Patch(':id/variants/:variantId/inventory')
   @HttpCode(200)
+  @Permissions(PERMISSIONS.VENDOR.INVENTORY_MANAGE)
   @ApiOperation({ summary: 'Update product variant inventory' })
   updateInventory(
-    @CurrentUser() user: AuthUser,
+    @CurrentUser() user: AuthenticatedUser,
     @Param('id', ParseUUIDPipe) id: string,
     @Param('variantId', ParseUUIDPipe) variantId: string,
     @Body() dto: UpdateInventoryDto,
   ) {
     return this.productsService.updateInventory(
-      user.userId,
+      requireVendorEntityId(user),
       id,
       variantId,
       dto,
@@ -248,15 +298,16 @@ export class VendorProductsController {
 
   @Post(':id/variants/:variantId/attributes')
   @HttpCode(200)
+  @Permissions(PERMISSIONS.VENDOR.PRODUCTS_EDIT)
   @ApiOperation({ summary: 'Set product variant attributes' })
   setVariantAttributes(
-    @CurrentUser() user: AuthUser,
+    @CurrentUser() user: AuthenticatedUser,
     @Param('id', ParseUUIDPipe) id: string,
     @Param('variantId', ParseUUIDPipe) variantId: string,
     @Body() dto: SetAttributesDto,
   ) {
     return this.productsService.setVariantAttributes(
-      user.userId,
+      requireVendorEntityId(user),
       id,
       variantId,
       dto,
@@ -265,6 +316,10 @@ export class VendorProductsController {
 
   @Post(':id/variants/:variantId/gallery/upload')
   @HttpCode(200)
+  @Permissions(
+    PERMISSIONS.VENDOR.PRODUCTS_EDIT,
+    PERMISSIONS.VENDOR.MEDIA_UPLOAD,
+  )
   @UseInterceptors(FileInterceptor('file', { storage: memoryStorage() }))
   @ApiConsumes('multipart/form-data')
   @ApiBody({
@@ -275,12 +330,13 @@ export class VendorProductsController {
   })
   @ApiOperation({ summary: 'Upload and link variant gallery media' })
   uploadVariantGalleryMedia(
-    @CurrentUser() user: AuthUser,
+    @CurrentUser() user: AuthenticatedUser,
     @Param('id', ParseUUIDPipe) id: string,
     @Param('variantId', ParseUUIDPipe) variantId: string,
     @UploadedFile() file: Express.Multer.File | undefined,
   ) {
     return this.productsService.uploadVariantGalleryMedia(
+      requireVendorEntityId(user),
       user.userId,
       id,
       variantId,
@@ -290,15 +346,19 @@ export class VendorProductsController {
 
   @Post(':id/variants/:variantId/gallery')
   @HttpCode(200)
+  @Permissions(
+    PERMISSIONS.VENDOR.PRODUCTS_EDIT,
+    PERMISSIONS.VENDOR.MEDIA_UPLOAD,
+  )
   @ApiOperation({ summary: 'Link existing media to variant gallery' })
   linkVariantGalleryMedia(
-    @CurrentUser() user: AuthUser,
+    @CurrentUser() user: AuthenticatedUser,
     @Param('id', ParseUUIDPipe) id: string,
     @Param('variantId', ParseUUIDPipe) variantId: string,
     @Body() dto: LinkMediaDto,
   ) {
     return this.productsService.linkVariantGalleryMedia(
-      user.userId,
+      requireVendorEntityId(user),
       id,
       variantId,
       dto,
@@ -307,15 +367,16 @@ export class VendorProductsController {
 
   @Patch(':id/variants/:variantId/gallery/reorder')
   @HttpCode(200)
+  @Permissions(PERMISSIONS.VENDOR.PRODUCTS_EDIT)
   @ApiOperation({ summary: 'Reorder variant gallery media' })
   reorderVariantGalleryMedia(
-    @CurrentUser() user: AuthUser,
+    @CurrentUser() user: AuthenticatedUser,
     @Param('id', ParseUUIDPipe) id: string,
     @Param('variantId', ParseUUIDPipe) variantId: string,
     @Body() dto: ReorderMediaLinksDto,
   ) {
     return this.productsService.reorderVariantGalleryMedia(
-      user.userId,
+      requireVendorEntityId(user),
       id,
       variantId,
       dto,
@@ -324,15 +385,16 @@ export class VendorProductsController {
 
   @Delete(':id/variants/:variantId/gallery/:mediaId')
   @HttpCode(200)
+  @Permissions(PERMISSIONS.VENDOR.PRODUCTS_EDIT)
   @ApiOperation({ summary: 'Unlink media from variant gallery' })
   unlinkVariantGalleryMedia(
-    @CurrentUser() user: AuthUser,
+    @CurrentUser() user: AuthenticatedUser,
     @Param('id', ParseUUIDPipe) id: string,
     @Param('variantId', ParseUUIDPipe) variantId: string,
     @Param('mediaId', ParseUUIDPipe) mediaId: string,
   ) {
     return this.productsService.unlinkVariantGalleryMedia(
-      user.userId,
+      requireVendorEntityId(user),
       id,
       variantId,
       mediaId,
@@ -342,8 +404,9 @@ export class VendorProductsController {
 
 @ApiTags('Admin - Products')
 @Controller('admin/products')
-@UseGuards(JwtAuthGuard, RolesGuard)
-@Roles(UserRole.ADMIN)
+@Roles(PlatformRole.ADMIN, PlatformRole.SUPPORT)
+@RequireActiveContext(PermissionScope.ADMIN)
+@Permissions(PERMISSIONS.ADMIN.CATALOG_MANAGE)
 @ApiBearerAuth()
 export class AdminProductsController {
   constructor(private readonly productsService: ProductsService) {}

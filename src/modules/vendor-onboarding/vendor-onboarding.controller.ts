@@ -11,7 +11,6 @@ import {
   Put,
   Query,
   UploadedFile,
-  UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
@@ -23,11 +22,16 @@ import {
   ApiTags,
 } from '@nestjs/swagger';
 import { memoryStorage } from 'multer';
-import { KycDocumentType } from '../../../generated/prisma/client.js';
+import {
+  KycDocumentType,
+  PermissionScope,
+} from '../../../generated/prisma/client.js';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
-import { Roles, UserRole } from '../../common/decorators/roles.decorator';
-import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
-import { RolesGuard } from '../../common/guards/roles.guard';
+import { OnboardingOnly } from '../../common/decorators/onboarding-only.decorator';
+import { Permissions } from '../../common/decorators/permissions.decorator';
+import { RequireActiveContext } from '../../common/decorators/require-active-context.decorator';
+import { PlatformRole, Roles } from '../../common/decorators/roles.decorator';
+import { PERMISSIONS } from '../rbac/permissions.constants';
 import { RejectVendorDto } from './dto/reject-vendor.dto';
 import { UpdateVendorProfileDto } from './dto/update-vendor-profile.dto';
 import { UploadKycDocumentDto } from './dto/upload-kyc-document.dto';
@@ -41,8 +45,8 @@ interface AuthUser {
 
 @ApiTags('Vendor - Onboarding')
 @Controller('vendor/onboarding')
-@UseGuards(JwtAuthGuard, RolesGuard)
-@Roles(UserRole.VENDOR)
+@Roles(PlatformRole.VENDOR)
+@OnboardingOnly()
 @ApiBearerAuth()
 export class VendorOnboardingController {
   constructor(
@@ -121,8 +125,8 @@ export class VendorOnboardingController {
 
 @ApiTags('Admin - Vendors')
 @Controller('admin/vendors')
-@UseGuards(JwtAuthGuard, RolesGuard)
-@Roles(UserRole.ADMIN)
+@Roles(PlatformRole.ADMIN, PlatformRole.SUPPORT)
+@RequireActiveContext(PermissionScope.ADMIN)
 @ApiBearerAuth()
 export class AdminVendorsController {
   constructor(
@@ -131,6 +135,7 @@ export class AdminVendorsController {
 
   @Get()
   @HttpCode(200)
+  @Permissions(PERMISSIONS.ADMIN.VENDORS_VIEW)
   @ApiOperation({ summary: 'List vendors for admin review' })
   getVendors(@Query() filters: VendorFiltersDto) {
     return this.vendorOnboardingService.getVendors(filters);
@@ -138,6 +143,7 @@ export class AdminVendorsController {
 
   @Get(':id')
   @HttpCode(200)
+  @Permissions(PERMISSIONS.ADMIN.VENDORS_VIEW)
   @ApiOperation({ summary: 'Get vendor review detail' })
   getVendor(@Param('id', ParseUUIDPipe) id: string) {
     return this.vendorOnboardingService.getVendor(id);
@@ -145,6 +151,7 @@ export class AdminVendorsController {
 
   @Patch(':id/approve')
   @HttpCode(200)
+  @Permissions(PERMISSIONS.ADMIN.VENDORS_APPROVE)
   @ApiOperation({ summary: 'Approve a submitted vendor' })
   approveVendor(@Param('id', ParseUUIDPipe) id: string) {
     return this.vendorOnboardingService.approveVendor(id);
@@ -152,6 +159,7 @@ export class AdminVendorsController {
 
   @Patch(':id/reject')
   @HttpCode(200)
+  @Permissions(PERMISSIONS.ADMIN.VENDORS_REJECT)
   @ApiOperation({ summary: 'Reject a submitted vendor' })
   rejectVendor(
     @Param('id', ParseUUIDPipe) id: string,

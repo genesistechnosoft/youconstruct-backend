@@ -368,15 +368,19 @@ export class ProductsService {
   }
 
   async uploadProductGalleryMedia(
-    userId: string,
+    vendorProfileId: string,
+    actorUserId: string,
     productId: string,
     file: Express.Multer.File | undefined,
   ) {
-    const product = await this.verifyProductOwnership(userId, productId);
+    const product = await this.verifyProductOwnership(
+      vendorProfileId,
+      productId,
+    );
     this.ensureVendorCanMutateProduct(product.status);
 
     return this.mediaService.uploadVendorMediaForEntity(
-      userId,
+      actorUserId,
       product.vendorId,
       file,
       MediaEntityType.PRODUCT,
@@ -431,17 +435,21 @@ export class ProductsService {
   }
 
   async uploadVariantGalleryMedia(
-    userId: string,
+    vendorProfileId: string,
+    actorUserId: string,
     productId: string,
     variantId: string,
     file: Express.Multer.File | undefined,
   ) {
-    const product = await this.verifyProductOwnership(userId, productId);
+    const product = await this.verifyProductOwnership(
+      vendorProfileId,
+      productId,
+    );
     this.ensureVendorCanMutateProduct(product.status);
-    await this.verifyVariantOwnership(userId, productId, variantId);
+    await this.verifyVariantOwnership(vendorProfileId, productId, variantId);
 
     return this.mediaService.uploadVendorMediaForEntity(
-      userId,
+      actorUserId,
       product.vendorId,
       file,
       MediaEntityType.PRODUCT_VARIANT,
@@ -587,8 +595,9 @@ export class ProductsService {
     return { message: 'Product rejected successfully', data: product };
   }
 
-  private async getVendorId(userId: string) {
-    const vendor = await this.productsRepository.findVendorByUserId(userId);
+  private async getVendorId(vendorProfileId: string) {
+    const vendor =
+      await this.productsRepository.findApprovedVendorById(vendorProfileId);
     if (!vendor) {
       throw new ForbiddenException('Approved vendor profile required');
     }
@@ -596,8 +605,11 @@ export class ProductsService {
     return vendor.id;
   }
 
-  private async verifyProductOwnership(userId: string, productId: string) {
-    const vendorId = await this.getVendorId(userId);
+  private async verifyProductOwnership(
+    vendorProfileId: string,
+    productId: string,
+  ) {
+    const vendorId = await this.getVendorId(vendorProfileId);
     const product = await this.productsRepository.findByVendorAndId(
       vendorId,
       productId,
@@ -611,11 +623,11 @@ export class ProductsService {
   }
 
   private async verifyVariantOwnership(
-    userId: string,
+    vendorProfileId: string,
     productId: string,
     variantId: string,
   ) {
-    await this.verifyProductOwnership(userId, productId);
+    await this.verifyProductOwnership(vendorProfileId, productId);
     const variant = await this.productsRepository.findVariant(
       variantId,
       productId,

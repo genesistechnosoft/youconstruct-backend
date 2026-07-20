@@ -2,18 +2,19 @@ import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
+import { RbacService } from '../../rbac/rbac.service';
+import type {
+  AuthenticatedUser,
+  JwtPayload,
+} from '../../../common/types/auth-user.type';
 import { AuthRepository } from '../auth.repository';
-
-export interface JwtPayload {
-  userId: string;
-  role: string;
-}
 
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
   constructor(
     config: ConfigService,
     private readonly authRepository: AuthRepository,
+    private readonly rbacService: RbacService,
   ) {
     super({
       jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
@@ -22,12 +23,30 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     });
   }
 
-  async validate(payload: JwtPayload) {
+  async validate(payload: JwtPayload): Promise<AuthenticatedUser> {
     const user = await this.authRepository.findUserById(payload.userId);
     if (!user || !user.isActive) {
       throw new UnauthorizedException('Invalid token');
     }
 
-    return { userId: user.id, role: user.role };
+    const authenticated: AuthenticatedUser = {
+      userId: user.id,
+      platformRole: user.platformRole,
+    };
+
+    if (payload.isImpersonation) {
+      authenticated.isImpersonation = true;
+      authenticated.impersonatedBy = payload.impersonatedBy;
+    }
+
+    const activeContext = await this.rbacService.resolveRequestContext(
+      user.id,
+      user.platformRole,
+    );
+    if (activeContext) {
+      authenticated.activeContext = activeContext;
+    }
+
+    return authenticated;
   }
 }

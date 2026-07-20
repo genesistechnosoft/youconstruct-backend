@@ -4,6 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import {
+  MediaAccessLevel,
   MediaContext,
   MediaEntityType,
   MediaOwnerType,
@@ -75,10 +76,17 @@ export class MediaRepository {
     });
   }
 
+  findApprovedVendorById(vendorId: string) {
+    return this.prisma.vendorProfile.findFirst({
+      where: { id: vendorId, isApproved: true, deletedAt: null },
+      select: { id: true, membership: { select: { id: true } } },
+    });
+  }
+
   findUserById(userId: string) {
     return this.prisma.user.findFirst({
       where: { id: userId, deletedAt: null },
-      select: { id: true, role: true },
+      select: { id: true, platformRole: true },
     });
   }
 
@@ -92,6 +100,11 @@ export class MediaRepository {
       ownerType,
       ownerId,
       deletedAt: null,
+      // Store library never includes PRIVATE compliance/KYC docs
+      accessLevel: {
+        in: [MediaAccessLevel.PUBLIC, MediaAccessLevel.SIGNED],
+      },
+      kycDocuments: { none: {} },
       ...(filters.folderId && { folderId: filters.folderId }),
       ...(filters.fileType && { fileType: filters.fileType }),
     };

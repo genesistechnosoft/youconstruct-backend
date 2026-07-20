@@ -7,7 +7,7 @@ import {
 import {
   KycDocumentType,
   MediaOwnerType,
-  UserRole,
+  PlatformRole,
   VendorOnboardingStatus,
 } from '../../../generated/prisma/client.js';
 import { paginationMeta } from '../../common/utils/pagination.util';
@@ -54,7 +54,7 @@ export class VendorOnboardingService {
     const vendor = await this.ensureVendorProfile(userId);
     return {
       message: 'Vendor onboarding fetched successfully',
-      data: vendor,
+      data: await this.withFreshKycUrls(vendor),
     };
   }
 
@@ -127,7 +127,7 @@ export class VendorOnboardingService {
 
     const media = await this.mediaService.uploadPrivateDocument(
       userId,
-      { ownerType: MediaOwnerType.VENDOR, ownerId: vendor.id },
+      { ownerType: MediaOwnerType.USER, ownerId: userId },
       file,
       `kyc/${userId}/${documentType}`,
     );
@@ -196,7 +196,7 @@ export class VendorOnboardingService {
 
     return {
       message: 'Vendor fetched successfully',
-      data: vendor,
+      data: await this.withFreshKycUrls(vendor),
     };
   }
 
@@ -252,14 +252,64 @@ export class VendorOnboardingService {
       throw new NotFoundException('User not found');
     }
 
-    if (user.role !== UserRole.VENDOR) {
+    if (user.platformRole !== PlatformRole.VENDOR) {
       throw new ForbiddenException('Vendor account required');
+    }
+
+    const membershipCount =
+      await this.vendorOnboardingRepository.countActiveTeamMemberships(userId);
+    if (membershipCount > 0) {
+      throw new ForbiddenException(
+        'Only store owners can complete vendor onboarding',
+      );
     }
 
     return this.vendorOnboardingRepository.createDraftVendorProfile(
       user.id,
       user.name,
     );
+  }
+
+  /**
+   * Replace stored fileUrl with a freshly signed URL when mediaId is present.
+   * KYC media is USER-owned PRIVATE and must not be served via /vendor/media.
+   */
+  private async withFreshKycUrls<
+    T extends {
+      user: {
+        kycDocuments: {
+          mediaId: string | null;
+          userId: string;
+          fileUrl: string | null;
+        }[];
+      };
+    },
+  >(vendor: T): Promise<T> {
+    const kycDocuments = await Promise.all(
+      vendor.user.kycDocuments.map(async (document) => {
+        if (!document.mediaId) {
+          return document;
+        }
+
+        try {
+          const fileUrl = await this.mediaService.getPrivateUserDocumentUrl(
+            document.mediaId,
+            document.userId,
+          );
+          return { ...document, fileUrl };
+        } catch {
+          return document;
+        }
+      }),
+    );
+
+    return {
+      ...vendor,
+      user: {
+        ...vendor.user,
+        kycDocuments,
+      },
+    };
   }
 
   private ensureVendorCanEdit(status: VendorOnboardingStatus) {

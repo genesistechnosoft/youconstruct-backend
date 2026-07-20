@@ -57,8 +57,8 @@ export class MediaService {
     private readonly mediaQueue: Queue,
   ) {}
 
-  async listVendorMedia(userId: string, filters: MediaFiltersDto) {
-    const owner = await this.getApprovedVendorOwner(userId);
+  async listVendorMedia(vendorProfileId: string, filters: MediaFiltersDto) {
+    const owner = await this.getApprovedVendorOwner(vendorProfileId);
     const { items, total } = await this.mediaRepository.findManyMedia(
       owner.ownerType,
       owner.ownerId,
@@ -73,17 +73,28 @@ export class MediaService {
   }
 
   async uploadVendorMedia(
-    userId: string,
+    actorUserId: string,
+    vendorProfileId: string,
     file: Express.Multer.File | undefined,
     dto: UploadMediaDto,
   ) {
-    const owner = await this.getApprovedVendorOwner(userId);
+    const owner = await this.getApprovedVendorOwner(vendorProfileId);
+    const accessLevel = dto.accessLevel ?? MediaAccessLevel.PUBLIC;
+    if (
+      accessLevel !== MediaAccessLevel.PUBLIC &&
+      accessLevel !== MediaAccessLevel.SIGNED
+    ) {
+      throw new BadRequestException(
+        'Vendor media library only allows PUBLIC or SIGNED access levels',
+      );
+    }
+
     const media = await this.uploadMedia({
-      userId,
+      userId: actorUserId,
       owner,
       file,
       folderId: dto.folderId,
-      accessLevel: dto.accessLevel ?? MediaAccessLevel.PUBLIC,
+      accessLevel,
       keyPrefix: `vendors/${owner.ownerId}/media`,
       allowedFileTypes: [MediaFileType.IMAGE, MediaFileType.VIDEO],
     });
@@ -95,15 +106,15 @@ export class MediaService {
   }
 
   async uploadVendorMediaForEntity(
-    userId: string,
+    actorUserId: string,
     vendorId: string,
     file: Express.Multer.File | undefined,
     entityType: MediaEntityType,
     entityId: string,
   ) {
-    await this.ensureVendorMatchesUser(userId, vendorId);
+    await this.getApprovedVendorOwner(vendorId);
     const media = await this.uploadMedia({
-      userId,
+      userId: actorUserId,
       owner: { ownerType: MediaOwnerType.VENDOR, ownerId: vendorId },
       file,
       accessLevel: MediaAccessLevel.PUBLIC,
@@ -140,8 +151,25 @@ export class MediaService {
     });
   }
 
-  async listVendorFolders(userId: string) {
-    const owner = await this.getApprovedVendorOwner(userId);
+  /**
+   * Resolve a fresh URL for a USER-owned PRIVATE compliance document.
+   * Not used by the vendor media library.
+   */
+  async getPrivateUserDocumentUrl(mediaId: string, userId: string) {
+    const media = await this.mediaRepository.findMediaByOwner(
+      mediaId,
+      MediaOwnerType.USER,
+      userId,
+    );
+    if (!media || media.accessLevel !== MediaAccessLevel.PRIVATE) {
+      throw new NotFoundException('Document not found');
+    }
+
+    return this.storageService.getUrl(media.originalKey, media.accessLevel);
+  }
+
+  async listVendorFolders(vendorProfileId: string) {
+    const owner = await this.getApprovedVendorOwner(vendorProfileId);
     const folders = await this.mediaRepository.listFolders(
       owner.ownerType,
       owner.ownerId,
@@ -150,8 +178,11 @@ export class MediaService {
     return { message: 'Media folders fetched successfully', data: folders };
   }
 
-  async createVendorFolder(userId: string, dto: CreateMediaFolderDto) {
-    const owner = await this.getApprovedVendorOwner(userId);
+  async createVendorFolder(
+    vendorProfileId: string,
+    dto: CreateMediaFolderDto,
+  ) {
+    const owner = await this.getApprovedVendorOwner(vendorProfileId);
     await this.validateFolderParent(owner, dto.parentId);
 
     const folder = await this.mediaRepository.createFolder({
@@ -165,11 +196,11 @@ export class MediaService {
   }
 
   async updateVendorFolder(
-    userId: string,
+    vendorProfileId: string,
     folderId: string,
     dto: UpdateMediaFolderDto,
   ) {
-    const owner = await this.getApprovedVendorOwner(userId);
+    const owner = await this.getApprovedVendorOwner(vendorProfileId);
     await this.getFolderOrThrow(owner, folderId);
 
     if (dto.parentId === folderId) {
@@ -188,8 +219,8 @@ export class MediaService {
     return { message: 'Media folder updated successfully', data: folder };
   }
 
-  async deleteVendorFolder(userId: string, folderId: string) {
-    const owner = await this.getApprovedVendorOwner(userId);
+  async deleteVendorFolder(vendorProfileId: string, folderId: string) {
+    const owner = await this.getApprovedVendorOwner(vendorProfileId);
     await this.getFolderOrThrow(owner, folderId);
 
     const [mediaCount, childCount] = await Promise.all([
@@ -208,11 +239,11 @@ export class MediaService {
   }
 
   async updateVendorMedia(
-    userId: string,
+    vendorProfileId: string,
     mediaId: string,
     dto: UpdateMediaDto,
   ) {
-    const owner = await this.getApprovedVendorOwner(userId);
+    const owner = await this.getApprovedVendorOwner(vendorProfileId);
     await this.getMediaOrThrow(owner, mediaId);
 
     if (dto.folderId !== undefined) {
@@ -230,8 +261,8 @@ export class MediaService {
     };
   }
 
-  async deleteVendorMedia(userId: string, mediaId: string) {
-    const owner = await this.getApprovedVendorOwner(userId);
+  async deleteVendorMedia(vendorProfileId: string, mediaId: string) {
+    const owner = await this.getApprovedVendorOwner(vendorProfileId);
     const media = await this.getMediaOrThrow(owner, mediaId);
     const activeLinks = await this.mediaRepository.countActiveLinks(mediaId);
 
@@ -460,21 +491,16 @@ export class MediaService {
     );
   }
 
-  private async getApprovedVendorOwner(userId: string): Promise<MediaOwner> {
+  private async getApprovedVendorOwner(
+    vendorProfileId: string,
+  ): Promise<MediaOwner> {
     const vendor =
-      await this.mediaRepository.findApprovedVendorByUserId(userId);
+      await this.mediaRepository.findApprovedVendorById(vendorProfileId);
     if (!vendor) {
       throw new ForbiddenException('Approved vendor profile required');
     }
 
     return { ownerType: MediaOwnerType.VENDOR, ownerId: vendor.id };
-  }
-
-  private async ensureVendorMatchesUser(userId: string, vendorId: string) {
-    const owner = await this.getApprovedVendorOwner(userId);
-    if (owner.ownerId !== vendorId) {
-      throw new ForbiddenException('Vendor media owner mismatch');
-    }
   }
 
   private async validateFolderParent(owner: MediaOwner, folderId?: string) {
@@ -505,6 +531,14 @@ export class MediaService {
       owner.ownerId,
     );
     if (!media) {
+      throw new NotFoundException('Media not found');
+    }
+
+    // Defense in depth: vendor library APIs never operate on PRIVATE/KYC media
+    if (
+      owner.ownerType === MediaOwnerType.VENDOR &&
+      media.accessLevel === MediaAccessLevel.PRIVATE
+    ) {
       throw new NotFoundException('Media not found');
     }
 

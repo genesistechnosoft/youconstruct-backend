@@ -3,7 +3,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma, UserRole } from '../../../generated/prisma/client.js';
+import { PlatformRole, Prisma } from '../../../generated/prisma/client.js';
 import { PrismaService } from '../../prisma/prisma.service';
 
 @Injectable()
@@ -18,7 +18,7 @@ export class AuthRepository {
         name: true,
         email: true,
         phone: true,
-        role: true,
+        platformRole: true,
         passwordHash: true,
         isActive: true,
         isEmailVerified: true,
@@ -35,7 +35,7 @@ export class AuthRepository {
         name: true,
         email: true,
         phone: true,
-        role: true,
+        platformRole: true,
         passwordHash: true,
         isActive: true,
         isPhoneVerified: true,
@@ -51,7 +51,7 @@ export class AuthRepository {
         id: true,
         name: true,
         email: true,
-        role: true,
+        platformRole: true,
         isActive: true,
         provider: true,
       },
@@ -66,7 +66,7 @@ export class AuthRepository {
         name: true,
         email: true,
         phone: true,
-        role: true,
+        platformRole: true,
         isActive: true,
         provider: true,
         isEmailVerified: true,
@@ -82,7 +82,7 @@ export class AuthRepository {
     email?: string;
     phone?: string;
     passwordHash?: string;
-    role?: UserRole;
+    platformRole?: PlatformRole;
     provider?: string;
     googleId?: string;
     avatarUrl?: string;
@@ -96,12 +96,12 @@ export class AuthRepository {
             name: true,
             email: true,
             phone: true,
-            role: true,
+            platformRole: true,
             provider: true,
           },
         });
 
-        if (user.role === UserRole.VENDOR) {
+        if (user.platformRole === PlatformRole.VENDOR) {
           await tx.vendorProfile.create({
             data: {
               userId: user.id,
@@ -200,6 +200,35 @@ export class AuthRepository {
         expiresAt: true,
         attempts: true,
       },
+    });
+  }
+
+  /**
+   * Sum failed attempts across recent unverified OTP rows for lockout
+   * that cannot be reset by requesting a new OTP.
+   */
+  async countRecentOtpFailures(
+    target: string,
+    purpose: string,
+    windowMs = 15 * 60 * 1000,
+  ) {
+    const since = new Date(Date.now() - windowMs);
+    const rows = await this.prisma.otpVerification.findMany({
+      where: {
+        target,
+        purpose,
+        createdAt: { gte: since },
+      },
+      select: { attempts: true },
+    });
+
+    return rows.reduce((sum, row) => sum + row.attempts, 0);
+  }
+
+  invalidateUnverifiedOtps(target: string, purpose: string) {
+    return this.prisma.otpVerification.updateMany({
+      where: { target, purpose, verifiedAt: null },
+      data: { expiresAt: new Date(0) },
     });
   }
 

@@ -9,14 +9,15 @@ import {
   Patch,
   Post,
   Query,
-  UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { PermissionScope } from '../../../generated/prisma/client.js';
+import { Permissions } from '../../common/decorators/permissions.decorator';
 import { Public } from '../../common/decorators/public.decorator';
-import { Roles, UserRole } from '../../common/decorators/roles.decorator';
-import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
-import { RolesGuard } from '../../common/guards/roles.guard';
+import { RequireActiveContext } from '../../common/decorators/require-active-context.decorator';
+import { PlatformRole, Roles } from '../../common/decorators/roles.decorator';
 import { PaginationQueryDto } from '../../common/dto/pagination-query.dto';
+import { PERMISSIONS } from '../rbac/permissions.constants';
 import { BrandsService } from './brands.service';
 import { CreateBrandDto } from './dto/create-brand.dto';
 import { UpdateBrandDto } from './dto/update-brand.dto';
@@ -44,8 +45,9 @@ export class BrandsController {
 
 @ApiTags('Admin - Brands')
 @Controller('admin/brands')
-@UseGuards(JwtAuthGuard, RolesGuard)
-@Roles(UserRole.ADMIN)
+@Roles(PlatformRole.ADMIN, PlatformRole.SUPPORT)
+@RequireActiveContext(PermissionScope.ADMIN)
+@Permissions(PERMISSIONS.ADMIN.CATALOG_MANAGE)
 @ApiBearerAuth()
 export class AdminBrandsController {
   constructor(private readonly brandsService: BrandsService) {}

@@ -6,11 +6,13 @@ import {
 import {
   KycDocumentType,
   KycStatus,
+  PermissionScope,
   Prisma,
   VendorOnboardingStatus,
 } from '../../../generated/prisma/client.js';
 import { paginate } from '../../common/utils/pagination.util';
 import { PrismaService } from '../../prisma/prisma.service';
+import { RbacRepository } from '../rbac/rbac.repository';
 import { VendorFiltersDto } from './dto/vendor-filters.dto';
 
 const KYC_DOCUMENT_SELECT = {
@@ -56,7 +58,7 @@ const VENDOR_REVIEW_SELECT = {
       name: true,
       email: true,
       phone: true,
-      role: true,
+      platformRole: true,
       kycDocuments: {
         orderBy: { documentType: Prisma.SortOrder.asc },
         select: KYC_DOCUMENT_SELECT,
@@ -112,13 +114,20 @@ const VENDOR_REVIEW_SELECT = {
 
 @Injectable()
 export class VendorOnboardingRepository {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly rbacRepository: RbacRepository,
+  ) {}
 
   findUserById(userId: string) {
     return this.prisma.user.findFirst({
       where: { id: userId, deletedAt: null },
-      select: { id: true, name: true, role: true },
+      select: { id: true, name: true, platformRole: true },
     });
+  }
+
+  countActiveTeamMemberships(userId: string) {
+    return this.rbacRepository.countActiveMemberships(userId);
   }
 
   findVendorByUserId(userId: string) {
@@ -269,6 +278,20 @@ export class VendorOnboardingRepository {
           create: { vendorId: id },
           select: { id: true },
         });
+
+        const vendor = await tx.vendorProfile.findUniqueOrThrow({
+          where: { id },
+          select: { id: true, userId: true },
+        });
+
+        await this.rbacRepository.ensureOwnerRole(
+          {
+            scope: PermissionScope.VENDOR,
+            scopeEntityId: vendor.id,
+            userId: vendor.userId,
+          },
+          tx,
+        );
 
         return tx.vendorProfile.findUniqueOrThrow({
           where: { id },

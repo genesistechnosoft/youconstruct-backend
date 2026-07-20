@@ -1,7 +1,14 @@
-import { Body, Controller, HttpCode, Post } from '@nestjs/common';
-import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { Body, Controller, Get, HttpCode, Post } from '@nestjs/common';
+import {
+  ApiBearerAuth,
+  ApiOperation,
+  ApiResponse,
+  ApiTags,
+} from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
+import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Public } from '../../common/decorators/public.decorator';
+import type { AuthenticatedUser } from '../../common/types/auth-user.type';
 import { AuthService } from './auth.service';
 import { LoginDto } from './dto/login.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
@@ -16,6 +23,7 @@ export class AuthController {
 
   @Public()
   @Post('register')
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
   @HttpCode(200)
   @ApiOperation({ summary: 'Register a new user' })
   @ApiResponse({ status: 200, description: 'User registered successfully' })
@@ -28,11 +36,25 @@ export class AuthController {
   @Post('login')
   @Throttle({ default: { limit: 5, ttl: 60000 } })
   @HttpCode(200)
-  @ApiOperation({ summary: 'Login with email and password' })
+  @ApiOperation({ summary: 'Customer app login (CUSTOMER accounts only)' })
   @ApiResponse({ status: 200, description: 'Login successful' })
   @ApiResponse({ status: 400, description: 'Bad request' })
   login(@Body() dto: LoginDto) {
     return this.authService.login(dto);
+  }
+
+  @Public()
+  @Post('dashboard/login')
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
+  @HttpCode(200)
+  @ApiOperation({
+    summary:
+      'Dashboard login (VENDOR, PROFESSIONAL, ADMIN, SUPPORT, SUPER_ADMIN)',
+  })
+  @ApiResponse({ status: 200, description: 'Login successful' })
+  @ApiResponse({ status: 400, description: 'Bad request' })
+  dashboardLogin(@Body() dto: LoginDto) {
+    return this.authService.dashboardLogin(dto);
   }
 
   @Public()
@@ -76,5 +98,26 @@ export class AuthController {
   @ApiResponse({ status: 400, description: 'Bad request' })
   logout(@Body() dto: RefreshTokenDto) {
     return this.authService.logout(dto);
+  }
+
+  @Get('contexts')
+  @HttpCode(200)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'List the single server-derived context for the current user',
+  })
+  listContexts(@CurrentUser() user: AuthenticatedUser) {
+    return this.authService.listContexts(user.userId);
+  }
+
+  @Get('session')
+  @HttpCode(200)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary:
+      'Current auth session: user, activeContext, permissions, and flags',
+  })
+  getSession(@CurrentUser() user: AuthenticatedUser) {
+    return this.authService.getSession(user);
   }
 }
