@@ -26,7 +26,9 @@ export class SecurityAuditService {
    * Fire-and-forget audit write — never throws to callers.
    */
   log(input: SecurityAuditInput): void {
-    void this.rbacRepository.createSecurityAuditLog(input).catch(() => undefined);
+    void this.rbacRepository
+      .createSecurityAuditLog(input)
+      .catch(() => undefined);
   }
 
   async logAwaited(input: SecurityAuditInput) {

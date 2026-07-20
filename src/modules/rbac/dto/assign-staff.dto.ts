@@ -29,5 +29,4 @@ export class AssignStaffDto {
   @ApiProperty()
   @IsUUID()
   customRoleId!: string;
-
 }

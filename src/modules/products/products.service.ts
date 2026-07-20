@@ -16,6 +16,7 @@ import { generateSlug } from '../../common/utils/slug.util';
 import { LinkMediaDto } from '../media/dto/link-media.dto';
 import { ReorderMediaLinksDto } from '../media/dto/reorder-media-links.dto';
 import { MediaService } from '../media/media.service';
+import { VendorStoreService } from '../vendor-store/vendor-store.service';
 import { BrowseProductsDto } from './dto/browse-products.dto';
 import { CreateProductDto } from './dto/create-product.dto';
 import { CreateVariantDto } from './dto/create-variant.dto';
@@ -32,6 +33,7 @@ export class ProductsService {
   constructor(
     private readonly productsRepository: ProductsRepository,
     private readonly mediaService: MediaService,
+    private readonly vendorStoreService: VendorStoreService,
   ) {}
 
   async getMyProducts(userId: string, filters: ProductFiltersDto) {
@@ -58,6 +60,7 @@ export class ProductsService {
 
   async createProduct(userId: string, dto: CreateProductDto) {
     const vendorId = await this.getVendorId(userId);
+    await this.vendorStoreService.assertCanCreateProduct(vendorId);
     await this.validateActiveCategory(dto.categoryId);
     await this.validateActiveBrand(dto.brandId);
     this.validateReturnInvariant(

@@ -21,6 +21,7 @@ import {
 import { paginationMeta } from '../../common/utils/pagination.util';
 import { MEDIA_PROCESSING_QUEUE } from '../../queue/queue.constants';
 import { StorageService } from '../../storage/storage.service';
+import { VendorStoreService } from '../vendor-store/vendor-store.service';
 import { CreateMediaFolderDto } from './dto/create-media-folder.dto';
 import { LinkMediaDto } from './dto/link-media.dto';
 import { MediaFiltersDto } from './dto/media-filters.dto';
@@ -53,6 +54,7 @@ export class MediaService {
   constructor(
     private readonly mediaRepository: MediaRepository,
     private readonly storageService: StorageService,
+    private readonly vendorStoreService: VendorStoreService,
     @InjectQueue(MEDIA_PROCESSING_QUEUE)
     private readonly mediaQueue: Queue,
   ) {}
@@ -178,10 +180,7 @@ export class MediaService {
     return { message: 'Media folders fetched successfully', data: folders };
   }
 
-  async createVendorFolder(
-    vendorProfileId: string,
-    dto: CreateMediaFolderDto,
-  ) {
+  async createVendorFolder(vendorProfileId: string, dto: CreateMediaFolderDto) {
     const owner = await this.getApprovedVendorOwner(vendorProfileId);
     await this.validateFolderParent(owner, dto.parentId);
 
@@ -414,6 +413,13 @@ export class MediaService {
 
     this.validateFileSize(input.file, fileType);
     this.validateMagicBytes(input.file, fileType);
+
+    if (input.owner.ownerType === MediaOwnerType.VENDOR) {
+      await this.vendorStoreService.assertCanUploadMedia(
+        input.owner.ownerId,
+        input.file.size,
+      );
+    }
 
     const id = randomUUID();
     const extension = this.getExtension(

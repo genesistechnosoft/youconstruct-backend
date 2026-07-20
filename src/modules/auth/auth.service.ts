@@ -53,10 +53,7 @@ export class AuthService {
     password?: string;
     platformRole?: PlatformRole;
   }) {
-    if (
-      dto.platformRole &&
-      BLOCKED_REGISTER_ROLES.includes(dto.platformRole)
-    ) {
+    if (dto.platformRole && BLOCKED_REGISTER_ROLES.includes(dto.platformRole)) {
       throw new ForbiddenException('This role cannot self-register');
     }
 
@@ -117,9 +114,7 @@ export class AuthService {
         result: 'FAILURE',
         metadata: { reason: 'wrong_lane', lane: 'customer' },
       });
-      throw new ForbiddenException(
-        'Use the dashboard login for this account',
-      );
+      throw new ForbiddenException('Use the dashboard login for this account');
     }
 
     this.securityAudit.log({
@@ -370,9 +365,7 @@ export class AuthService {
         result: 'FAILURE',
         metadata: { phone, purpose, failures },
       });
-      throw new BadRequestException(
-        'Too many OTP attempts. Try again later.',
-      );
+      throw new BadRequestException('Too many OTP attempts. Try again later.');
     }
   }
 

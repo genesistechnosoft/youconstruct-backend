@@ -14,7 +14,8 @@ export class AcceptInvitationDto {
   token!: string;
 
   @ApiPropertyOptional({
-    description: 'Display name for a new staff account (required for new users)',
+    description:
+      'Display name for a new staff account (required for new users)',
   })
   @ValidateIf((o: AcceptInvitationDto) => !o.existingAccount)
   @IsString()

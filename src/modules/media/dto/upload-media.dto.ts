@@ -16,7 +16,8 @@ export class UploadMediaDto {
   @ApiPropertyOptional({
     enum: LIBRARY_ACCESS_LEVELS,
     default: MediaAccessLevel.PUBLIC,
-    description: 'Vendor media library allows PUBLIC or SIGNED only (not PRIVATE)',
+    description:
+      'Vendor media library allows PUBLIC or SIGNED only (not PRIVATE)',
   })
   @IsOptional()
   @IsEnum(MediaAccessLevel)

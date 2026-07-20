@@ -118,6 +118,20 @@ enum PreferredPaymentMethod {
   BOTH
 }
 
+enum ShippingMethodType {
+  FLAT
+  FREE
+  DISTANCE_BASED
+  UNIT_BASED
+  ORDER_VALUE_BASED
+}
+
+enum ShippingUnitType {
+  UNIT
+  KG
+  CBM
+}
+
 enum MediaOwnerType {
   VENDOR
   PROFESSIONAL
@@ -171,6 +185,7 @@ enum MediaContext {
   PROFILE_PHOTO
   PROJECT_PHOTO
   REEL
+  OG_IMAGE
 }
 
 enum MediaProcessingJobType {
@@ -463,14 +478,15 @@ model VendorProfile {
   updatedAt        DateTime               @updatedAt
   deletedAt        DateTime?
 
-  user          User                 @relation(fields: [userId], references: [id])
-  products      Product[]
-  storeSettings VendorStoreSettings?
-  membership    VendorMembership?
-  wallet        VendorWallet?
-  transactions  VendorTransaction[]
-  bankAccount   VendorBankAccount?
-  payouts       VendorPayout[]
+  user           User                  @relation(fields: [userId], references: [id])
+  products       Product[]
+  storeSettings  VendorStoreSettings?
+  membership     VendorMembership?
+  wallet         VendorWallet?
+  transactions   VendorTransaction[]
+  bankAccount    VendorBankAccount?
+  payouts        VendorPayout[]
+  shippingMethod VendorShippingMethod?
 
   @@map("vendor_profiles")
 }
@@ -604,6 +620,60 @@ model VendorPayout {
   bankAccount VendorBankAccount @relation(fields: [bankAccountId], references: [id])
 
   @@map("vendor_payouts")
+}
+
+model VendorShippingMethod {
+  id                  String              @id @default(uuid())
+  vendorId            String              @unique
+  methodType          ShippingMethodType
+  flatCharge          Decimal?            @db.Decimal(10, 2)
+  isFree              Boolean             @default(false)
+  freeAboveOrderValue Decimal?            @db.Decimal(10, 2)
+  freeWithinKm        Float?
+  chargeBeyondKm      Decimal?            @db.Decimal(10, 2)
+  unitCharge          Decimal?            @db.Decimal(10, 2)
+  unitType            ShippingUnitType?
+  isActive            Boolean             @default(true)
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+
+  vendor          VendorProfile                   @relation(fields: [vendorId], references: [id])
+  orderValueTiers VendorShippingOrderValueTier[]
+
+  @@map("vendor_shipping_methods")
+}
+
+model VendorShippingOrderValueTier {
+  id               String   @id @default(uuid())
+  shippingMethodId String
+  minOrderValue    Decimal  @db.Decimal(10, 2)
+  maxOrderValue    Decimal? @db.Decimal(10, 2)
+  shippingCharge   Decimal  @db.Decimal(10, 2)
+  createdAt        DateTime @default(now())
+
+  shippingMethod VendorShippingMethod @relation(fields: [shippingMethodId], references: [id], onDelete: Cascade)
+
+  @@index([shippingMethodId])
+  @@map("vendor_shipping_order_value_tiers")
+}
+
+model ProductShippingOverride {
+  id                  String             @id @default(uuid())
+  productId           String             @unique
+  methodType          ShippingMethodType
+  flatCharge          Decimal?           @db.Decimal(10, 2)
+  isFree              Boolean            @default(false)
+  freeAboveOrderValue Decimal?           @db.Decimal(10, 2)
+  freeWithinKm        Float?
+  chargeBeyondKm      Decimal?           @db.Decimal(10, 2)
+  unitCharge          Decimal?           @db.Decimal(10, 2)
+  unitType            ShippingUnitType?
+  createdAt           DateTime           @default(now())
+  updatedAt           DateTime           @updatedAt
+
+  product Product @relation(fields: [productId], references: [id])
+
+  @@map("product_shipping_overrides")
 }
 
 model ProfessionalProfile {
@@ -793,12 +863,12 @@ model Product {
   updatedAt        DateTime      @updatedAt
   deletedAt        DateTime?
 
-  vendor             VendorProfile       @relation(fields: [vendorId], references: [id])
-  category           Category            @relation(fields: [categoryId], references: [id])
-  brand              Brand?              @relation(fields: [brandId], references: [id])
+  vendor             VendorProfile             @relation(fields: [vendorId], references: [id])
+  category           Category                  @relation(fields: [categoryId], references: [id])
+  brand              Brand?                    @relation(fields: [brandId], references: [id])
   variants           ProductVariant[]
-  // shippingOverride ProductShippingOverride?
-  productSuggestions ProductSuggestion[] @relation("ProductSuggestions")
+  shippingOverride   ProductShippingOverride?
+  productSuggestions ProductSuggestion[]       @relation("ProductSuggestions")
 
   @@map("products")
 }
