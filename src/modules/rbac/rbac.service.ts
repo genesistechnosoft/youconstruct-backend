@@ -69,6 +69,7 @@ export class RbacService {
         id: user.id,
         name: user.name,
         email: user.email,
+        phone: user.phone,
         platformRole: user.platformRole,
       },
       activeContext: sessionContext,

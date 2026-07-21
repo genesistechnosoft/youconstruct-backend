@@ -421,6 +421,7 @@ export class RbacRepository {
       select: {
         id: true,
         email: true,
+        phone: true,
         name: true,
         platformRole: true,
         isActive: true,

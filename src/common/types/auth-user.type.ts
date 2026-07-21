@@ -24,6 +24,7 @@ export type AuthSession = {
     id: string;
     name: string;
     email: string | null;
+    phone: string | null;
     platformRole: PlatformRole;
   };
   activeContext: AuthSessionContext | null;

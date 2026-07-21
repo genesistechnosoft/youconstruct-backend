@@ -1,14 +1,25 @@
-import { ApiProperty } from '@nestjs/swagger';
-import { IsEmail, IsNotEmpty, IsString } from 'class-validator';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import {
+  IsEmail,
+  IsNotEmpty,
+  IsPhoneNumber,
+  IsString,
+  ValidateIf,
+} from 'class-validator';
 
 export class LoginDto {
-  @ApiProperty({ example: 'john@example.com' })
+  @ApiPropertyOptional({ example: 'john@example.com' })
+  @ValidateIf((o: LoginDto) => o.email !== undefined && o.email !== null)
   @IsEmail()
-  @IsNotEmpty()
-  email: string;
+  email?: string;
+
+  @ApiPropertyOptional({ example: '+919876543210' })
+  @ValidateIf((o: LoginDto) => o.phone !== undefined && o.phone !== null)
+  @IsPhoneNumber('IN')
+  phone?: string;
 
   @ApiProperty({ example: 'password123' })
   @IsString()
   @IsNotEmpty()
-  password: string;
+  password!: string;
 }

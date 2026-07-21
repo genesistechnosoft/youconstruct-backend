@@ -177,6 +177,14 @@ export class AuthRepository {
     });
   }
 
+  updatePasswordHash(userId: string, passwordHash: string) {
+    return this.prisma.user.update({
+      where: { id: userId },
+      data: { passwordHash },
+      select: { id: true },
+    });
+  }
+
   createOtp(data: {
     target: string;
     otp: string;

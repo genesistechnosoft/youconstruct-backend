@@ -10,9 +10,11 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Public } from '../../common/decorators/public.decorator';
 import type { AuthenticatedUser } from '../../common/types/auth-user.type';
 import { AuthService } from './auth.service';
+import { DashboardLoginDto } from './dto/dashboard-login.dto';
 import { LoginDto } from './dto/login.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { RegisterDto } from './dto/register.dto';
+import { ResetPasswordDto } from './dto/reset-password.dto';
 import { SendOtpDto } from './dto/send-otp.dto';
 import { VerifyOtpDto } from './dto/verify-otp.dto';
 
@@ -25,7 +27,10 @@ export class AuthController {
   @Post('register')
   @Throttle({ default: { limit: 5, ttl: 60000 } })
   @HttpCode(200)
-  @ApiOperation({ summary: 'Register a new user' })
+  @ApiOperation({
+    summary:
+      'Register with email + password. Phone signup: OTP purpose REGISTER (send → verify).',
+  })
   @ApiResponse({ status: 200, description: 'User registered successfully' })
   @ApiResponse({ status: 400, description: 'Bad request' })
   register(@Body() dto: RegisterDto) {
@@ -36,7 +41,10 @@ export class AuthController {
   @Post('login')
   @Throttle({ default: { limit: 5, ttl: 60000 } })
   @HttpCode(200)
-  @ApiOperation({ summary: 'Customer app login (CUSTOMER accounts only)' })
+  @ApiOperation({
+    summary:
+      'Customer app login (CUSTOMER only). Exactly one of email or phone + password.',
+  })
   @ApiResponse({ status: 200, description: 'Login successful' })
   @ApiResponse({ status: 400, description: 'Bad request' })
   login(@Body() dto: LoginDto) {
@@ -49,11 +57,11 @@ export class AuthController {
   @HttpCode(200)
   @ApiOperation({
     summary:
-      'Dashboard login (VENDOR, PROFESSIONAL, ADMIN, SUPPORT, SUPER_ADMIN)',
+      'Dashboard login with email + password (VENDOR, PROFESSIONAL, ADMIN, SUPPORT, SUPER_ADMIN)',
   })
   @ApiResponse({ status: 200, description: 'Login successful' })
   @ApiResponse({ status: 400, description: 'Bad request' })
-  dashboardLogin(@Body() dto: LoginDto) {
+  dashboardLogin(@Body() dto: DashboardLoginDto) {
     return this.authService.dashboardLogin(dto);
   }
 
@@ -61,7 +69,10 @@ export class AuthController {
   @Post('otp/send')
   @Throttle({ default: { limit: 3, ttl: 60000 } })
   @HttpCode(200)
-  @ApiOperation({ summary: 'Send OTP to phone number' })
+  @ApiOperation({
+    summary:
+      'Send phone OTP. Purposes: REGISTER (new phone), LOGIN / RESET_PASSWORD (existing user).',
+  })
   @ApiResponse({ status: 200, description: 'OTP sent successfully' })
   @ApiResponse({ status: 400, description: 'Bad request' })
   sendOtp(@Body() dto: SendOtpDto) {
@@ -72,11 +83,28 @@ export class AuthController {
   @Post('otp/verify')
   @Throttle({ default: { limit: 5, ttl: 60000 } })
   @HttpCode(200)
-  @ApiOperation({ summary: 'Verify OTP and authenticate' })
+  @ApiOperation({
+    summary:
+      'Verify OTP. REGISTER/LOGIN return session tokens; RESET_PASSWORD returns passwordResetToken only.',
+  })
   @ApiResponse({ status: 200, description: 'OTP verified successfully' })
   @ApiResponse({ status: 400, description: 'Bad request' })
   verifyOtp(@Body() dto: VerifyOtpDto) {
     return this.authService.verifyOtp(dto);
+  }
+
+  @Public()
+  @Post('password/reset')
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
+  @HttpCode(200)
+  @ApiOperation({
+    summary:
+      'Set a new password using passwordResetToken from OTP verify (RESET_PASSWORD)',
+  })
+  @ApiResponse({ status: 200, description: 'Password reset successfully' })
+  @ApiResponse({ status: 401, description: 'Invalid or expired token' })
+  resetPassword(@Body() dto: ResetPasswordDto) {
+    return this.authService.resetPassword(dto);
   }
 
   @Public()

@@ -35,6 +35,13 @@ const DASHBOARD_ROLES: PlatformRole[] = [
 
 const OTP_MAX_FAILURES = 3;
 const OTP_LOCKOUT_WINDOW_MS = 15 * 60 * 1000;
+const PASSWORD_RESET_PURPOSE = 'RESET_PASSWORD';
+const PASSWORD_RESET_EXPIRES_IN = '10m';
+
+type PasswordResetJwtPayload = {
+  userId: string;
+  purpose: typeof PASSWORD_RESET_PURPOSE;
+};
 
 @Injectable()
 export class AuthService {
@@ -58,37 +65,38 @@ export class AuthService {
     }
 
     const platformRole = dto.platformRole ?? PlatformRole.CUSTOMER;
+    const email = this.normalizeOptional(dto.email);
+    const phone = this.normalizeOptional(dto.phone);
 
-    if (dto.email) {
-      const existingEmail = await this.authRepository.findUserByEmail(
-        dto.email,
+    if (phone) {
+      throw new BadRequestException(
+        'Phone registration requires OTP. Use POST /auth/otp/send with purpose REGISTER, then /auth/otp/verify',
       );
-      if (existingEmail) {
-        throw new ConflictException('Email already registered');
-      }
     }
 
-    if (dto.phone) {
-      const existingPhone = await this.authRepository.findUserByPhone(
-        dto.phone,
-      );
-      if (existingPhone) {
-        throw new ConflictException('Phone already registered');
-      }
+    if (!email) {
+      throw new BadRequestException('Email is required');
     }
 
-    let passwordHash: string | undefined;
-    if (dto.password) {
-      this.assertStrongPassword(dto.password, platformRole);
-      passwordHash = await bcrypt.hash(dto.password, 10);
+    if (!dto.password) {
+      throw new BadRequestException('Password is required');
     }
+
+    this.assertStrongPassword(dto.password, platformRole);
+
+    const existingEmail = await this.authRepository.findUserByEmail(email);
+    if (existingEmail) {
+      throw new ConflictException('Email already registered');
+    }
+
+    const passwordHash = await bcrypt.hash(dto.password, 10);
 
     const user = await this.authRepository.createUser({
       name: dto.name,
-      email: dto.email,
-      phone: dto.phone,
+      email,
       passwordHash,
       platformRole,
+      provider: 'EMAIL',
     });
 
     this.securityAudit.log({
@@ -103,8 +111,16 @@ export class AuthService {
     return this.generateTokens(user.id, user.platformRole);
   }
 
-  async login(dto: { email: string; password: string }) {
-    const user = await this.authenticateWithPassword(dto.email, dto.password);
+  async login(dto: { email?: string; phone?: string; password: string }) {
+    const email = this.normalizeOptional(dto.email);
+    const phone = this.normalizeOptional(dto.phone);
+    this.assertExactlyOneContact(email, phone);
+
+    const user = await this.authenticateWithPassword({
+      email,
+      phone,
+      password: dto.password,
+    });
 
     if (user.platformRole !== PlatformRole.CUSTOMER) {
       this.securityAudit.log({
@@ -129,7 +145,10 @@ export class AuthService {
   }
 
   async dashboardLogin(dto: { email: string; password: string }) {
-    const user = await this.authenticateWithPassword(dto.email, dto.password);
+    const user = await this.authenticateWithPassword({
+      email: dto.email,
+      password: dto.password,
+    });
 
     if (!DASHBOARD_ROLES.includes(user.platformRole)) {
       this.securityAudit.log({
@@ -158,6 +177,19 @@ export class AuthService {
   async sendOtp(dto: { phone: string; purpose: string }) {
     await this.assertOtpNotLocked(dto.phone, dto.purpose);
 
+    const existingUser = await this.authRepository.findUserByPhone(dto.phone);
+
+    if (dto.purpose === 'REGISTER' && existingUser) {
+      throw new ConflictException('Phone already registered');
+    }
+
+    if (
+      (dto.purpose === 'LOGIN' || dto.purpose === PASSWORD_RESET_PURPOSE) &&
+      !existingUser
+    ) {
+      throw new BadRequestException('User not found');
+    }
+
     const otp = randomInt(100000, 1000000).toString();
     const otpHash = await bcrypt.hash(otp, 10);
     const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
@@ -168,10 +200,18 @@ export class AuthService {
       otp: otpHash,
       purpose: dto.purpose,
       expiresAt,
+      userId: existingUser?.id,
     });
 
     // TODO: inject Twilio client and send OTP without logging secret values.
-    return { message: 'OTP sent successfully', data: null };
+    const exposeOtp = this.config.get<string>('AUTH_EXPOSE_OTP_IN_RESPONSE');
+    const shouldExpose =
+      exposeOtp === 'true' || exposeOtp === '1' || exposeOtp === 'yes';
+
+    return {
+      message: 'OTP sent successfully',
+      data: shouldExpose ? { otp } : null,
+    };
   }
 
   async verifyOtp(dto: { phone: string; otp: string; purpose: string }) {
@@ -204,28 +244,131 @@ export class AuthService {
     await this.authRepository.markOtpVerified(record.id);
 
     const existingUser = await this.authRepository.findUserByPhone(dto.phone);
-    if (existingUser && !existingUser.isActive) {
-      throw new UnauthorizedException('Invalid credentials');
-    }
 
-    const user =
-      existingUser ??
-      (await this.authRepository.createUser({
+    if (dto.purpose === 'REGISTER') {
+      if (existingUser) {
+        throw new ConflictException('Phone already registered');
+      }
+
+      const user = await this.authRepository.createUser({
         name: dto.phone,
         phone: dto.phone,
         provider: 'PHONE',
-      }));
+        platformRole: PlatformRole.CUSTOMER,
+      });
+      await this.authRepository.markPhoneVerified(user.id);
 
-    await this.authRepository.markPhoneVerified(user.id);
+      this.securityAudit.log({
+        actorUserId: user.id,
+        actorRole: user.platformRole,
+        action: 'OTP_VERIFY',
+        result: 'SUCCESS',
+        metadata: { purpose: 'REGISTER' },
+      });
+
+      return this.generateTokens(user.id, user.platformRole);
+    }
+
+    if (dto.purpose === 'LOGIN') {
+      if (!existingUser || !existingUser.isActive) {
+        throw new UnauthorizedException('Invalid credentials');
+      }
+      if (existingUser.platformRole !== PlatformRole.CUSTOMER) {
+        throw new ForbiddenException(
+          'Use the dashboard login for this account',
+        );
+      }
+
+      await this.authRepository.markPhoneVerified(existingUser.id);
+
+      this.securityAudit.log({
+        actorUserId: existingUser.id,
+        actorRole: existingUser.platformRole,
+        action: 'OTP_VERIFY',
+        result: 'SUCCESS',
+        metadata: { purpose: 'LOGIN' },
+      });
+
+      return this.generateTokens(existingUser.id, existingUser.platformRole);
+    }
+
+    if (dto.purpose === PASSWORD_RESET_PURPOSE) {
+      if (!existingUser || !existingUser.isActive) {
+        throw new UnauthorizedException('Invalid credentials');
+      }
+
+      const passwordResetToken = this.jwtService.sign(
+        {
+          userId: existingUser.id,
+          purpose: PASSWORD_RESET_PURPOSE,
+        } satisfies PasswordResetJwtPayload,
+        {
+          expiresIn: PASSWORD_RESET_EXPIRES_IN,
+          secret: this.config.getOrThrow<string>('JWT_SECRET'),
+        },
+      );
+
+      this.securityAudit.log({
+        actorUserId: existingUser.id,
+        actorRole: existingUser.platformRole,
+        action: 'OTP_VERIFY',
+        result: 'SUCCESS',
+        metadata: { purpose: PASSWORD_RESET_PURPOSE },
+      });
+
+      return {
+        message: 'OTP verified successfully',
+        data: { passwordResetToken },
+      };
+    }
+
+    throw new BadRequestException('Unsupported OTP purpose');
+  }
+
+  async resetPassword(dto: {
+    passwordResetToken: string;
+    newPassword: string;
+  }) {
+    let payload: PasswordResetJwtPayload;
+    try {
+      payload = this.jwtService.verify<PasswordResetJwtPayload>(
+        dto.passwordResetToken,
+        { secret: this.config.getOrThrow<string>('JWT_SECRET') },
+      );
+    } catch {
+      throw new UnauthorizedException(
+        'Invalid or expired password reset token',
+      );
+    }
+
+    if (payload.purpose !== PASSWORD_RESET_PURPOSE || !payload.userId) {
+      throw new UnauthorizedException(
+        'Invalid or expired password reset token',
+      );
+    }
+
+    const user = await this.authRepository.findUserById(payload.userId);
+    if (!user || !user.isActive) {
+      throw new UnauthorizedException(
+        'Invalid or expired password reset token',
+      );
+    }
+
+    this.assertStrongPassword(dto.newPassword, user.platformRole);
+    const passwordHash = await bcrypt.hash(dto.newPassword, 10);
+    await this.authRepository.updatePasswordHash(user.id, passwordHash);
 
     this.securityAudit.log({
       actorUserId: user.id,
       actorRole: user.platformRole,
-      action: 'OTP_VERIFY',
+      action: 'PASSWORD_RESET',
       result: 'SUCCESS',
     });
 
-    return this.generateTokens(user.id, user.platformRole);
+    return {
+      message: 'Password reset successfully',
+      data: null,
+    };
   }
 
   async googleAuth(dto: {
@@ -353,6 +496,22 @@ export class AuthService {
     };
   }
 
+  private assertExactlyOneContact(
+    email: string | undefined,
+    phone: string | undefined,
+  ) {
+    const hasEmail = Boolean(email);
+    const hasPhone = Boolean(phone);
+    if (hasEmail === hasPhone) {
+      throw new BadRequestException('Provide exactly one of email or phone');
+    }
+  }
+
+  private normalizeOptional(value?: string) {
+    const trimmed = value?.trim();
+    return trimmed ? trimmed : undefined;
+  }
+
   private async assertOtpNotLocked(phone: string, purpose: string) {
     const failures = await this.authRepository.countRecentOtpFailures(
       phone,
@@ -391,18 +550,31 @@ export class AuthService {
     }
   }
 
-  private async authenticateWithPassword(email: string, password: string) {
-    const user = await this.authRepository.findUserByEmail(email);
+  private async authenticateWithPassword(input: {
+    email?: string;
+    phone?: string;
+    password: string;
+  }) {
+    const user = input.email
+      ? await this.authRepository.findUserByEmail(input.email)
+      : input.phone
+        ? await this.authRepository.findUserByPhone(input.phone)
+        : null;
+
     if (!user || !user.isActive || !user.passwordHash) {
       this.securityAudit.log({
         action: 'LOGIN',
         result: 'FAILURE',
-        metadata: { email, reason: 'invalid_credentials' },
+        metadata: {
+          email: input.email,
+          phone: input.phone,
+          reason: 'invalid_credentials',
+        },
       });
       throw new UnauthorizedException('Invalid credentials');
     }
 
-    const isMatch = await bcrypt.compare(password, user.passwordHash);
+    const isMatch = await bcrypt.compare(input.password, user.passwordHash);
     if (!isMatch) {
       this.securityAudit.log({
         actorUserId: user.id,

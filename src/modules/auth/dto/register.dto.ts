@@ -17,29 +17,35 @@ const REGISTERABLE_ROLES = [
   PlatformRole.PROFESSIONAL,
 ] as const;
 
+/**
+ * Email + password register only.
+ * Phone signup must use OTP purpose REGISTER (not this endpoint).
+ */
 export class RegisterDto {
   @ApiProperty({ example: 'John Doe' })
   @IsString()
   @IsNotEmpty()
   name!: string;
 
-  @ApiPropertyOptional({ example: 'john@example.com' })
-  @ValidateIf((o: RegisterDto) => !o.phone)
-  @IsNotEmpty({ message: 'Either email or phone must be provided' })
+  @ApiProperty({ example: 'john@example.com' })
   @IsEmail()
-  email?: string;
+  @IsNotEmpty()
+  email!: string;
 
-  @ApiPropertyOptional({ example: '+919876543210' })
-  @ValidateIf((o: RegisterDto) => !o.email)
-  @IsNotEmpty({ message: 'Either email or phone must be provided' })
+  @ApiPropertyOptional({
+    example: '+919876543210',
+    description: 'Not allowed on this endpoint — use OTP REGISTER instead',
+  })
+  @IsOptional()
+  @ValidateIf((o: RegisterDto) => o.phone !== undefined && o.phone !== null)
   @IsPhoneNumber('IN')
   phone?: string;
 
-  @ApiPropertyOptional({ example: 'password123', minLength: 8 })
-  @IsOptional()
+  @ApiProperty({ example: 'password123', minLength: 8 })
   @IsString()
+  @IsNotEmpty()
   @MinLength(8)
-  password?: string;
+  password!: string;
 
   @ApiPropertyOptional({
     enum: REGISTERABLE_ROLES,
