@@ -23,6 +23,9 @@ import { PrismaModule } from './prisma/prisma.module';
 import { MediaModule } from './modules/media/media.module';
 import { VendorStoreModule } from './modules/vendor-store/vendor-store.module';
 import { VendorFinanceModule } from './modules/vendor-finance/vendor-finance.module';
+import { CartModule } from './modules/cart/cart.module';
+import { OrdersModule } from './modules/orders/orders.module';
+import { PaymentsModule } from './modules/payments/payments.module';
 import { QueueModule } from './queue/queue.module';
 import { StorageModule } from './storage/storage.module';
 
@@ -50,6 +53,9 @@ import { StorageModule } from './storage/storage.module';
     VendorOnboardingModule,
     VendorStoreModule,
     VendorFinanceModule,
+    CartModule,
+    OrdersModule,
+    PaymentsModule,
   ],
   controllers: [AppController],
   providers: [

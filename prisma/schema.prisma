@@ -132,6 +132,47 @@ enum ShippingUnitType {
   CBM
 }
 
+enum OrderStatus {
+  PENDING_PAYMENT
+  CONFIRMED
+  PARTIALLY_SHIPPED
+  SHIPPED
+  DELIVERED
+  CANCELLED
+  REFUNDED
+}
+
+enum SubOrderStatus {
+  PENDING
+  CONFIRMED
+  PROCESSING
+  SHIPPED
+  OUT_FOR_DELIVERY
+  DELIVERED
+  CANCELLED
+  REFUNDED
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  FAILED
+  REFUNDED
+}
+
+enum PaymentMethod {
+  COD
+  ONLINE
+}
+
+enum ShipmentStatus {
+  PENDING
+  SHIPPED
+  OUT_FOR_DELIVERY
+  DELIVERED
+  FAILED
+}
+
 enum MediaOwnerType {
   VENDOR
   PROFESSIONAL
@@ -241,6 +282,10 @@ model User {
   impersonationsAsAdmin  ImpersonationLog[]   @relation("ImpersonationAdmin")
   impersonationsAsTarget ImpersonationLog[]   @relation("ImpersonationTarget")
   auditLogsAsActor       SecurityAuditLog[]   @relation("SecurityAuditActor")
+  cart                   Cart?
+  orders                 Order[]
+  orderStatusChanges     OrderStatusHistory[]
+  shipmentUpdates        Shipment[]
 
   @@map("users")
 }
@@ -400,7 +445,8 @@ model Address {
   updatedAt DateTime  @updatedAt
   deletedAt DateTime?
 
-  user User @relation(fields: [userId], references: [id])
+  user   User    @relation(fields: [userId], references: [id])
+  orders Order[]
 
   @@map("addresses")
 }
@@ -474,6 +520,7 @@ model VendorProfile {
   submittedAt      DateTime?
   reviewedAt       DateTime?
   rejectionReason  String?
+  commissionRate   Decimal?               @db.Decimal(5, 4)
   createdAt        DateTime               @default(now())
   updatedAt        DateTime               @updatedAt
   deletedAt        DateTime?
@@ -487,6 +534,7 @@ model VendorProfile {
   bankAccount    VendorBankAccount?
   payouts        VendorPayout[]
   shippingMethod VendorShippingMethod?
+  subOrders      SubOrder[]
 
   @@map("vendor_profiles")
 }
@@ -923,8 +971,8 @@ model ProductVariant {
   baseUnit    Unit?              @relation("BaseUnit", fields: [baseUnitId], references: [id])
   attributes  VariantAttribute[]
   inventory   ProductInventory?
-  // cartItems  CartItem[]        // added in Module 5
-  // orderItems OrderItem[]       // added in Module 5
+  cartItems   CartItem[]
+  orderItems  OrderItem[]
 
   @@map("product_variants")
 }
@@ -983,4 +1031,156 @@ model QuantityCalculatorConfig {
   category Category @relation(fields: [categoryId], references: [id])
 
   @@map("quantity_calculator_configs")
+}
+
+model Cart {
+  id        String   @id @default(uuid())
+  userId    String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user  User       @relation(fields: [userId], references: [id])
+  items CartItem[]
+
+  @@map("carts")
+}
+
+model CartItem {
+  id        String   @id @default(uuid())
+  cartId    String
+  variantId String
+  quantity  Int
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  cart    Cart           @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  variant ProductVariant @relation(fields: [variantId], references: [id])
+
+  @@unique([cartId, variantId])
+  @@map("cart_items")
+}
+
+model Order {
+  id                  String        @id @default(uuid())
+  orderNumber         String        @unique
+  userId              String
+  addressId           String?
+  couponId            String?
+  status              OrderStatus
+  paymentStatus       PaymentStatus @default(PENDING)
+  paymentMethod       PaymentMethod
+  subtotal            Decimal       @db.Decimal(12, 2)
+  discountAmount      Decimal       @default(0) @db.Decimal(12, 2)
+  shippingTotal       Decimal       @db.Decimal(12, 2)
+  taxTotal            Decimal       @default(0) @db.Decimal(12, 2)
+  grandTotal          Decimal       @db.Decimal(12, 2)
+  addressLabel        String?
+  addressLine1        String
+  addressLine2        String?
+  addressCity         String
+  addressState        String
+  addressPincode      String
+  addressLatitude     Float?
+  addressLongitude    Float?
+  razorpayOrderId     String?       @unique
+  razorpayPaymentId   String?       @unique
+  paymentTimeoutJobId String?
+  notes               String?
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+  deletedAt           DateTime?
+
+  user      User       @relation(fields: [userId], references: [id])
+  address   Address?   @relation(fields: [addressId], references: [id])
+  subOrders SubOrder[]
+
+  @@index([userId, createdAt])
+  @@index([status, paymentStatus])
+  @@map("orders")
+}
+
+model SubOrder {
+  id                     String         @id @default(uuid())
+  subOrderNumber         String         @unique
+  orderId                String
+  vendorId               String
+  status                 SubOrderStatus
+  subtotal               Decimal        @db.Decimal(12, 2)
+  shippingCharge         Decimal        @db.Decimal(12, 2)
+  shippingMethodSnapshot Json
+  taxAmount              Decimal        @default(0) @db.Decimal(12, 2)
+  total                  Decimal        @db.Decimal(12, 2)
+  platformCommissionRate Decimal        @db.Decimal(5, 4)
+  platformCommission     Decimal        @db.Decimal(12, 2)
+  vendorEarning          Decimal        @db.Decimal(12, 2)
+  walletCreditedAt       DateTime?
+  notes                  String?
+  createdAt              DateTime       @default(now())
+  updatedAt              DateTime       @updatedAt
+
+  order         Order                @relation(fields: [orderId], references: [id])
+  vendor        VendorProfile        @relation(fields: [vendorId], references: [id])
+  items         OrderItem[]
+  statusHistory OrderStatusHistory[]
+  shipment      Shipment?
+
+  @@index([vendorId, status, createdAt])
+  @@index([orderId])
+  @@map("sub_orders")
+}
+
+model OrderItem {
+  id                 String   @id @default(uuid())
+  subOrderId         String
+  variantId          String
+  productName        String
+  variantName        String?
+  sku                String
+  unitPrice          Decimal  @db.Decimal(12, 2)
+  unitSymbol         String
+  quantity           Int
+  itemShippingCharge Decimal  @default(0) @db.Decimal(12, 2)
+  total              Decimal  @db.Decimal(12, 2)
+  createdAt          DateTime @default(now())
+
+  subOrder SubOrder       @relation(fields: [subOrderId], references: [id])
+  variant  ProductVariant @relation(fields: [variantId], references: [id])
+
+  @@index([subOrderId])
+  @@map("order_items")
+}
+
+model OrderStatusHistory {
+  id              String         @id @default(uuid())
+  subOrderId      String
+  status          SubOrderStatus
+  changedByUserId String?
+  note            String?
+  createdAt       DateTime       @default(now())
+
+  subOrder  SubOrder @relation(fields: [subOrderId], references: [id])
+  changedBy User?    @relation(fields: [changedByUserId], references: [id])
+
+  @@index([subOrderId, createdAt])
+  @@map("order_status_history")
+}
+
+model Shipment {
+  id                String         @id @default(uuid())
+  subOrderId        String         @unique
+  trackingNumber    String?
+  courierName       String?
+  shippingLabelUrl  String?
+  estimatedDelivery DateTime?
+  shippedAt         DateTime?
+  deliveredAt       DateTime?
+  status            ShipmentStatus @default(PENDING)
+  lastUpdatedBy     String?
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+
+  subOrder SubOrder @relation(fields: [subOrderId], references: [id])
+  updater  User?    @relation(fields: [lastUpdatedBy], references: [id])
+
+  @@map("shipments")
 }

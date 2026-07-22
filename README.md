@@ -23,7 +23,9 @@
 
 ## Description
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+YouConstruct NestJS API (multi-vendor construction marketplace).
+
+Deferred Super Admin platform settings (commission, payment methods, tax, wallet credit timing): see [docs/deferred-platform-settings.md](docs/deferred-platform-settings.md).
 
 ## Project setup
 
