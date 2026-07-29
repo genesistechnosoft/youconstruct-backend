@@ -15,10 +15,7 @@ export class CustomerCheckoutController {
   @Post()
   @HttpCode(200)
   @ApiOperation({ summary: 'Place order from cart' })
-  checkout(
-    @CurrentUser() user: { userId: string },
-    @Body() dto: CheckoutDto,
-  ) {
+  checkout(@CurrentUser() user: { userId: string }, @Body() dto: CheckoutDto) {
     return this.ordersService.checkout(user.userId, dto);
   }
 }
