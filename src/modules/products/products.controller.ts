@@ -20,6 +20,7 @@ import {
   ApiOperation,
   ApiTags,
 } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import { memoryStorage } from 'multer';
 import { PermissionScope } from '../../../generated/prisma/client.js';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -50,10 +51,18 @@ export class ProductsController {
   constructor(private readonly productsService: ProductsService) {}
 
   @Get()
+  @Throttle({ default: { limit: 60, ttl: 60000 } })
   @HttpCode(200)
   @ApiOperation({ summary: 'Browse active products' })
   browseProducts(@Query() filters: BrowseProductsDto) {
     return this.productsService.browseProducts(filters);
+  }
+
+  @Get('by-slug/:slug')
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Get active product detail by slug' })
+  getProductBySlug(@Param('slug') slug: string) {
+    return this.productsService.getProductBySlug(slug);
   }
 
   @Get(':id')
@@ -144,6 +153,20 @@ export class VendorProductsController {
     @Param('id', ParseUUIDPipe) id: string,
   ) {
     return this.productsService.submitForApproval(
+      requireVendorEntityId(user),
+      id,
+    );
+  }
+
+  @Post(':id/unpublish')
+  @HttpCode(200)
+  @Permissions(PERMISSIONS.VENDOR.PRODUCTS_EDIT)
+  @ApiOperation({ summary: 'Unpublish an active product' })
+  unpublishProduct(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.productsService.unpublishProduct(
       requireVendorEntityId(user),
       id,
     );
@@ -428,17 +451,46 @@ export class AdminProductsController {
   @Patch(':id/approve')
   @HttpCode(200)
   @ApiOperation({ summary: 'Approve a product' })
-  approveProduct(@Param('id', ParseUUIDPipe) id: string) {
-    return this.productsService.approveProduct(id);
+  approveProduct(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.productsService.approveProduct(id, user.userId);
   }
 
   @Patch(':id/reject')
   @HttpCode(200)
   @ApiOperation({ summary: 'Reject a product' })
   rejectProduct(
+    @CurrentUser() user: AuthenticatedUser,
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: RejectProductDto,
   ) {
-    return this.productsService.rejectProduct(id, dto);
+    return this.productsService.rejectProduct(id, user.userId, dto);
+  }
+
+  @Post(':id/approve-content')
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'Approve staged content changes on an active product',
+  })
+  approveContentReview(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.productsService.approveContentReview(id, user.userId);
+  }
+
+  @Post(':id/reject-content')
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'Reject staged content changes on an active product',
+  })
+  rejectContentReview(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: RejectProductDto,
+  ) {
+    return this.productsService.rejectContentReview(id, user.userId, dto);
   }
 }

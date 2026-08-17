@@ -1,14 +1,20 @@
 import {
   BadRequestException,
   ForbiddenException,
+  Inject,
   Injectable,
   NotFoundException,
+  forwardRef,
 } from '@nestjs/common';
 import {
+  MediaContext,
+  MediaEntityType,
+  MediaOwnerType,
   Prisma,
   ShippingMethodType,
   ShippingUnitType,
 } from '../../../generated/prisma/client.js';
+import { MediaService } from '../media/media.service';
 import { CreateShippingTierDto } from './dto/create-shipping-tier.dto';
 import { UpdateStoreSettingsDto } from './dto/update-store-settings.dto';
 import { UpdateVendorMembershipDto } from './dto/update-vendor-membership.dto';
@@ -33,7 +39,11 @@ type ShippingChargeInput = {
 
 @Injectable()
 export class VendorStoreService {
-  constructor(private readonly vendorStoreRepository: VendorStoreRepository) {}
+  constructor(
+    private readonly vendorStoreRepository: VendorStoreRepository,
+    @Inject(forwardRef(() => MediaService))
+    private readonly mediaService: MediaService,
+  ) {}
 
   async getStoreSettings(vendorProfileId: string) {
     await this.requireApprovedVendor(vendorProfileId);
@@ -44,6 +54,64 @@ export class VendorStoreService {
       message: 'Store settings fetched successfully',
       data: settings,
     };
+  }
+
+  async uploadStoreBrandMedia(
+    vendorProfileId: string,
+    actorUserId: string,
+    context: MediaContext,
+    file: Express.Multer.File | undefined,
+  ) {
+    await this.requireApprovedVendor(vendorProfileId);
+    return this.mediaService.uploadVendorMediaForEntityContext(
+      actorUserId,
+      vendorProfileId,
+      file,
+      MediaEntityType.VENDOR_PROFILE,
+      vendorProfileId,
+      context,
+    );
+  }
+
+  async linkStoreBrandMedia(
+    vendorProfileId: string,
+    context: MediaContext,
+    mediaId: string,
+  ) {
+    await this.requireApprovedVendor(vendorProfileId);
+    return this.mediaService.setEntityMediaContext(
+      { ownerType: MediaOwnerType.VENDOR, ownerId: vendorProfileId },
+      MediaEntityType.VENDOR_PROFILE,
+      vendorProfileId,
+      context,
+      mediaId,
+    );
+  }
+
+  async clearStoreBrandMedia(vendorProfileId: string, context: MediaContext) {
+    await this.requireApprovedVendor(vendorProfileId);
+    return this.mediaService.clearEntityMediaContext(
+      MediaEntityType.VENDOR_PROFILE,
+      vendorProfileId,
+      context,
+    );
+  }
+
+  async getStoreBrandMedia(vendorProfileId: string) {
+    const [logo, banner] = await Promise.all([
+      this.mediaService.getEntityMediaByContext(
+        MediaEntityType.VENDOR_PROFILE,
+        vendorProfileId,
+        MediaContext.LOGO,
+      ),
+      this.mediaService.getEntityMediaByContext(
+        MediaEntityType.VENDOR_PROFILE,
+        vendorProfileId,
+        MediaContext.BANNER,
+      ),
+    ]);
+
+    return { logo, banner };
   }
 
   async updateStoreSettings(

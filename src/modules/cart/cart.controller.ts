@@ -10,12 +10,14 @@ import {
   Post,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { PlatformRole, Roles } from '../../common/decorators/roles.decorator';
 import { CartService } from './cart.service';
 import { AddCartItemDto } from './dto/add-cart-item.dto';
 import { ShippingQuoteDto } from './dto/shipping-quote.dto';
 import { UpdateCartItemDto } from './dto/update-cart-item.dto';
+import { PreviewCouponDto } from '../coupons/dto/coupon.dto';
 
 @ApiTags('Customer - Cart')
 @ApiBearerAuth()
@@ -32,6 +34,7 @@ export class CartController {
   }
 
   @Post('items')
+  @Throttle({ default: { limit: 30, ttl: 60000 } })
   @HttpCode(200)
   @ApiOperation({ summary: 'Add item to cart' })
   addItem(
@@ -42,6 +45,7 @@ export class CartController {
   }
 
   @Patch('items/:variantId')
+  @Throttle({ default: { limit: 30, ttl: 60000 } })
   @HttpCode(200)
   @ApiOperation({ summary: 'Update cart item quantity' })
   updateItem(
@@ -53,6 +57,7 @@ export class CartController {
   }
 
   @Delete('items/:variantId')
+  @Throttle({ default: { limit: 30, ttl: 60000 } })
   @HttpCode(200)
   @ApiOperation({ summary: 'Remove cart item' })
   removeItem(
@@ -63,6 +68,7 @@ export class CartController {
   }
 
   @Delete()
+  @Throttle({ default: { limit: 30, ttl: 60000 } })
   @HttpCode(200)
   @ApiOperation({ summary: 'Clear cart' })
   clearCart(@CurrentUser() user: { userId: string }) {
@@ -77,5 +83,15 @@ export class CartController {
     @Body() dto: ShippingQuoteDto,
   ) {
     return this.cartService.shippingQuote(user.userId, dto.addressId);
+  }
+
+  @Post('coupon/preview')
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Preview coupon discount for current cart' })
+  previewCoupon(
+    @CurrentUser() user: { userId: string },
+    @Body() dto: PreviewCouponDto,
+  ) {
+    return this.cartService.previewCoupon(user.userId, dto);
   }
 }

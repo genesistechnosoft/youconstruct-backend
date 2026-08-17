@@ -92,7 +92,7 @@ export class VendorFinanceRepository {
   findVendorById(vendorId: string) {
     return this.prisma.vendorProfile.findFirst({
       where: { id: vendorId, deletedAt: null },
-      select: { id: true },
+      select: { id: true, userId: true },
     });
   }
 
@@ -146,8 +146,8 @@ export class VendorFinanceRepository {
   }
 
   findBankAccount(vendorId: string) {
-    return this.prisma.vendorBankAccount.findUnique({
-      where: { vendorId },
+    return this.prisma.vendorBankAccount.findFirst({
+      where: { vendorId, deletedAt: null },
       select: BANK_ACCOUNT_SELECT,
     });
   }
@@ -163,8 +163,19 @@ export class VendorFinanceRepository {
     },
   ) {
     try {
-      return await this.prisma.vendorBankAccount.create({
-        data: {
+      return await this.prisma.vendorBankAccount.upsert({
+        where: { vendorId },
+        update: {
+          accountHolderName: data.accountHolderName,
+          accountNumber: data.accountNumber,
+          ifscCode: data.ifscCode,
+          bankName: data.bankName,
+          branchName: data.branchName,
+          isVerified: false,
+          verifiedAt: null,
+          deletedAt: null,
+        },
+        create: {
           vendorId,
           accountHolderName: data.accountHolderName,
           accountNumber: data.accountNumber,
@@ -204,8 +215,13 @@ export class VendorFinanceRepository {
 
   async deleteBankAccount(vendorId: string) {
     try {
-      await this.prisma.vendorBankAccount.delete({
+      await this.prisma.vendorBankAccount.update({
         where: { vendorId },
+        data: {
+          deletedAt: new Date(),
+          isVerified: false,
+          verifiedAt: null,
+        },
       });
     } catch (error) {
       this.handlePrismaError(error);

@@ -1,6 +1,6 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { Type } from 'class-transformer';
-import { IsEnum, IsInt, IsOptional, Min } from 'class-validator';
+import { Transform, Type } from 'class-transformer';
+import { IsBoolean, IsEnum, IsInt, IsOptional, Min } from 'class-validator';
 import { ProductStatus } from '../../../../generated/prisma/client.js';
 
 export class ProductFiltersDto {
@@ -8,6 +8,16 @@ export class ProductFiltersDto {
   @IsOptional()
   @IsEnum(ProductStatus)
   status?: ProductStatus;
+
+  @ApiPropertyOptional({ example: true })
+  @IsOptional()
+  @Transform(({ value }) => {
+    if (value === 'true' || value === true) return true;
+    if (value === 'false' || value === false) return false;
+    return value;
+  })
+  @IsBoolean()
+  pendingContentReview?: boolean;
 
   @ApiPropertyOptional({ example: 1, default: 1 })
   @IsOptional()

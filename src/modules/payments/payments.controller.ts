@@ -9,6 +9,7 @@ import {
 } from '@nestjs/common';
 import type { RawBodyRequest } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import type { Request } from 'express';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Public } from '../../common/decorators/public.decorator';
@@ -22,6 +23,7 @@ export class PaymentsController {
   constructor(private readonly paymentsService: PaymentsService) {}
 
   @Post('verify')
+  @Throttle({ default: { limit: 10, ttl: 60000 } })
   @HttpCode(200)
   @Roles(PlatformRole.CUSTOMER)
   @ApiBearerAuth()

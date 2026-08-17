@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { MediaModule } from '../media/media.module';
+import { PlatformSettingsModule } from '../platform-settings/platform-settings.module';
 import {
   AdminVendorsController,
   VendorOnboardingController,
@@ -8,7 +9,7 @@ import { VendorOnboardingRepository } from './vendor-onboarding.repository';
 import { VendorOnboardingService } from './vendor-onboarding.service';
 
 @Module({
-  imports: [MediaModule],
+  imports: [MediaModule, PlatformSettingsModule],
   controllers: [VendorOnboardingController, AdminVendorsController],
   providers: [VendorOnboardingService, VendorOnboardingRepository],
   exports: [VendorOnboardingService],

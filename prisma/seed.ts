@@ -15,6 +15,7 @@ import {
   PERMISSIONS,
   PLATFORM_ADMIN_ROLE_NAME,
 } from '../src/modules/rbac/permissions.constants';
+import { PLATFORM_SETTING_DEFINITIONS } from '../src/modules/platform-settings/platform-settings.constants';
 
 const DEFAULT_PASSWORD = 'Password@123';
 
@@ -59,6 +60,22 @@ const brands = [
   { name: 'Jaguar', slug: 'jaguar' },
   { name: 'Hindware', slug: 'hindware' },
   { name: 'Cera', slug: 'cera' },
+] as const;
+
+const attributeDefinitions = [
+  { name: 'Size', unit: null },
+  { name: 'Finish', unit: null },
+  { name: 'Thickness', unit: 'mm' },
+  { name: 'Color', unit: null },
+  { name: 'Volume', unit: 'L' },
+  { name: 'Weight', unit: 'kg' },
+  { name: 'Material', unit: null },
+  { name: 'Coverage Area', unit: 'sqft' },
+  { name: 'Length', unit: 'm' },
+  { name: 'Width', unit: 'm' },
+  { name: 'Height', unit: 'm' },
+  { name: 'Grade', unit: null },
+  { name: 'Pattern', unit: null },
 ] as const;
 
 type CategorySeed = {
@@ -228,8 +245,27 @@ const categories: CategorySeed[] = [
   },
 ];
 
+function positiveIntFromEnv(key: string, fallback: number) {
+  const raw = process.env[key];
+  if (!raw) {
+    return fallback;
+  }
+
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
+  max: positiveIntFromEnv('DATABASE_POOL_MAX', 10),
+  idleTimeoutMillis: positiveIntFromEnv(
+    'DATABASE_POOL_IDLE_TIMEOUT_MS',
+    30_000,
+  ),
+  connectionTimeoutMillis: positiveIntFromEnv(
+    'DATABASE_POOL_CONNECTION_TIMEOUT_MS',
+    10_000,
+  ),
 });
 const prisma = new PrismaClient({ adapter: new PrismaPg(pool) });
 
@@ -267,6 +303,52 @@ async function seedBrands() {
   }
 
   console.log(`Seeded ${brands.length} brands`);
+}
+
+async function seedAttributeDefinitions() {
+  for (const attribute of attributeDefinitions) {
+    await prisma.attributeDefinition.upsert({
+      where: { name: attribute.name },
+      update: { unit: attribute.unit },
+      create: attribute,
+    });
+  }
+
+  console.log(`Seeded ${attributeDefinitions.length} attribute definitions`);
+}
+
+async function seedPlatformSettings() {
+  for (const definition of PLATFORM_SETTING_DEFINITIONS) {
+    await prisma.platformSetting.upsert({
+      where: {
+        namespace_key: {
+          namespace: definition.namespace,
+          key: definition.key,
+        },
+      },
+      update: {
+        valueType: definition.valueType,
+        label: definition.label,
+        description: definition.description,
+        isEditable: definition.isEditable,
+        isPublic: definition.isPublic,
+      },
+      create: {
+        namespace: definition.namespace,
+        key: definition.key,
+        value: definition.defaultValue,
+        valueType: definition.valueType,
+        label: definition.label,
+        description: definition.description,
+        isEditable: definition.isEditable,
+        isPublic: definition.isPublic,
+      },
+    });
+  }
+
+  console.log(
+    `Seeded ${PLATFORM_SETTING_DEFINITIONS.length} platform settings`,
+  );
 }
 
 async function upsertCategory(
@@ -500,6 +582,7 @@ async function seedApprovedVendor(passwordHash: string) {
     where: { userId: vendorUser.id },
     update: {
       businessName: 'YouConstruct Demo Stores',
+      slug: 'youconstruct-demo-stores',
       businessAddress: '42 Market Road',
       city: 'Bengaluru',
       state: 'Karnataka',
@@ -516,6 +599,7 @@ async function seedApprovedVendor(passwordHash: string) {
     create: {
       userId: vendorUser.id,
       businessName: 'YouConstruct Demo Stores',
+      slug: 'youconstruct-demo-stores',
       businessAddress: '42 Market Road',
       city: 'Bengaluru',
       state: 'Karnataka',
@@ -825,7 +909,9 @@ async function main() {
 
   await seedUnits();
   await seedBrands();
+  await seedAttributeDefinitions();
   await seedCategories();
+  await seedPlatformSettings();
   await seedPermissions();
   const platformAdminRole = await seedPlatformAdminRole();
   await seedSuperAdmin(passwordHash);

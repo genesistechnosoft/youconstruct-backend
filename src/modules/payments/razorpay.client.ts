@@ -48,6 +48,24 @@ export class RazorpayClient implements OnModuleInit {
     };
   }
 
+  async createRefund(input: {
+    paymentId: string;
+    amountPaise: number;
+    notes?: Record<string, string>;
+  }) {
+    const refund = await this.client.payments.refund(input.paymentId, {
+      amount: input.amountPaise,
+      notes: input.notes,
+    });
+
+    return {
+      id: String(refund.id),
+      amount: Number(refund.amount),
+      status: String(refund.status ?? ''),
+      payload: refund as unknown as Record<string, unknown>,
+    };
+  }
+
   verifyPaymentSignature(input: {
     razorpayOrderId: string;
     razorpayPaymentId: string;

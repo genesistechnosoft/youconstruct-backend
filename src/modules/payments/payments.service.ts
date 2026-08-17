@@ -5,6 +5,8 @@ import {
   Logger,
   forwardRef,
 } from '@nestjs/common';
+import { DOMAIN_ERROR_CODES } from '../../common/errors/domain-error-code';
+import { domainBadRequest } from '../../common/errors/domain-exception';
 import { OrdersService } from '../orders/orders.service';
 import { VerifyPaymentDto } from './dto/verify-payment.dto';
 import { RazorpayClient } from './razorpay.client';
@@ -26,7 +28,10 @@ export class PaymentsService {
       razorpaySignature: dto.razorpaySignature,
     });
     if (!valid) {
-      throw new BadRequestException('Invalid payment signature');
+      throw domainBadRequest(
+        DOMAIN_ERROR_CODES.PAYMENT_SIGNATURE_INVALID,
+        'Invalid payment signature',
+      );
     }
 
     const result = await this.ordersService.captureOnlinePayment({
@@ -45,7 +50,10 @@ export class PaymentsService {
 
   async handleWebhook(rawBody: Buffer, signature: string | undefined) {
     if (!signature) {
-      throw new BadRequestException('Missing webhook signature');
+      throw domainBadRequest(
+        DOMAIN_ERROR_CODES.PAYMENT_SIGNATURE_INVALID,
+        'Missing webhook signature',
+      );
     }
 
     const valid = this.razorpayClient.verifyWebhookSignature(
@@ -53,7 +61,10 @@ export class PaymentsService {
       signature,
     );
     if (!valid) {
-      throw new BadRequestException('Invalid webhook signature');
+      throw domainBadRequest(
+        DOMAIN_ERROR_CODES.PAYMENT_SIGNATURE_INVALID,
+        'Invalid webhook signature',
+      );
     }
 
     let payload: {

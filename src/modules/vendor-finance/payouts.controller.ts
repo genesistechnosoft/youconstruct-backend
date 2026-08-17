@@ -51,6 +51,7 @@ export class VendorPayoutsController {
     @Body() dto: RequestPayoutDto,
   ) {
     return this.vendorFinanceService.requestPayout(
+      user.userId,
       requireVendorEntityId(user),
       dto,
     );

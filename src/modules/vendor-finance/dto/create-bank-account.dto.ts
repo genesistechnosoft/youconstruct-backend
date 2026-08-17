@@ -42,4 +42,9 @@ export class CreateBankAccountDto {
   @IsString()
   @MaxLength(120)
   branchName?: string;
+
+  @ApiProperty({ example: 'eyJhbGciOiJIUzI1NiIs...' })
+  @IsString()
+  @IsNotEmpty()
+  stepUpToken!: string;
 }

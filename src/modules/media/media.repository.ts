@@ -411,6 +411,34 @@ export class MediaRepository {
     });
   }
 
+  findLinksByEntityIds(
+    entityType: MediaEntityType,
+    entityIds: string[],
+    context?: MediaContext,
+  ) {
+    if (entityIds.length === 0) {
+      return Promise.resolve([]);
+    }
+
+    return this.prisma.mediaLink.findMany({
+      where: {
+        entityType,
+        entityId: { in: entityIds },
+        deletedAt: null,
+        ...(context && { context }),
+        media: {
+          deletedAt: null,
+          processingStatus: MediaProcessingStatus.READY,
+        },
+      },
+      orderBy: [
+        { isPrimary: Prisma.SortOrder.desc },
+        { sortOrder: Prisma.SortOrder.asc },
+      ],
+      select: MEDIA_LINK_SELECT,
+    });
+  }
+
   countReadyLinks(entityType: MediaEntityType, entityId: string) {
     return this.prisma.mediaLink.count({
       where: {
@@ -436,6 +464,53 @@ export class MediaRepository {
       where: { mediaId, entityType, entityId, context, deletedAt: null },
       data: { deletedAt: new Date(), isPrimary: false },
     });
+  }
+
+  async softDeleteLinksByContext(
+    entityType: MediaEntityType,
+    entityId: string,
+    context: MediaContext,
+  ) {
+    return this.prisma.mediaLink.updateMany({
+      where: { entityType, entityId, context, deletedAt: null },
+      data: { deletedAt: new Date(), isPrimary: false },
+    });
+  }
+
+  async replaceLink(
+    mediaId: string,
+    entityType: MediaEntityType,
+    entityId: string,
+    context: MediaContext,
+  ) {
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+        await tx.mediaLink.updateMany({
+          where: { entityType, entityId, context, deletedAt: null },
+          data: { deletedAt: new Date(), isPrimary: false },
+        });
+
+        await tx.mediaLink.create({
+          data: {
+            mediaId,
+            entityType,
+            entityId,
+            context,
+            isPrimary: true,
+            sortOrder: 0,
+          },
+          select: { id: true },
+        });
+
+        return tx.mediaLink.findMany({
+          where: { entityType, entityId, context, deletedAt: null },
+          orderBy: { sortOrder: Prisma.SortOrder.asc },
+          select: MEDIA_LINK_SELECT,
+        });
+      });
+    } catch (error) {
+      this.handlePrismaError(error);
+    }
   }
 
   async reorderLinks(

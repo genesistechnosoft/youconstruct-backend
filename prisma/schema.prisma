@@ -242,6 +242,96 @@ enum MediaProcessingJobStatus {
   FAILED
 }
 
+enum PlatformSettingValueType {
+  STRING
+  NUMBER
+  BOOLEAN
+  DECIMAL_STRING
+  JSON
+  STRING_ARRAY
+}
+
+enum OrderRefundStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+enum RestockStatus {
+  NOT_REQUIRED
+  PENDING
+  COMPLETED
+  FAILED
+}
+
+enum NotificationChannel {
+  IN_APP
+  FCM
+  SMS
+  EMAIL
+}
+
+enum NotificationEventType {
+  ORDER_PLACED
+  ORDER_PAID
+  ORDER_CANCELLED
+  ORDER_REFUNDED
+  ORDER_SHIPPED
+  ORDER_DELIVERED
+  PRODUCT_APPROVED
+  PRODUCT_REJECTED
+  KYC_APPROVED
+  KYC_REJECTED
+  PAYOUT_PROCESSING
+  PAYOUT_COMPLETED
+  PAYOUT_FAILED
+  COUPON_CREATED
+  BULK_UPLOAD_COMPLETED
+  BULK_UPLOAD_FAILED
+}
+
+enum NotificationDeliveryStatus {
+  PENDING
+  SENT
+  FAILED
+  SKIPPED
+}
+
+enum CouponScope {
+  PLATFORM
+  VENDOR
+}
+
+enum CouponDiscountType {
+  FIXED
+  PERCENTAGE
+}
+
+enum CouponStatus {
+  DRAFT
+  ACTIVE
+  INACTIVE
+  EXPIRED
+}
+
+enum BulkProductUploadStatus {
+  UPLOADED
+  VALIDATING
+  VALIDATED
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+enum BulkProductUploadRowStatus {
+  PENDING
+  VALID
+  INVALID
+  IMPORTED
+  FAILED
+}
+
 // ─────────────────────────────────────────────
 // MODELS
 // ─────────────────────────────────────────────
@@ -269,25 +359,58 @@ model User {
   updatedAt       DateTime     @updatedAt
   deletedAt       DateTime?
 
-  addresses              Address[]
-  refreshTokens          RefreshToken[]
-  otpVerifications       OtpVerification[]
-  kycDocuments           KycDocument[]
-  uploadedMedia          Media[]
-  vendorProfile          VendorProfile?
-  professionalProfile    ProfessionalProfile?
-  customRolesCreated     CustomRole[]         @relation("CustomRolesCreated")
-  teamMemberships        TeamMember[]
-  invitationsSent        Invitation[]         @relation("InvitationsSent")
-  impersonationsAsAdmin  ImpersonationLog[]   @relation("ImpersonationAdmin")
-  impersonationsAsTarget ImpersonationLog[]   @relation("ImpersonationTarget")
-  auditLogsAsActor       SecurityAuditLog[]   @relation("SecurityAuditActor")
-  cart                   Cart?
-  orders                 Order[]
-  orderStatusChanges     OrderStatusHistory[]
-  shipmentUpdates        Shipment[]
+  addresses               Address[]
+  refreshTokens           RefreshToken[]
+  otpVerifications        OtpVerification[]
+  kycDocuments            KycDocument[]
+  uploadedMedia           Media[]
+  vendorProfile           VendorProfile?
+  professionalProfile     ProfessionalProfile?
+  customRolesCreated      CustomRole[]         @relation("CustomRolesCreated")
+  teamMemberships         TeamMember[]
+  invitationsSent         Invitation[]         @relation("InvitationsSent")
+  impersonationsAsAdmin   ImpersonationLog[]   @relation("ImpersonationAdmin")
+  impersonationsAsTarget  ImpersonationLog[]   @relation("ImpersonationTarget")
+  auditLogsAsActor        SecurityAuditLog[]   @relation("SecurityAuditActor")
+  cart                    Cart?
+  orders                  Order[]
+  orderStatusChanges      OrderStatusHistory[]
+  shipmentUpdates         Shipment[]
+  platformSettingsUpdated PlatformSetting[]
+  orderRefundsInitiated   OrderRefund[]        @relation("OrderRefundInitiator")
+  orderCancellations      OrderCancellation[]  @relation("OrderCancellationActor")
+  notifications           Notification[]
+  wishlistItems           WishlistItem[]
+  couponsCreated          Coupon[]             @relation("CouponCreator")
+  couponUsages            CouponUsage[]
+  homepageBannersCreated  HomepageBanner[]     @relation("HomepageBannerCreator")
+  homepageBannersUpdated  HomepageBanner[]     @relation("HomepageBannerUpdater")
+  bulkProductUploads      BulkProductUpload[]
 
   @@map("users")
+}
+
+model PlatformSetting {
+  id              String                   @id @default(uuid())
+  namespace       String
+  key             String
+  value           Json
+  valueType       PlatformSettingValueType
+  label           String
+  description     String?
+  isEditable      Boolean                  @default(true)
+  isPublic        Boolean                  @default(false)
+  updatedByUserId String?
+  createdAt       DateTime                 @default(now())
+  updatedAt       DateTime                 @updatedAt
+
+  updatedBy User? @relation(fields: [updatedByUserId], references: [id])
+
+  @@unique([namespace, key])
+  @@index([namespace])
+  @@index([isEditable])
+  @@index([updatedAt])
+  @@map("platform_settings")
 }
 
 model Permission {
@@ -448,6 +571,7 @@ model Address {
   user   User    @relation(fields: [userId], references: [id])
   orders Order[]
 
+  @@index([userId, deletedAt])
   @@map("addresses")
 }
 
@@ -506,6 +630,7 @@ model VendorProfile {
   id               String                 @id @default(uuid())
   userId           String                 @unique
   businessName     String
+  slug             String?                @unique
   businessAddress  String?
   city             String?
   state            String?
@@ -535,7 +660,11 @@ model VendorProfile {
   payouts        VendorPayout[]
   shippingMethod VendorShippingMethod?
   subOrders      SubOrder[]
+  coupons        Coupon[]
+  bulkUploads    BulkProductUpload[]
 
+  @@index([onboardingStatus, createdAt])
+  @@index([isApproved, deletedAt])
   @@map("vendor_profiles")
 }
 
@@ -626,6 +755,8 @@ model VendorTransaction {
   vendor VendorProfile @relation(fields: [vendorId], references: [id])
   wallet VendorWallet  @relation(fields: [walletId], references: [id])
 
+  @@index([vendorId, createdAt])
+  @@index([walletId, createdAt])
   @@map("vendor_transactions")
 }
 
@@ -641,10 +772,13 @@ model VendorBankAccount {
   verifiedAt        DateTime?
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
+  deletedAt         DateTime?
 
   vendor  VendorProfile  @relation(fields: [vendorId], references: [id])
   payouts VendorPayout[]
 
+  @@index([vendorId, deletedAt])
+  @@index([isVerified, deletedAt])
   @@map("vendor_bank_accounts")
 }
 
@@ -667,25 +801,28 @@ model VendorPayout {
   wallet      VendorWallet      @relation(fields: [walletId], references: [id])
   bankAccount VendorBankAccount @relation(fields: [bankAccountId], references: [id])
 
+  @@index([vendorId, status, createdAt])
+  @@index([walletId, status, createdAt])
+  @@index([bankAccountId])
   @@map("vendor_payouts")
 }
 
 model VendorShippingMethod {
-  id                  String              @id @default(uuid())
-  vendorId            String              @unique
+  id                  String             @id @default(uuid())
+  vendorId            String             @unique
   methodType          ShippingMethodType
-  flatCharge          Decimal?            @db.Decimal(10, 2)
-  isFree              Boolean             @default(false)
-  freeAboveOrderValue Decimal?            @db.Decimal(10, 2)
+  flatCharge          Decimal?           @db.Decimal(10, 2)
+  isFree              Boolean            @default(false)
+  freeAboveOrderValue Decimal?           @db.Decimal(10, 2)
   freeWithinKm        Float?
-  chargeBeyondKm      Decimal?            @db.Decimal(10, 2)
-  unitCharge          Decimal?            @db.Decimal(10, 2)
+  chargeBeyondKm      Decimal?           @db.Decimal(10, 2)
+  unitCharge          Decimal?           @db.Decimal(10, 2)
   unitType            ShippingUnitType?
-  isActive            Boolean             @default(true)
-  createdAt           DateTime            @default(now())
-  updatedAt           DateTime            @updatedAt
+  isActive            Boolean            @default(true)
+  createdAt           DateTime           @default(now())
+  updatedAt           DateTime           @updatedAt
 
-  vendor          VendorProfile                   @relation(fields: [vendorId], references: [id])
+  vendor          VendorProfile                  @relation(fields: [vendorId], references: [id])
   orderValueTiers VendorShippingOrderValueTier[]
 
   @@map("vendor_shipping_methods")
@@ -779,11 +916,12 @@ model Media {
   updatedAt        DateTime              @updatedAt
   deletedAt        DateTime?
 
-  uploader       User                 @relation(fields: [uploadedBy], references: [id])
-  folder         MediaFolder?         @relation(fields: [folderId], references: [id])
-  links          MediaLink[]
-  processingJobs MediaProcessingJob[]
-  kycDocuments   KycDocument[]
+  uploader        User                 @relation(fields: [uploadedBy], references: [id])
+  folder          MediaFolder?         @relation(fields: [folderId], references: [id])
+  links           MediaLink[]
+  processingJobs  MediaProcessingJob[]
+  kycDocuments    KycDocument[]
+  homepageBanners HomepageBanner[]
 
   @@index([uploadedBy])
   @@index([ownerType, ownerId])
@@ -874,6 +1012,8 @@ model Category {
   quantityCalculatorConfig QuantityCalculatorConfig?
   productSuggestions       ProductSuggestion[]
 
+  @@index([parentId, isActive, deletedAt, sortOrder])
+  @@index([isActive, deletedAt, sortOrder])
   @@map("categories")
 }
 
@@ -888,36 +1028,46 @@ model Brand {
 
   products Product[]
 
+  @@index([isActive, deletedAt, name])
   @@map("brands")
 }
 
 model Product {
-  id               String        @id @default(uuid())
-  vendorId         String
-  categoryId       String
-  brandId          String?
-  name             String
-  slug             String        @unique
-  description      String
-  shortDescription String
-  status           ProductStatus @default(DRAFT)
-  isReturnable     Boolean       @default(false)
-  returnWindowDays Int?
-  tags             String[]
-  metaTitle        String
-  metaDescription  String
-  rejectionNote    String?
-  createdAt        DateTime      @default(now())
-  updatedAt        DateTime      @updatedAt
-  deletedAt        DateTime?
+  id                   String        @id @default(uuid())
+  vendorId             String
+  categoryId           String
+  brandId              String?
+  name                 String
+  slug                 String        @unique
+  description          String
+  shortDescription     String
+  status               ProductStatus @default(DRAFT)
+  isReturnable         Boolean       @default(false)
+  returnWindowDays     Int?
+  tags                 String[]
+  metaTitle            String
+  metaDescription      String
+  rejectionNote        String?
+  pendingContentReview Boolean       @default(false)
+  pendingContent       Json?
+  createdAt            DateTime      @default(now())
+  updatedAt            DateTime      @updatedAt
+  deletedAt            DateTime?
 
-  vendor             VendorProfile             @relation(fields: [vendorId], references: [id])
-  category           Category                  @relation(fields: [categoryId], references: [id])
-  brand              Brand?                    @relation(fields: [brandId], references: [id])
+  vendor             VendorProfile            @relation(fields: [vendorId], references: [id])
+  category           Category                 @relation(fields: [categoryId], references: [id])
+  brand              Brand?                   @relation(fields: [brandId], references: [id])
   variants           ProductVariant[]
   shippingOverride   ProductShippingOverride?
-  productSuggestions ProductSuggestion[]       @relation("ProductSuggestions")
+  productSuggestions ProductSuggestion[]      @relation("ProductSuggestions")
+  wishlistItems      WishlistItem[]
 
+  @@index([status, deletedAt, createdAt])
+  @@index([categoryId, status, deletedAt])
+  @@index([brandId, status, deletedAt])
+  @@index([vendorId, deletedAt])
+  @@index([createdAt])
+  @@index([pendingContentReview, status, deletedAt])
   @@map("products")
 }
 
@@ -929,6 +1079,7 @@ model AttributeDefinition {
 
   variantAttributes VariantAttribute[]
 
+  @@unique([name])
   @@map("attribute_definitions")
 }
 
@@ -966,14 +1117,17 @@ model ProductVariant {
   updatedAt     DateTime  @updatedAt
   deletedAt     DateTime?
 
-  product     Product            @relation(fields: [productId], references: [id])
-  primaryUnit Unit               @relation("PrimaryUnit", fields: [primaryUnitId], references: [id])
-  baseUnit    Unit?              @relation("BaseUnit", fields: [baseUnitId], references: [id])
-  attributes  VariantAttribute[]
-  inventory   ProductInventory?
-  cartItems   CartItem[]
-  orderItems  OrderItem[]
+  product       Product            @relation(fields: [productId], references: [id])
+  primaryUnit   Unit               @relation("PrimaryUnit", fields: [primaryUnitId], references: [id])
+  baseUnit      Unit?              @relation("BaseUnit", fields: [baseUnitId], references: [id])
+  attributes    VariantAttribute[]
+  inventory     ProductInventory?
+  cartItems     CartItem[]
+  orderItems    OrderItem[]
+  wishlistItems WishlistItem[]
 
+  @@index([productId, deletedAt, isActive])
+  @@index([sellingPrice])
   @@map("product_variants")
 }
 
@@ -987,6 +1141,7 @@ model VariantAttribute {
   attribute AttributeDefinition @relation(fields: [attributeId], references: [id])
 
   @@unique([variantId, attributeId])
+  @@index([attributeId])
   @@map("variant_attributes")
 }
 
@@ -1057,6 +1212,7 @@ model CartItem {
   variant ProductVariant @relation(fields: [variantId], references: [id])
 
   @@unique([cartId, variantId])
+  @@index([variantId])
   @@map("cart_items")
 }
 
@@ -1090,12 +1246,17 @@ model Order {
   updatedAt           DateTime      @updatedAt
   deletedAt           DateTime?
 
-  user      User       @relation(fields: [userId], references: [id])
-  address   Address?   @relation(fields: [addressId], references: [id])
-  subOrders SubOrder[]
+  user          User                @relation(fields: [userId], references: [id])
+  address       Address?            @relation(fields: [addressId], references: [id])
+  coupon        Coupon?             @relation(fields: [couponId], references: [id])
+  subOrders     SubOrder[]
+  refunds       OrderRefund[]
+  cancellations OrderCancellation[]
+  couponUsages  CouponUsage[]
 
   @@index([userId, createdAt])
   @@index([status, paymentStatus])
+  @@index([createdAt])
   @@map("orders")
 }
 
@@ -1123,6 +1284,8 @@ model SubOrder {
   items         OrderItem[]
   statusHistory OrderStatusHistory[]
   shipment      Shipment?
+  refunds       OrderRefund[]
+  cancellations OrderCancellation[]
 
   @@index([vendorId, status, createdAt])
   @@index([orderId])
@@ -1130,23 +1293,26 @@ model SubOrder {
 }
 
 model OrderItem {
-  id                 String   @id @default(uuid())
-  subOrderId         String
-  variantId          String
-  productName        String
-  variantName        String?
-  sku                String
-  unitPrice          Decimal  @db.Decimal(12, 2)
-  unitSymbol         String
-  quantity           Int
-  itemShippingCharge Decimal  @default(0) @db.Decimal(12, 2)
-  total              Decimal  @db.Decimal(12, 2)
-  createdAt          DateTime @default(now())
+  id                      String   @id @default(uuid())
+  subOrderId              String
+  variantId               String
+  productName             String
+  variantName             String?
+  sku                     String
+  unitPrice               Decimal  @db.Decimal(12, 2)
+  unitSymbol              String
+  quantity                Int
+  itemShippingCharge      Decimal  @default(0) @db.Decimal(12, 2)
+  total                   Decimal  @db.Decimal(12, 2)
+  imageUrlSnapshot        String?
+  imageStorageKeySnapshot String?
+  createdAt               DateTime @default(now())
 
   subOrder SubOrder       @relation(fields: [subOrderId], references: [id])
   variant  ProductVariant @relation(fields: [variantId], references: [id])
 
   @@index([subOrderId])
+  @@index([variantId])
   @@map("order_items")
 }
 
@@ -1183,4 +1349,225 @@ model Shipment {
   updater  User?    @relation(fields: [lastUpdatedBy], references: [id])
 
   @@map("shipments")
+}
+
+model OrderRefund {
+  id                String            @id @default(uuid())
+  orderId           String
+  subOrderId        String?
+  amount            Decimal           @db.Decimal(12, 2)
+  status            OrderRefundStatus @default(PENDING)
+  reason            String?
+  initiatedByUserId String?
+  razorpayRefundId  String?           @unique
+  providerPayload   Json?
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  order         Order               @relation(fields: [orderId], references: [id])
+  subOrder      SubOrder?           @relation(fields: [subOrderId], references: [id])
+  initiatedBy   User?               @relation("OrderRefundInitiator", fields: [initiatedByUserId], references: [id])
+  cancellations OrderCancellation[]
+
+  @@index([orderId, createdAt])
+  @@index([subOrderId, createdAt])
+  @@index([status, createdAt])
+  @@map("order_refunds")
+}
+
+model OrderCancellation {
+  id            String        @id @default(uuid())
+  orderId       String
+  subOrderId    String?
+  actorUserId   String?
+  actorRole     PlatformRole?
+  reason        String
+  restockStatus RestockStatus @default(PENDING)
+  refundId      String?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  order    Order        @relation(fields: [orderId], references: [id])
+  subOrder SubOrder?    @relation(fields: [subOrderId], references: [id])
+  actor    User?        @relation("OrderCancellationActor", fields: [actorUserId], references: [id])
+  refund   OrderRefund? @relation(fields: [refundId], references: [id])
+
+  @@index([orderId, createdAt])
+  @@index([subOrderId, createdAt])
+  @@index([actorUserId, createdAt])
+  @@index([restockStatus, createdAt])
+  @@map("order_cancellations")
+}
+
+model Notification {
+  id        String                @id @default(uuid())
+  userId    String
+  eventType NotificationEventType
+  title     String
+  body      String
+  data      Json?
+  readAt    DateTime?
+  createdAt DateTime              @default(now())
+
+  user       User                   @relation(fields: [userId], references: [id])
+  deliveries NotificationDelivery[]
+
+  @@index([userId, readAt, createdAt])
+  @@index([eventType, createdAt])
+  @@map("notifications")
+}
+
+model NotificationDelivery {
+  id             String                     @id @default(uuid())
+  notificationId String
+  channel        NotificationChannel
+  status         NotificationDeliveryStatus @default(PENDING)
+  providerId     String?
+  errorMessage   String?
+  sentAt         DateTime?
+  createdAt      DateTime                   @default(now())
+  updatedAt      DateTime                   @updatedAt
+
+  notification Notification @relation(fields: [notificationId], references: [id], onDelete: Cascade)
+
+  @@index([notificationId, channel, status])
+  @@index([channel, status, createdAt])
+  @@map("notification_deliveries")
+}
+
+model Coupon {
+  id                String             @id @default(uuid())
+  code              String             @unique
+  scope             CouponScope
+  vendorId          String?
+  status            CouponStatus       @default(DRAFT)
+  discountType      CouponDiscountType
+  discountValue     Decimal            @db.Decimal(12, 2)
+  maxDiscountAmount Decimal?           @db.Decimal(12, 2)
+  minOrderAmount    Decimal?           @db.Decimal(12, 2)
+  usageLimit        Int?
+  usageLimitPerUser Int?
+  startsAt          DateTime?
+  expiresAt         DateTime?
+  createdByUserId   String?
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+  deletedAt         DateTime?
+
+  vendor    VendorProfile? @relation(fields: [vendorId], references: [id])
+  createdBy User?          @relation("CouponCreator", fields: [createdByUserId], references: [id])
+  orders    Order[]
+  usages    CouponUsage[]
+
+  @@index([scope, status, expiresAt])
+  @@index([vendorId, status, expiresAt])
+  @@index([createdAt])
+  @@map("coupons")
+}
+
+model CouponUsage {
+  id        String   @id @default(uuid())
+  couponId  String
+  userId    String
+  orderId   String?
+  amount    Decimal  @db.Decimal(12, 2)
+  createdAt DateTime @default(now())
+
+  coupon Coupon @relation(fields: [couponId], references: [id])
+  user   User   @relation(fields: [userId], references: [id])
+  order  Order? @relation(fields: [orderId], references: [id])
+
+  @@index([couponId, createdAt])
+  @@index([userId, couponId])
+  @@index([orderId])
+  @@map("coupon_usages")
+}
+
+model WishlistItem {
+  id        String   @id @default(uuid())
+  userId    String
+  productId String
+  variantId String?
+  createdAt DateTime @default(now())
+
+  user    User            @relation(fields: [userId], references: [id])
+  product Product         @relation(fields: [productId], references: [id])
+  variant ProductVariant? @relation(fields: [variantId], references: [id])
+
+  @@unique([userId, productId, variantId])
+  @@index([userId, createdAt])
+  @@index([productId])
+  @@index([variantId])
+  @@map("wishlist_items")
+}
+
+model HomepageBanner {
+  id              String    @id @default(uuid())
+  title           String
+  subtitle        String?
+  mediaId         String?
+  targetUrl       String?
+  sortOrder       Int       @default(0)
+  isActive        Boolean   @default(true)
+  startsAt        DateTime?
+  endsAt          DateTime?
+  createdByUserId String?
+  updatedByUserId String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  deletedAt       DateTime?
+
+  media     Media? @relation(fields: [mediaId], references: [id])
+  createdBy User?  @relation("HomepageBannerCreator", fields: [createdByUserId], references: [id])
+  updatedBy User?  @relation("HomepageBannerUpdater", fields: [updatedByUserId], references: [id])
+
+  @@index([isActive, sortOrder])
+  @@index([startsAt, endsAt])
+  @@index([mediaId])
+  @@map("homepage_banners")
+}
+
+model BulkProductUpload {
+  id               String                  @id @default(uuid())
+  vendorId         String
+  uploadedByUserId String
+  fileName         String
+  storageKey       String?
+  status           BulkProductUploadStatus @default(UPLOADED)
+  totalRows        Int                     @default(0)
+  validRows        Int                     @default(0)
+  invalidRows      Int                     @default(0)
+  importedRows     Int                     @default(0)
+  errorMessage     String?
+  createdAt        DateTime                @default(now())
+  updatedAt        DateTime                @updatedAt
+
+  vendor     VendorProfile          @relation(fields: [vendorId], references: [id])
+  uploadedBy User                   @relation(fields: [uploadedByUserId], references: [id])
+  rows       BulkProductUploadRow[]
+
+  @@index([vendorId, status, createdAt])
+  @@index([uploadedByUserId, createdAt])
+  @@map("bulk_product_uploads")
+}
+
+model BulkProductUploadRow {
+  id           String                     @id @default(uuid())
+  uploadId     String
+  rowNumber    Int
+  rawData      Json
+  status       BulkProductUploadRowStatus @default(PENDING)
+  errorMessage String?
+  productId    String?
+  variantId    String?
+  createdAt    DateTime                   @default(now())
+  updatedAt    DateTime                   @updatedAt
+
+  upload BulkProductUpload @relation(fields: [uploadId], references: [id], onDelete: Cascade)
+
+  @@unique([uploadId, rowNumber])
+  @@index([uploadId, status])
+  @@index([productId])
+  @@index([variantId])
+  @@map("bulk_product_upload_rows")
 }

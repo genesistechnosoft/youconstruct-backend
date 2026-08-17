@@ -5,8 +5,19 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { PayoutStatus, Prisma } from '../../../generated/prisma/client.js';
+import {
+  NotificationEventType,
+  PayoutStatus,
+  Prisma,
+} from '../../../generated/prisma/client.js';
+import { DOMAIN_ERROR_CODES } from '../../common/errors/domain-error-code';
+import { domainBadRequest } from '../../common/errors/domain-exception';
+import { formatMoney } from '../../common/utils/money.util';
 import { paginate, paginationMeta } from '../../common/utils/pagination.util';
+import { AuthService } from '../auth/auth.service';
+import { NotificationEmitterService } from '../notifications/notification-emitter.service';
+import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
+import { SecurityAuditService } from '../rbac/security-audit.service';
 import { AdminListPayoutsQueryDto } from './dto/admin-list-payouts-query.dto';
 import { CompletePayoutDto } from './dto/complete-payout.dto';
 import { CreateBankAccountDto } from './dto/create-bank-account.dto';
@@ -17,12 +28,16 @@ import { UpdateBankAccountDto } from './dto/update-bank-account.dto';
 import { WalletTransactionsQueryDto } from './dto/wallet-transactions-query.dto';
 import { VendorFinanceRepository } from './vendor-finance.repository';
 
-const MIN_PAYOUT_AMOUNT = 100;
+type DecimalInput = Prisma.Decimal | string | number;
 
 @Injectable()
 export class VendorFinanceService {
   constructor(
     private readonly vendorFinanceRepository: VendorFinanceRepository,
+    private readonly authService: AuthService,
+    private readonly securityAudit: SecurityAuditService,
+    private readonly platformSettings: PlatformSettingsService,
+    private readonly notifications: NotificationEmitterService,
   ) {}
 
   async getWallet(vendorProfileId: string) {
@@ -69,12 +84,21 @@ export class VendorFinanceService {
 
     return {
       message: 'Bank account fetched successfully',
-      data: account,
+      data: account ? this.toBankAccountResponse(account) : null,
     };
   }
 
-  async createBankAccount(vendorProfileId: string, dto: CreateBankAccountDto) {
+  async createBankAccount(
+    userId: string,
+    vendorProfileId: string,
+    dto: CreateBankAccountDto,
+  ) {
     await this.requireApprovedVendor(vendorProfileId);
+    this.authService.verifyStepUpToken(
+      userId,
+      'BANK_ACCOUNT_CHANGE',
+      dto.stepUpToken,
+    );
     const existing =
       await this.vendorFinanceRepository.findBankAccount(vendorProfileId);
     if (existing) {
@@ -93,15 +117,27 @@ export class VendorFinanceService {
         branchName: dto.branchName,
       },
     );
+    if (!account) {
+      throw new ConflictException('Bank account could not be saved');
+    }
 
     return {
       message: 'Bank account created successfully',
-      data: account,
+      data: this.toBankAccountResponse(account),
     };
   }
 
-  async updateBankAccount(vendorProfileId: string, dto: UpdateBankAccountDto) {
+  async updateBankAccount(
+    userId: string,
+    vendorProfileId: string,
+    dto: UpdateBankAccountDto,
+  ) {
     await this.requireApprovedVendor(vendorProfileId);
+    this.authService.verifyStepUpToken(
+      userId,
+      'BANK_ACCOUNT_CHANGE',
+      dto.stepUpToken,
+    );
     const existing =
       await this.vendorFinanceRepository.findBankAccount(vendorProfileId);
     if (!existing) {
@@ -151,15 +187,27 @@ export class VendorFinanceService {
       vendorProfileId,
       data,
     );
+    if (!account) {
+      throw new NotFoundException('Bank account not found');
+    }
 
     return {
       message: 'Bank account updated successfully',
-      data: account,
+      data: this.toBankAccountResponse(account),
     };
   }
 
-  async deleteBankAccount(vendorProfileId: string) {
+  async deleteBankAccount(
+    userId: string,
+    vendorProfileId: string,
+    stepUpToken: string,
+  ) {
     await this.requireApprovedVendor(vendorProfileId);
+    this.authService.verifyStepUpToken(
+      userId,
+      'BANK_ACCOUNT_CHANGE',
+      stepUpToken,
+    );
     const existing =
       await this.vendorFinanceRepository.findBankAccount(vendorProfileId);
     if (!existing) {
@@ -169,7 +217,8 @@ export class VendorFinanceService {
     const activePayouts =
       await this.vendorFinanceRepository.countActivePayouts(vendorProfileId);
     if (activePayouts > 0) {
-      throw new BadRequestException(
+      throw domainBadRequest(
+        DOMAIN_ERROR_CODES.BANK_ACCOUNT_UNVERIFIED,
         'Cannot delete bank account while payouts are pending or processing',
       );
     }
@@ -182,7 +231,7 @@ export class VendorFinanceService {
     };
   }
 
-  async verifyBankAccount(vendorId: string) {
+  async verifyBankAccount(vendorId: string, actorUserId: string) {
     await this.requireVendorExists(vendorId);
     const existing =
       await this.vendorFinanceRepository.findBankAccount(vendorId);
@@ -192,10 +241,24 @@ export class VendorFinanceService {
 
     const account =
       await this.vendorFinanceRepository.verifyBankAccount(vendorId);
+    if (!account) {
+      throw new NotFoundException('Bank account not found');
+    }
+    this.securityAudit.log({
+      actorUserId,
+      action: 'BANK_ACCOUNT_VERIFY',
+      result: 'SUCCESS',
+      targetType: 'vendorProfile',
+      targetId: vendorId,
+      metadata: {
+        bankAccountId: account.id,
+        accountNumber: this.maskAccountNumber(account.accountNumber),
+      },
+    });
 
     return {
       message: 'Bank account verified successfully',
-      data: account,
+      data: this.toBankAccountResponse(account),
     };
   }
 
@@ -230,26 +293,51 @@ export class VendorFinanceService {
 
     return {
       message: 'Payout fetched successfully',
-      data: payout,
+      data: this.serializePayout(payout),
     };
   }
 
-  async requestPayout(vendorProfileId: string, dto: RequestPayoutDto) {
+  async requestPayout(
+    userId: string,
+    vendorProfileId: string,
+    dto: RequestPayoutDto,
+  ) {
     await this.requireApprovedVendor(vendorProfileId);
+    this.authService.verifyStepUpToken(
+      userId,
+      'PAYOUT_REQUEST',
+      dto.stepUpToken,
+    );
 
-    if (dto.amount < MIN_PAYOUT_AMOUNT) {
+    const payoutsEnabled = await this.platformSettings.getBoolean(
+      'finance',
+      'payoutsEnabled',
+    );
+    if (!payoutsEnabled) {
+      throw new BadRequestException('Payouts are currently disabled');
+    }
+
+    const minPayoutAmount = await this.platformSettings.getNumber(
+      'finance',
+      'minPayoutAmount',
+    );
+    if (dto.amount < minPayoutAmount) {
       throw new BadRequestException(
-        `Minimum payout amount is ₹${MIN_PAYOUT_AMOUNT}`,
+        `Minimum payout amount is ₹${minPayoutAmount}`,
       );
     }
 
     const bank =
       await this.vendorFinanceRepository.findBankAccount(vendorProfileId);
     if (!bank) {
-      throw new BadRequestException('Bank account is required before payout');
+      throw domainBadRequest(
+        DOMAIN_ERROR_CODES.BANK_ACCOUNT_UNVERIFIED,
+        'Bank account is required before payout',
+      );
     }
     if (!bank.isVerified) {
-      throw new BadRequestException(
+      throw domainBadRequest(
+        DOMAIN_ERROR_CODES.BANK_ACCOUNT_UNVERIFIED,
         'Bank account must be verified before requesting a payout',
       );
     }
@@ -277,11 +365,11 @@ export class VendorFinanceService {
 
     return {
       message: 'Payout requested successfully',
-      data: payout,
+      data: this.serializePayout(payout),
     };
   }
 
-  async processPayout(payoutId: string) {
+  async processPayout(payoutId: string, actorUserId: string) {
     const payout = await this.vendorFinanceRepository.findPayoutById(payoutId);
     if (!payout) {
       throw new NotFoundException('Payout not found');
@@ -292,14 +380,33 @@ export class VendorFinanceService {
 
     const updated =
       await this.vendorFinanceRepository.markPayoutProcessing(payoutId);
+    this.securityAudit.log({
+      actorUserId,
+      action: 'PAYOUT_PROCESS',
+      result: 'SUCCESS',
+      targetType: 'vendorPayout',
+      targetId: payoutId,
+      metadata: { vendorId: payout.vendorId },
+    });
+    await this.emitPayoutNotification(
+      payout.vendorId,
+      NotificationEventType.PAYOUT_PROCESSING,
+      'Payout processing',
+      'Your payout request is being processed',
+      payoutId,
+    );
 
     return {
       message: 'Payout marked as processing',
-      data: updated,
+      data: this.serializePayout(updated),
     };
   }
 
-  async completePayout(payoutId: string, dto: CompletePayoutDto) {
+  async completePayout(
+    payoutId: string,
+    actorUserId: string,
+    dto: CompletePayoutDto,
+  ) {
     const payout = await this.vendorFinanceRepository.findPayoutById(payoutId);
     if (!payout) {
       throw new NotFoundException('Payout not found');
@@ -315,14 +422,29 @@ export class VendorFinanceService {
       amount: payout.amount,
       razorpayPayoutId: dto.razorpayPayoutId,
     });
+    this.securityAudit.log({
+      actorUserId,
+      action: 'PAYOUT_COMPLETE',
+      result: 'SUCCESS',
+      targetType: 'vendorPayout',
+      targetId: payoutId,
+      metadata: { vendorId: payout.vendorId },
+    });
+    await this.emitPayoutNotification(
+      payout.vendorId,
+      NotificationEventType.PAYOUT_COMPLETED,
+      'Payout completed',
+      'Your payout has been completed',
+      payoutId,
+    );
 
     return {
       message: 'Payout completed successfully',
-      data: updated,
+      data: this.serializePayout(updated),
     };
   }
 
-  async failPayout(payoutId: string, dto: FailPayoutDto) {
+  async failPayout(payoutId: string, actorUserId: string, dto: FailPayoutDto) {
     const payout = await this.vendorFinanceRepository.findPayoutById(payoutId);
     if (!payout) {
       throw new NotFoundException('Payout not found');
@@ -344,10 +466,28 @@ export class VendorFinanceService {
       failureReason: dto.failureReason,
       allowedFrom: [PayoutStatus.PENDING, PayoutStatus.PROCESSING],
     });
+    this.securityAudit.log({
+      actorUserId,
+      action: 'PAYOUT_FAIL',
+      result: 'SUCCESS',
+      targetType: 'vendorPayout',
+      targetId: payoutId,
+      metadata: {
+        vendorId: payout.vendorId,
+        reason: dto.failureReason,
+      },
+    });
+    await this.emitPayoutNotification(
+      payout.vendorId,
+      NotificationEventType.PAYOUT_FAILED,
+      'Payout failed',
+      dto.failureReason,
+      payoutId,
+    );
 
     return {
       message: 'Payout marked as failed',
-      data: updated,
+      data: this.serializePayout(updated),
     };
   }
 
@@ -369,7 +509,7 @@ export class VendorFinanceService {
 
     return {
       message: 'Payouts fetched successfully',
-      data: items,
+      data: items.map((item) => this.serializePayout(item)),
       meta: paginationMeta(page, limit, total),
     };
   }
@@ -392,7 +532,7 @@ export class VendorFinanceService {
 
     return {
       message: 'Wallet transactions fetched successfully',
-      data: items,
+      data: items.map((item) => this.serializeTransaction(item)),
       meta: paginationMeta(page, limit, total),
     };
   }
@@ -400,18 +540,88 @@ export class VendorFinanceService {
   private toWalletResponse(wallet: {
     id: string;
     vendorId: string;
-    balance: unknown;
-    lockedBalance: unknown;
-    totalEarned: unknown;
-    totalWithdrawn: unknown;
+    balance: DecimalInput;
+    lockedBalance: DecimalInput;
+    totalEarned: DecimalInput;
+    totalWithdrawn: DecimalInput;
     createdAt: Date;
     updatedAt: Date;
   }) {
     return {
-      ...wallet,
-      // Available for payouts = balance (locked is held separately)
-      availableBalance: wallet.balance,
+      id: wallet.id,
+      vendorId: wallet.vendorId,
+      balance: formatMoney(wallet.balance),
+      lockedBalance: formatMoney(wallet.lockedBalance),
+      totalEarned: formatMoney(wallet.totalEarned),
+      totalWithdrawn: formatMoney(wallet.totalWithdrawn),
+      availableBalance: formatMoney(wallet.balance),
+      createdAt: wallet.createdAt,
+      updatedAt: wallet.updatedAt,
     };
+  }
+
+  private serializePayout(
+    payout: {
+      amount: DecimalInput;
+      [key: string]: unknown;
+    } | null,
+  ) {
+    if (!payout) {
+      return null;
+    }
+    return {
+      ...payout,
+      amount: formatMoney(payout.amount),
+    };
+  }
+
+  private serializeTransaction(tx: {
+    amount: DecimalInput;
+    balanceBefore: DecimalInput;
+    balanceAfter: DecimalInput;
+    [key: string]: unknown;
+  }) {
+    return {
+      ...tx,
+      amount: formatMoney(tx.amount),
+      balanceBefore: formatMoney(tx.balanceBefore),
+      balanceAfter: formatMoney(tx.balanceAfter),
+    };
+  }
+
+  private async emitPayoutNotification(
+    vendorId: string,
+    eventType: NotificationEventType,
+    title: string,
+    body: string,
+    payoutId: string,
+  ) {
+    const vendor = await this.vendorFinanceRepository.findVendorById(vendorId);
+    if (!vendor?.userId) {
+      return;
+    }
+    this.notifications.emit({
+      userId: vendor.userId,
+      eventType,
+      title,
+      body,
+      data: { payoutId, vendorId },
+    });
+  }
+
+  private toBankAccountResponse(account: {
+    accountNumber: string;
+    [key: string]: unknown;
+  }) {
+    return {
+      ...account,
+      accountNumber: this.maskAccountNumber(account.accountNumber),
+    };
+  }
+
+  private maskAccountNumber(accountNumber: string) {
+    const last4 = accountNumber.slice(-4);
+    return `XXXX${last4}`;
   }
 
   private async requireApprovedVendor(vendorProfileId: string) {

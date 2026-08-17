@@ -12,7 +12,7 @@ interface MediaProcessingJobData {
   mediaId: string;
 }
 
-@Processor(MEDIA_PROCESSING_QUEUE)
+@Processor(MEDIA_PROCESSING_QUEUE, { concurrency: 3 })
 export class MediaProcessingProcessor extends WorkerHost {
   private readonly logger = new Logger(MediaProcessingProcessor.name);
 
@@ -25,6 +25,8 @@ export class MediaProcessingProcessor extends WorkerHost {
 
   async process(job: Job<MediaProcessingJobData>) {
     const { processingJobId, mediaId } = job.data;
+    const started = Date.now();
+    let ok = false;
 
     try {
       await this.mediaRepository.markProcessingJobStarted(processingJobId);
@@ -75,6 +77,7 @@ export class MediaProcessingProcessor extends WorkerHost {
       await this.mediaRepository.refreshMediaProcessingStatus(
         completed.mediaId,
       );
+      ok = true;
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
       this.logger.error(`Media processing failed: ${message}`);
@@ -83,6 +86,10 @@ export class MediaProcessingProcessor extends WorkerHost {
         message,
       );
       await this.mediaRepository.refreshMediaProcessingStatus(failed.mediaId);
+    } finally {
+      this.logger.log(
+        `media_job jobId=${job.id ?? 'n/a'} mediaId=${mediaId} durationMs=${Date.now() - started} ${ok ? 'ok' : 'fail'}`,
+      );
     }
   }
 

@@ -32,6 +32,7 @@ import { Permissions } from '../../common/decorators/permissions.decorator';
 import { RequireActiveContext } from '../../common/decorators/require-active-context.decorator';
 import { PlatformRole, Roles } from '../../common/decorators/roles.decorator';
 import { PERMISSIONS } from '../rbac/permissions.constants';
+import { RejectKycDocumentDto } from './dto/reject-kyc-document.dto';
 import { RejectVendorDto } from './dto/reject-vendor.dto';
 import { UpdateVendorProfileDto } from './dto/update-vendor-profile.dto';
 import { UploadKycDocumentDto } from './dto/upload-kyc-document.dto';
@@ -153,8 +154,11 @@ export class AdminVendorsController {
   @HttpCode(200)
   @Permissions(PERMISSIONS.ADMIN.VENDORS_APPROVE)
   @ApiOperation({ summary: 'Approve a submitted vendor' })
-  approveVendor(@Param('id', ParseUUIDPipe) id: string) {
-    return this.vendorOnboardingService.approveVendor(id);
+  approveVendor(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.vendorOnboardingService.approveVendor(id, user.userId);
   }
 
   @Patch(':id/reject')
@@ -162,9 +166,46 @@ export class AdminVendorsController {
   @Permissions(PERMISSIONS.ADMIN.VENDORS_REJECT)
   @ApiOperation({ summary: 'Reject a submitted vendor' })
   rejectVendor(
+    @CurrentUser() user: AuthUser,
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: RejectVendorDto,
   ) {
-    return this.vendorOnboardingService.rejectVendor(id, dto);
+    return this.vendorOnboardingService.rejectVendor(id, user.userId, dto);
+  }
+
+  @Patch(':id/kyc/:documentType/verify')
+  @HttpCode(200)
+  @Permissions(PERMISSIONS.ADMIN.VENDORS_APPROVE)
+  @ApiOperation({ summary: 'Verify a vendor KYC document' })
+  verifyKycDocument(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('documentType', new ParseEnumPipe(KycDocumentType))
+    documentType: KycDocumentType,
+  ) {
+    return this.vendorOnboardingService.verifyKycDocument(
+      id,
+      documentType,
+      user.userId,
+    );
+  }
+
+  @Patch(':id/kyc/:documentType/reject')
+  @HttpCode(200)
+  @Permissions(PERMISSIONS.ADMIN.VENDORS_REJECT)
+  @ApiOperation({ summary: 'Reject a vendor KYC document' })
+  rejectKycDocument(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('documentType', new ParseEnumPipe(KycDocumentType))
+    documentType: KycDocumentType,
+    @Body() dto: RejectKycDocumentDto,
+  ) {
+    return this.vendorOnboardingService.rejectKycDocument(
+      id,
+      documentType,
+      user.userId,
+      dto,
+    );
   }
 }

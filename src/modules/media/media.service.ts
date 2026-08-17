@@ -1,8 +1,10 @@
 import {
   BadRequestException,
   ForbiddenException,
+  Inject,
   Injectable,
   NotFoundException,
+  forwardRef,
 } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
@@ -54,6 +56,7 @@ export class MediaService {
   constructor(
     private readonly mediaRepository: MediaRepository,
     private readonly storageService: StorageService,
+    @Inject(forwardRef(() => VendorStoreService))
     private readonly vendorStoreService: VendorStoreService,
     @InjectQueue(MEDIA_PROCESSING_QUEUE)
     private readonly mediaQueue: Queue,
@@ -327,6 +330,114 @@ export class MediaService {
     return { message: 'Media unlinked successfully', data: null };
   }
 
+  async setEntityMediaContext(
+    owner: MediaOwner,
+    entityType: MediaEntityType,
+    entityId: string,
+    context: MediaContext,
+    mediaId: string,
+  ) {
+    const media = await this.mediaRepository.findMediaByIds(
+      owner.ownerType,
+      owner.ownerId,
+      [mediaId],
+    );
+    if (media.length !== 1) {
+      throw new NotFoundException('Media record not found');
+    }
+
+    const links = await this.mediaRepository.replaceLink(
+      mediaId,
+      entityType,
+      entityId,
+      context,
+    );
+
+    return {
+      message: 'Media linked successfully',
+      data: await Promise.all(
+        links.map((link) => this.withMediaLinkUrls(link)),
+      ),
+    };
+  }
+
+  async uploadVendorMediaForEntityContext(
+    actorUserId: string,
+    vendorId: string,
+    file: Express.Multer.File | undefined,
+    entityType: MediaEntityType,
+    entityId: string,
+    context: MediaContext,
+  ) {
+    await this.getApprovedVendorOwner(vendorId);
+    const media = await this.uploadMedia({
+      userId: actorUserId,
+      owner: { ownerType: MediaOwnerType.VENDOR, ownerId: vendorId },
+      file,
+      accessLevel: MediaAccessLevel.PUBLIC,
+      keyPrefix: `vendors/${vendorId}/media`,
+      allowedFileTypes: [MediaFileType.IMAGE],
+    });
+
+    await this.setEntityMediaContext(
+      { ownerType: MediaOwnerType.VENDOR, ownerId: vendorId },
+      entityType,
+      entityId,
+      context,
+      media.id,
+    );
+
+    return {
+      message: 'Media uploaded and linked successfully',
+      data: await this.withUrls(media),
+    };
+  }
+
+  async clearEntityMediaContext(
+    entityType: MediaEntityType,
+    entityId: string,
+    context: MediaContext,
+  ) {
+    await this.mediaRepository.softDeleteLinksByContext(
+      entityType,
+      entityId,
+      context,
+    );
+
+    return { message: 'Media unlinked successfully', data: null };
+  }
+
+  async getEntityMediaByContext(
+    entityType: MediaEntityType,
+    entityId: string,
+    context: MediaContext,
+  ) {
+    const links = await this.mediaRepository.findLinks(
+      entityType,
+      entityId,
+      context,
+    );
+    if (links.length === 0) {
+      return null;
+    }
+
+    const withUrls = await this.withMediaLinkUrls(links[0]);
+    const storageKey =
+      withUrls.media.optimizedKey ??
+      withUrls.media.thumbnailKey ??
+      withUrls.media.originalKey;
+
+    return {
+      url:
+        withUrls.media.optimizedUrl ??
+        withUrls.media.thumbnailUrl ??
+        withUrls.media.originalUrl,
+      storageKey,
+      mediaId: withUrls.mediaId,
+      media: withUrls.media,
+    };
+  }
+
   async reorderEntityMedia(
     entityType: MediaEntityType,
     entityId: string,
@@ -358,6 +469,65 @@ export class MediaService {
     );
 
     return Promise.all(links.map((link) => this.withMediaLinkUrls(link)));
+  }
+
+  async getGalleriesForEntities(
+    entityType: MediaEntityType,
+    entityIds: string[],
+  ) {
+    const links = await this.mediaRepository.findLinksByEntityIds(
+      entityType,
+      entityIds,
+      MediaContext.GALLERY,
+    );
+    const withUrls = await Promise.all(
+      links.map((link) => this.withMediaLinkUrls(link)),
+    );
+
+    const map = new Map<string, typeof withUrls>();
+    for (const link of withUrls) {
+      const existing = map.get(link.entityId) ?? [];
+      existing.push(link);
+      map.set(link.entityId, existing);
+    }
+
+    return map;
+  }
+
+  async getPrimaryImagesForEntities(
+    entityType: MediaEntityType,
+    entityIds: string[],
+  ): Promise<Map<string, { url: string; storageKey: string } | null>> {
+    const links = await this.mediaRepository.findLinksByEntityIds(
+      entityType,
+      entityIds,
+    );
+    const result = new Map<
+      string,
+      { url: string; storageKey: string } | null
+    >();
+
+    for (const entityId of entityIds) {
+      result.set(entityId, null);
+    }
+
+    for (const link of links) {
+      if (result.get(link.entityId)) {
+        continue;
+      }
+
+      const storageKey =
+        link.media.optimizedKey ??
+        link.media.thumbnailKey ??
+        link.media.originalKey;
+      const url = await this.storageService.getUrl(
+        storageKey,
+        link.media.accessLevel,
+      );
+      result.set(link.entityId, { url, storageKey });
+    }
+
+    return result;
   }
 
   async withUrls<
@@ -491,6 +661,8 @@ export class MediaService {
           {
             attempts: 3,
             backoff: { type: 'exponential', delay: 2000 },
+            removeOnComplete: { age: 3600, count: 1000 },
+            removeOnFail: { age: 604800, count: 5000 },
           },
         );
       }),

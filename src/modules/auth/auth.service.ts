@@ -37,10 +37,20 @@ const OTP_MAX_FAILURES = 3;
 const OTP_LOCKOUT_WINDOW_MS = 15 * 60 * 1000;
 const PASSWORD_RESET_PURPOSE = 'RESET_PASSWORD';
 const PASSWORD_RESET_EXPIRES_IN = '10m';
+const STEP_UP_EXPIRES_IN = '5m';
+const STEP_UP_PURPOSES = ['BANK_ACCOUNT_CHANGE', 'PAYOUT_REQUEST'] as const;
 
 type PasswordResetJwtPayload = {
   userId: string;
   purpose: typeof PASSWORD_RESET_PURPOSE;
+  iat?: number;
+};
+
+type StepUpPurpose = (typeof STEP_UP_PURPOSES)[number];
+
+type StepUpJwtPayload = {
+  userId: string;
+  purpose: StepUpPurpose;
 };
 
 @Injectable()
@@ -180,14 +190,14 @@ export class AuthService {
     const existingUser = await this.authRepository.findUserByPhone(dto.phone);
 
     if (dto.purpose === 'REGISTER' && existingUser) {
-      throw new ConflictException('Phone already registered');
+      return this.genericOtpResponse();
     }
 
     if (
       (dto.purpose === 'LOGIN' || dto.purpose === PASSWORD_RESET_PURPOSE) &&
       !existingUser
     ) {
-      throw new BadRequestException('User not found');
+      return this.genericOtpResponse();
     }
 
     const otp = randomInt(100000, 1000000).toString();
@@ -204,14 +214,7 @@ export class AuthService {
     });
 
     // TODO: inject Twilio client and send OTP without logging secret values.
-    const exposeOtp = this.config.get<string>('AUTH_EXPOSE_OTP_IN_RESPONSE');
-    const shouldExpose =
-      exposeOtp === 'true' || exposeOtp === '1' || exposeOtp === 'yes';
-
-    return {
-      message: 'OTP sent successfully',
-      data: shouldExpose ? { otp } : null,
-    };
+    return this.genericOtpResponse(otp);
   }
 
   async verifyOtp(dto: { phone: string; otp: string; purpose: string }) {
@@ -347,8 +350,16 @@ export class AuthService {
       );
     }
 
-    const user = await this.authRepository.findUserById(payload.userId);
+    const user = await this.authRepository.findUserWithPasswordById(
+      payload.userId,
+    );
     if (!user || !user.isActive) {
+      throw new UnauthorizedException(
+        'Invalid or expired password reset token',
+      );
+    }
+
+    if (payload.iat && user.updatedAt.getTime() > payload.iat * 1000) {
       throw new UnauthorizedException(
         'Invalid or expired password reset token',
       );
@@ -357,6 +368,7 @@ export class AuthService {
     this.assertStrongPassword(dto.newPassword, user.platformRole);
     const passwordHash = await bcrypt.hash(dto.newPassword, 10);
     await this.authRepository.updatePasswordHash(user.id, passwordHash);
+    await this.authRepository.revokeRefreshTokensForUser(user.id);
 
     this.securityAudit.log({
       actorUserId: user.id,
@@ -369,6 +381,110 @@ export class AuthService {
       message: 'Password reset successfully',
       data: null,
     };
+  }
+
+  async changePassword(
+    userId: string,
+    dto: { currentPassword: string; newPassword: string },
+  ) {
+    const user = await this.authRepository.findUserWithPasswordById(userId);
+    if (!user || !user.isActive || !user.passwordHash) {
+      throw new UnauthorizedException('Invalid credentials');
+    }
+
+    const isMatch = await bcrypt.compare(
+      dto.currentPassword,
+      user.passwordHash,
+    );
+    if (!isMatch) {
+      throw new UnauthorizedException('Invalid credentials');
+    }
+
+    this.assertStrongPassword(dto.newPassword, user.platformRole);
+    const passwordHash = await bcrypt.hash(dto.newPassword, 10);
+    await this.authRepository.updatePasswordHash(user.id, passwordHash);
+    await this.authRepository.revokeRefreshTokensForUser(user.id);
+
+    this.securityAudit.log({
+      actorUserId: user.id,
+      actorRole: user.platformRole,
+      action: 'PASSWORD_CHANGE',
+      result: 'SUCCESS',
+    });
+
+    return {
+      message: 'Password changed successfully',
+      data: null,
+    };
+  }
+
+  async sendStepUpOtp(userId: string, purpose: StepUpPurpose) {
+    const user = await this.authRepository.findUserById(userId);
+    if (!user || !user.isActive || !user.phone) {
+      return this.genericOtpResponse();
+    }
+
+    await this.assertOtpNotLocked(user.phone, purpose);
+    const otp = randomInt(100000, 1000000).toString();
+    const otpHash = await bcrypt.hash(otp, 10);
+    await this.authRepository.invalidateUnverifiedOtps(user.phone, purpose);
+    await this.authRepository.createOtp({
+      target: user.phone,
+      otp: otpHash,
+      purpose,
+      expiresAt: new Date(Date.now() + 5 * 60 * 1000),
+      userId: user.id,
+    });
+
+    return this.genericOtpResponse(otp);
+  }
+
+  async verifyStepUpOtp(
+    userId: string,
+    dto: { purpose: StepUpPurpose; otp: string },
+  ) {
+    const user = await this.authRepository.findUserById(userId);
+    if (!user || !user.isActive || !user.phone) {
+      throw new UnauthorizedException('Invalid credentials');
+    }
+
+    await this.assertOtpNotLocked(user.phone, dto.purpose);
+    const record = await this.authRepository.findLatestOtp(
+      user.phone,
+      dto.purpose,
+    );
+    if (!record || record.expiresAt < new Date()) {
+      throw new BadRequestException('OTP not found or expired');
+    }
+
+    const isMatch = await bcrypt.compare(dto.otp, record.otp);
+    if (!isMatch) {
+      await this.authRepository.incrementOtpAttempts(record.id);
+      throw new BadRequestException('Invalid OTP');
+    }
+
+    await this.authRepository.markOtpVerified(record.id);
+    const stepUpToken = this.signStepUpToken(user.id, dto.purpose);
+
+    return {
+      message: 'Step-up verification successful',
+      data: { stepUpToken, expiresInSeconds: 5 * 60 },
+    };
+  }
+
+  verifyStepUpToken(userId: string, purpose: StepUpPurpose, token: string) {
+    let payload: StepUpJwtPayload;
+    try {
+      payload = this.jwtService.verify<StepUpJwtPayload>(token, {
+        secret: this.config.getOrThrow<string>('JWT_SECRET'),
+      });
+    } catch {
+      throw new UnauthorizedException('Invalid or expired step-up token');
+    }
+
+    if (payload.userId !== userId || payload.purpose !== purpose) {
+      throw new UnauthorizedException('Invalid or expired step-up token');
+    }
   }
 
   async googleAuth(dto: {
@@ -528,6 +644,19 @@ export class AuthService {
     }
   }
 
+  private genericOtpResponse(otp?: string) {
+    const exposeOtp = this.config.get<string>('AUTH_EXPOSE_OTP_IN_RESPONSE');
+    const nodeEnv = this.config.get<string>('NODE_ENV') ?? 'development';
+    const shouldExpose =
+      nodeEnv !== 'production' &&
+      (exposeOtp === 'true' || exposeOtp === '1' || exposeOtp === 'yes');
+
+    return {
+      message: 'OTP sent successfully',
+      data: shouldExpose && otp ? { otp } : null,
+    };
+  }
+
   private assertStrongPassword(password: string, platformRole: PlatformRole) {
     if (platformRole === PlatformRole.CUSTOMER) {
       if (password.length < 8) {
@@ -620,6 +749,14 @@ export class AuthService {
       expiresIn: this.config.getOrThrow<string>(
         'JWT_ACCESS_EXPIRES_IN',
       ) as JwtSignOptions['expiresIn'],
+    });
+  }
+
+  private signStepUpToken(userId: string, purpose: StepUpPurpose) {
+    const payload: StepUpJwtPayload = { userId, purpose };
+    return this.jwtService.sign(payload, {
+      expiresIn: STEP_UP_EXPIRES_IN,
+      secret: this.config.getOrThrow<string>('JWT_SECRET'),
     });
   }
 

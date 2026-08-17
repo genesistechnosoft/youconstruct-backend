@@ -1,12 +1,7 @@
-import {
-  BadRequestException,
-  Injectable,
-  NotFoundException,
-} from '@nestjs/common';
-import {
-  Prisma,
-  ProductStatus,
-} from '../../../generated/prisma/client.js';
+import { Injectable, NotFoundException } from '@nestjs/common';
+import { Prisma, ProductStatus } from '../../../generated/prisma/client.js';
+import { DOMAIN_ERROR_CODES } from '../../common/errors/domain-error-code';
+import { domainBadRequest } from '../../common/errors/domain-exception';
 import { PrismaService } from '../../prisma/prisma.service';
 
 const CART_ITEM_SELECT = {
@@ -188,10 +183,16 @@ export class CartRepository {
     inventory: { quantity: number; allowBackorder: boolean } | null,
   ) {
     if (!inventory) {
-      throw new BadRequestException('Variant inventory not configured');
+      throw domainBadRequest(
+        DOMAIN_ERROR_CODES.INSUFFICIENT_STOCK,
+        'Variant inventory not configured',
+      );
     }
     if (!inventory.allowBackorder && quantity > inventory.quantity) {
-      throw new BadRequestException('Insufficient stock for this variant');
+      throw domainBadRequest(
+        DOMAIN_ERROR_CODES.INSUFFICIENT_STOCK,
+        'Insufficient stock for this variant',
+      );
     }
   }
 }

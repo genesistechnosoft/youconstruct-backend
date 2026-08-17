@@ -1,5 +1,6 @@
-import { ApiPropertyOptional } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
+  IsNotEmpty,
   IsOptional,
   IsString,
   Matches,
@@ -43,4 +44,9 @@ export class UpdateBankAccountDto {
   @IsString()
   @MaxLength(120)
   branchName?: string | null;
+
+  @ApiProperty({ example: 'eyJhbGciOiJIUzI1NiIs...' })
+  @IsString()
+  @IsNotEmpty()
+  stepUpToken!: string;
 }

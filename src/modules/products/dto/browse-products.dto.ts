@@ -1,6 +1,24 @@
 import { Type } from 'class-transformer';
-import { IsInt, IsOptional, IsString, IsUUID, Min } from 'class-validator';
+import {
+  IsEnum,
+  IsInt,
+  IsNumber,
+  IsOptional,
+  IsString,
+  IsUUID,
+  Min,
+} from 'class-validator';
 import { ApiPropertyOptional } from '@nestjs/swagger';
+
+export enum BrowseSortBy {
+  CREATED_AT = 'createdAt',
+  PRICE = 'price',
+}
+
+export enum BrowseSortOrder {
+  ASC = 'asc',
+  DESC = 'desc',
+}
 
 export class BrowseProductsDto {
   @ApiPropertyOptional({ example: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890' })
@@ -17,6 +35,33 @@ export class BrowseProductsDto {
   @IsOptional()
   @IsString()
   search?: string;
+
+  @ApiPropertyOptional({ example: 100 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  minPrice?: number;
+
+  @ApiPropertyOptional({ example: 5000 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  maxPrice?: number;
+
+  @ApiPropertyOptional({ enum: BrowseSortBy, default: BrowseSortBy.CREATED_AT })
+  @IsOptional()
+  @IsEnum(BrowseSortBy)
+  sortBy: BrowseSortBy = BrowseSortBy.CREATED_AT;
+
+  @ApiPropertyOptional({
+    enum: BrowseSortOrder,
+    default: BrowseSortOrder.DESC,
+  })
+  @IsOptional()
+  @IsEnum(BrowseSortOrder)
+  sortOrder: BrowseSortOrder = BrowseSortOrder.DESC;
 
   @ApiPropertyOptional({ example: 1, default: 1 })
   @IsOptional()

@@ -9,9 +9,11 @@ import {
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { PermissionScope } from '../../../generated/prisma/client.js';
+import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Permissions } from '../../common/decorators/permissions.decorator';
 import { RequireActiveContext } from '../../common/decorators/require-active-context.decorator';
 import { PlatformRole, Roles } from '../../common/decorators/roles.decorator';
+import type { AuthenticatedUser } from '../../common/types/auth-user.type';
 import { PERMISSIONS } from '../rbac/permissions.constants';
 import { WalletTransactionsQueryDto } from './dto/wallet-transactions-query.dto';
 import { VendorFinanceService } from './vendor-finance.service';
@@ -45,7 +47,10 @@ export class AdminVendorFinanceController {
   @Patch(':id/bank-account/verify')
   @HttpCode(200)
   @ApiOperation({ summary: 'Verify vendor bank account' })
-  verifyBankAccount(@Param('id', ParseUUIDPipe) id: string) {
-    return this.vendorFinanceService.verifyBankAccount(id);
+  verifyBankAccount(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.vendorFinanceService.verifyBankAccount(id, user.userId);
   }
 }

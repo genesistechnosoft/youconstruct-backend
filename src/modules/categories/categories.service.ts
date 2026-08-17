@@ -2,8 +2,17 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { RedisCacheService } from '../../common/redis/redis-cache.service';
+import {
+  CATEGORY_TREE_CACHE_KEY,
+  CATEGORY_TREE_CACHE_TTL_SECONDS,
+  CATEGORY_TREE_METRIC_HIT,
+  CATEGORY_TREE_METRIC_INVALIDATE,
+  CATEGORY_TREE_METRIC_MISS,
+} from '../../common/redis/redis.constants';
 import { paginate, paginationMeta } from '../../common/utils/pagination.util';
 import { generateSlug } from '../../common/utils/slug.util';
 import { CreateCategoryDto } from './dto/create-category.dto';
@@ -12,10 +21,38 @@ import { CategoriesRepository } from './categories.repository';
 
 @Injectable()
 export class CategoriesService {
-  constructor(private readonly categoriesRepository: CategoriesRepository) {}
+  private readonly logger = new Logger(CategoriesService.name);
+
+  constructor(
+    private readonly categoriesRepository: CategoriesRepository,
+    private readonly redisCacheService: RedisCacheService,
+  ) {}
 
   async getTree() {
+    const cached = await this.redisCacheService.getJson<
+      Awaited<ReturnType<CategoriesRepository['findRoots']>>
+    >(CATEGORY_TREE_CACHE_KEY);
+
+    if (cached) {
+      this.logger.log(
+        `category_tree_cache event=hit key=${CATEGORY_TREE_CACHE_KEY}`,
+      );
+      void this.redisCacheService.incr(CATEGORY_TREE_METRIC_HIT);
+      return { message: 'Categories fetched successfully', data: cached };
+    }
+
+    this.logger.log(
+      `category_tree_cache event=miss key=${CATEGORY_TREE_CACHE_KEY}`,
+    );
+    void this.redisCacheService.incr(CATEGORY_TREE_METRIC_MISS);
+
     const categories = await this.categoriesRepository.findRoots();
+    await this.redisCacheService.setJson(
+      CATEGORY_TREE_CACHE_KEY,
+      categories,
+      CATEGORY_TREE_CACHE_TTL_SECONDS,
+    );
+
     return { message: 'Categories fetched successfully', data: categories };
   }
 
@@ -79,6 +116,7 @@ export class CategoriesService {
       sortOrder: dto.sortOrder ?? 0,
     });
 
+    await this.invalidateTreeCache();
     return { message: 'Category created successfully', data: category };
   }
 
@@ -126,6 +164,7 @@ export class CategoriesService {
       ...(dto.sortOrder !== undefined && { sortOrder: dto.sortOrder }),
     });
 
+    await this.invalidateTreeCache();
     return { message: 'Category updated successfully', data: category };
   }
 
@@ -139,6 +178,7 @@ export class CategoriesService {
       isActive: true,
     });
 
+    await this.invalidateTreeCache();
     return { message: 'Category activated successfully', data: category };
   }
 
@@ -153,6 +193,7 @@ export class CategoriesService {
       isActive: false,
     });
 
+    await this.invalidateTreeCache();
     return { message: 'Category deactivated successfully', data: category };
   }
 
@@ -164,7 +205,25 @@ export class CategoriesService {
     await this.assertCategoryCanBeDisabled(id);
 
     await this.categoriesRepository.softDelete(id);
+    await this.invalidateTreeCache();
     return { message: 'Category deleted successfully', data: null };
+  }
+
+  private async invalidateTreeCache() {
+    await this.redisCacheService.del(CATEGORY_TREE_CACHE_KEY);
+    this.logger.log(
+      `category_tree_cache event=invalidate key=${CATEGORY_TREE_CACHE_KEY}`,
+    );
+    void this.redisCacheService.incr(CATEGORY_TREE_METRIC_INVALIDATE);
+
+    const stillPresent = await this.redisCacheService.exists(
+      CATEGORY_TREE_CACHE_KEY,
+    );
+    if (stillPresent) {
+      this.logger.warn(
+        `category_tree_cache event=invalidate_stale key=${CATEGORY_TREE_CACHE_KEY}`,
+      );
+    }
   }
 
   private async assertNoCategoryCycle(categoryId: string, parentId: string) {

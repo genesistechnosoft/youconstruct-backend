@@ -1,12 +1,14 @@
-import {
-  BadRequestException,
-  Injectable,
-  NotFoundException,
-} from '@nestjs/common';
-import { Prisma } from '../../../generated/prisma/client.js';
+import { Injectable, NotFoundException } from '@nestjs/common';
+import { MediaEntityType, Prisma } from '../../../generated/prisma/client.js';
+import { DOMAIN_ERROR_CODES } from '../../common/errors/domain-error-code';
+import { domainBadRequest } from '../../common/errors/domain-exception';
+import { formatMoney } from '../../common/utils/money.util';
+import { CouponsService } from '../coupons/coupons.service';
+import { MediaService } from '../media/media.service';
 import { ShippingQuoteService } from '../orders/shipping-quote.service';
 import { CartRepository } from './cart.repository';
 import { AddCartItemDto } from './dto/add-cart-item.dto';
+import { PreviewCouponDto } from '../coupons/dto/coupon.dto';
 import { UpdateCartItemDto } from './dto/update-cart-item.dto';
 
 @Injectable()
@@ -14,6 +16,8 @@ export class CartService {
   constructor(
     private readonly cartRepository: CartRepository,
     private readonly shippingQuoteService: ShippingQuoteService,
+    private readonly mediaService: MediaService,
+    private readonly couponsService: CouponsService,
   ) {}
 
   async getCart(userId: string) {
@@ -21,7 +25,7 @@ export class CartService {
     const cart = await this.cartRepository.findCartWithItems(userId);
     return {
       message: 'Cart fetched successfully',
-      data: this.toCartResponse(cart),
+      data: await this.toCartResponse(cart),
     };
   }
 
@@ -29,7 +33,8 @@ export class CartService {
     const cart = await this.cartRepository.ensureCart(userId);
     const variant = await this.cartRepository.findVariantForCart(dto.variantId);
     if (!variant) {
-      throw new BadRequestException(
+      throw domainBadRequest(
+        DOMAIN_ERROR_CODES.INSUFFICIENT_STOCK,
         'Variant is unavailable or vendor is not approved',
       );
     }
@@ -50,7 +55,7 @@ export class CartService {
     const refreshed = await this.cartRepository.findCartWithItems(userId);
     return {
       message: 'Item added to cart',
-      data: this.toCartResponse(refreshed),
+      data: await this.toCartResponse(refreshed),
     };
   }
 
@@ -63,7 +68,8 @@ export class CartService {
 
     const variant = await this.cartRepository.findVariantForCart(variantId);
     if (!variant) {
-      throw new BadRequestException(
+      throw domainBadRequest(
+        DOMAIN_ERROR_CODES.INSUFFICIENT_STOCK,
         'Variant is unavailable or vendor is not approved',
       );
     }
@@ -78,7 +84,7 @@ export class CartService {
     const refreshed = await this.cartRepository.findCartWithItems(userId);
     return {
       message: 'Cart item updated',
-      data: this.toCartResponse(refreshed),
+      data: await this.toCartResponse(refreshed),
     };
   }
 
@@ -88,7 +94,7 @@ export class CartService {
     const refreshed = await this.cartRepository.findCartWithItems(userId);
     return {
       message: 'Cart item removed',
-      data: this.toCartResponse(refreshed),
+      data: await this.toCartResponse(refreshed),
     };
   }
 
@@ -98,7 +104,7 @@ export class CartService {
     const refreshed = await this.cartRepository.findCartWithItems(userId);
     return {
       message: 'Cart cleared',
-      data: this.toCartResponse(refreshed),
+      data: await this.toCartResponse(refreshed),
     };
   }
 
@@ -114,24 +120,70 @@ export class CartService {
     };
   }
 
-  private toCartResponse(
+  async previewCoupon(userId: string, dto: PreviewCouponDto) {
+    await this.cartRepository.ensureCart(userId);
+    const cart = await this.cartRepository.findCartWithItems(userId);
+    if (!cart || cart.items.length === 0) {
+      throw domainBadRequest(DOMAIN_ERROR_CODES.CART_EMPTY, 'Cart is empty');
+    }
+
+    const lines = cart.items.map((item) => ({
+      vendorId: item.variant.product.vendorId,
+      lineTotal: item.variant.sellingPrice.mul(item.quantity),
+    }));
+
+    const evaluation = await this.couponsService.evaluateCoupon(
+      dto.couponCode,
+      userId,
+      lines,
+    );
+
+    return {
+      message: 'Coupon preview calculated',
+      data: {
+        code: evaluation.code,
+        scope: evaluation.scope,
+        eligibleSubtotal: formatMoney(evaluation.eligibleSubtotal),
+        discountAmount: formatMoney(evaluation.discountAmount),
+      },
+    };
+  }
+
+  private async toCartResponse(
     cart: Awaited<ReturnType<CartRepository['findCartWithItems']>>,
   ) {
     if (!cart) {
       return { id: null, items: [], itemCount: 0, merchandiseSubtotal: '0.00' };
     }
 
+    const productIds = cart.items.map((item) => item.variant.product.id);
+    const variantIds = cart.items.map((item) => item.variantId);
+    const [productImages, variantImages] = await Promise.all([
+      this.mediaService.getPrimaryImagesForEntities(
+        MediaEntityType.PRODUCT,
+        productIds,
+      ),
+      this.mediaService.getPrimaryImagesForEntities(
+        MediaEntityType.PRODUCT_VARIANT,
+        variantIds,
+      ),
+    ]);
+
     let merchandiseSubtotal = new Prisma.Decimal(0);
     const items = cart.items.map((item) => {
       const lineTotal = item.variant.sellingPrice.mul(item.quantity);
       merchandiseSubtotal = merchandiseSubtotal.add(lineTotal);
+      const primaryImage =
+        variantImages.get(item.variantId) ??
+        productImages.get(item.variant.product.id) ??
+        null;
 
       return {
         id: item.id,
         variantId: item.variantId,
         quantity: item.quantity,
-        sellingPrice: item.variant.sellingPrice.toString(),
-        lineTotal: lineTotal.toString(),
+        sellingPrice: formatMoney(item.variant.sellingPrice),
+        lineTotal: formatMoney(lineTotal),
         productName: item.variant.product.name,
         variantName: item.variant.name,
         sku: item.variant.sku,
@@ -141,6 +193,7 @@ export class CartService {
         vendorId: item.variant.product.vendorId,
         vendorName: item.variant.product.vendor.businessName,
         productId: item.variant.product.id,
+        primaryImage,
       };
     });
 
@@ -148,7 +201,7 @@ export class CartService {
       id: cart.id,
       items,
       itemCount: items.reduce((sum, i) => sum + i.quantity, 0),
-      merchandiseSubtotal: merchandiseSubtotal.toFixed(2),
+      merchandiseSubtotal: formatMoney(merchandiseSubtotal),
       updatedAt: cart.updatedAt,
     };
   }

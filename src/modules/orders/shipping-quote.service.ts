@@ -155,13 +155,10 @@ export class ShippingQuoteService {
       });
     }
 
-    return this.computeQuote(
-      [...byVendor.values()],
-      {
-        latitude: address.latitude,
-        longitude: address.longitude,
-      },
-    );
+    return this.computeQuote([...byVendor.values()], {
+      latitude: address.latitude,
+      longitude: address.longitude,
+    });
   }
 
   computeQuote(
@@ -201,15 +198,12 @@ export class ShippingQuoteService {
       merchandiseSubtotal = merchandiseSubtotal.add(lineSubtotal);
 
       if (line.shippingOverride) {
-        const charge = this.computeRuleCharge(
-          line.shippingOverride,
-          {
-            merchandiseSubtotal: lineSubtotal,
-            lines: [line],
-            vendorGeo: vendor.geo,
-            address,
-          },
-        );
+        const charge = this.computeRuleCharge(line.shippingOverride, {
+          merchandiseSubtotal: lineSubtotal,
+          lines: [line],
+          vendorGeo: vendor.geo,
+          address,
+        });
         if (charge.distanceKm !== null) {
           distanceKm = charge.distanceKm;
         }
@@ -344,10 +338,7 @@ export class ShippingQuoteService {
           ctx.address.latitude,
           ctx.address.longitude,
         );
-        if (
-          rule.freeWithinKm != null &&
-          distanceKm <= rule.freeWithinKm
-        ) {
+        if (rule.freeWithinKm != null && distanceKm <= rule.freeWithinKm) {
           return { amount: new Prisma.Decimal(0), distanceKm };
         }
         return {

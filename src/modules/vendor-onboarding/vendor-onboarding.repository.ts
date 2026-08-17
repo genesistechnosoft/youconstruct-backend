@@ -32,6 +32,7 @@ const VENDOR_PROFILE_SELECT = {
   id: true,
   userId: true,
   businessName: true,
+  slug: true,
   businessAddress: true,
   city: true,
   state: true,
@@ -144,10 +145,21 @@ export class VendorOnboardingRepository {
     });
   }
 
-  createDraftVendorProfile(userId: string, businessName: string) {
+  createDraftVendorProfile(userId: string, businessName: string, slug: string) {
     return this.prisma.vendorProfile.create({
-      data: { userId, businessName },
+      data: { userId, businessName, slug },
       select: VENDOR_REVIEW_SELECT,
+    });
+  }
+
+  findBySlug(slug: string, excludeId?: string) {
+    return this.prisma.vendorProfile.findFirst({
+      where: {
+        slug,
+        deletedAt: null,
+        ...(excludeId && { NOT: { id: excludeId } }),
+      },
+      select: { id: true },
     });
   }
 
@@ -220,6 +232,35 @@ export class VendorOnboardingRepository {
       orderBy: { documentType: Prisma.SortOrder.asc },
       select: KYC_DOCUMENT_SELECT,
     });
+  }
+
+  findKycDocument(userId: string, documentType: KycDocumentType) {
+    return this.prisma.kycDocument.findUnique({
+      where: { userId_documentType: { userId, documentType } },
+      select: KYC_DOCUMENT_SELECT,
+    });
+  }
+
+  async updateKycDocumentStatus(
+    userId: string,
+    documentType: KycDocumentType,
+    data: {
+      status: KycStatus;
+      rejectionNote?: string | null;
+    },
+  ) {
+    try {
+      return await this.prisma.kycDocument.update({
+        where: { userId_documentType: { userId, documentType } },
+        data: {
+          status: data.status,
+          rejectionNote: data.rejectionNote,
+        },
+        select: KYC_DOCUMENT_SELECT,
+      });
+    } catch (error) {
+      this.handlePrismaError(error);
+    }
   }
 
   async submitVendor(id: string) {

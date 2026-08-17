@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { RedisCacheService } from '../../common/redis/redis-cache.service';
 import {
   AdminCategoriesController,
   CategoriesController,
@@ -8,7 +9,7 @@ import { CategoriesService } from './categories.service';
 
 @Module({
   controllers: [CategoriesController, AdminCategoriesController],
-  providers: [CategoriesService, CategoriesRepository],
+  providers: [CategoriesService, CategoriesRepository, RedisCacheService],
   exports: [CategoriesService],
 })
 export class CategoriesModule {}

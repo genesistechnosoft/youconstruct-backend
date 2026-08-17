@@ -22,6 +22,8 @@ export const PRODUCT_SELECT = {
   tags: true,
   metaTitle: true,
   metaDescription: true,
+  pendingContentReview: true,
+  pendingContent: true,
   createdAt: true,
   updatedAt: true,
 } as const;
@@ -49,6 +51,20 @@ const PUBLIC_PRODUCT_SELECT = {
   updatedAt: true,
 } as const;
 
+/** Lean fields for browse cards — drops description/SEO/return policy. */
+const PUBLIC_PRODUCT_LIST_SELECT = {
+  id: true,
+  categoryId: true,
+  brandId: true,
+  name: true,
+  slug: true,
+  shortDescription: true,
+  status: true,
+  tags: true,
+  createdAt: true,
+  updatedAt: true,
+} as const;
+
 const CATEGORY_SELECT = {
   id: true,
   name: true,
@@ -67,6 +83,22 @@ const UNIT_SELECT = {
   symbol: true,
   code: true,
   type: true,
+} as const;
+
+const BROWSE_VARIANT_SELECT = {
+  id: true,
+  sellingPrice: true,
+  isDefault: true,
+  isActive: true,
+  primaryUnit: {
+    select: UNIT_SELECT,
+  },
+  inventory: {
+    select: {
+      quantity: true,
+      allowBackorder: true,
+    },
+  },
 } as const;
 
 const INVENTORY_SELECT = {
@@ -173,12 +205,22 @@ const productListSelect = {
 } as const;
 
 const publicProductListSelect = {
-  ...PUBLIC_PRODUCT_SELECT,
+  ...PUBLIC_PRODUCT_LIST_SELECT,
   category: {
     select: CATEGORY_SELECT,
   },
   brand: {
     select: BRAND_SELECT,
+  },
+  variants: {
+    where: { isActive: true, deletedAt: null },
+    orderBy: [
+      { sellingPrice: Prisma.SortOrder.asc },
+      { isDefault: Prisma.SortOrder.desc },
+      { createdAt: Prisma.SortOrder.asc },
+    ] as Prisma.ProductVariantOrderByWithRelationInput[],
+    take: 1,
+    select: BROWSE_VARIANT_SELECT,
   },
   _count: {
     select: {
@@ -187,7 +229,7 @@ const publicProductListSelect = {
       },
     },
   },
-} as const;
+} satisfies Prisma.ProductSelect;
 
 const publicProductDetailSelect = {
   ...PUBLIC_PRODUCT_SELECT,
@@ -221,6 +263,7 @@ const productDetailSelect = {
 
 export interface ProductFilters {
   status?: ProductStatus;
+  pendingContentReview?: boolean;
   page?: number;
   limit?: number;
 }
@@ -228,7 +271,12 @@ export interface ProductFilters {
 export interface BrowseProductFilters {
   categoryId?: string;
   brandId?: string;
+  vendorId?: string;
   search?: string;
+  minPrice?: number;
+  maxPrice?: number;
+  sortBy?: 'createdAt' | 'price';
+  sortOrder?: 'asc' | 'desc';
   page?: number;
   limit?: number;
 }
@@ -287,25 +335,100 @@ export class ProductsRepository {
 
   async findPublic(filters: BrowseProductFilters) {
     const { skip, take } = paginate(filters.page, filters.limit);
+    const priceFilter =
+      filters.minPrice !== undefined || filters.maxPrice !== undefined
+        ? {
+            variants: {
+              some: {
+                isActive: true,
+                deletedAt: null,
+                sellingPrice: {
+                  ...(filters.minPrice !== undefined && {
+                    gte: new Prisma.Decimal(filters.minPrice),
+                  }),
+                  ...(filters.maxPrice !== undefined && {
+                    lte: new Prisma.Decimal(filters.maxPrice),
+                  }),
+                },
+              },
+            },
+          }
+        : {};
+
     const where: Prisma.ProductWhereInput = {
       status: ProductStatus.ACTIVE,
       deletedAt: null,
       vendor: { isApproved: true, deletedAt: null },
       category: { isActive: true, deletedAt: null },
       OR: [{ brandId: null }, { brand: { isActive: true, deletedAt: null } }],
+      ...(filters.vendorId && { vendorId: filters.vendorId }),
       ...(filters.categoryId && { categoryId: filters.categoryId }),
       ...(filters.brandId && { brandId: filters.brandId }),
       ...(filters.search && {
         name: { contains: filters.search, mode: 'insensitive' },
       }),
+      ...priceFilter,
     };
+
+    const sortOrder = filters.sortOrder ?? 'desc';
+    let orderBy: Prisma.ProductOrderByWithRelationInput[] = [
+      { createdAt: sortOrder },
+    ];
+
+    if (filters.sortBy === 'price') {
+      // Relation aggregate orderBy only supports _count; price sort uses
+      // a two-step groupBy on active variants' min sellingPrice.
+      const priced = await this.prisma.productVariant.groupBy({
+        by: ['productId'],
+        where: {
+          isActive: true,
+          deletedAt: null,
+          product: where,
+          ...(filters.minPrice !== undefined || filters.maxPrice !== undefined
+            ? {
+                sellingPrice: {
+                  ...(filters.minPrice !== undefined && {
+                    gte: new Prisma.Decimal(filters.minPrice),
+                  }),
+                  ...(filters.maxPrice !== undefined && {
+                    lte: new Prisma.Decimal(filters.maxPrice),
+                  }),
+                },
+              }
+            : {}),
+        },
+        _min: { sellingPrice: true },
+        orderBy: {
+          _min: { sellingPrice: sortOrder },
+        },
+        skip,
+        take,
+      });
+
+      const ids = priced.map((row) => row.productId);
+      const total = await this.prisma.product.count({ where });
+      if (ids.length === 0) {
+        return { items: [], total };
+      }
+
+      const unordered = await this.prisma.product.findMany({
+        where: { id: { in: ids } },
+        select: publicProductListSelect,
+      });
+      const byId = new Map(unordered.map((item) => [item.id, item]));
+      const items = ids
+        .map((id) => byId.get(id))
+        .filter((item): item is NonNullable<typeof item> => item !== undefined);
+
+      return { items, total };
+    }
 
     const [items, total] = await this.prisma.$transaction([
       this.prisma.product.findMany({
         where,
         skip,
         take,
-        orderBy: { createdAt: 'desc' },
+        orderBy,
         select: publicProductListSelect,
       }),
       this.prisma.product.count({ where }),
@@ -314,16 +437,27 @@ export class ProductsRepository {
     return { items, total };
   }
 
+  private publicProductWhere(extra: Prisma.ProductWhereInput = {}) {
+    return {
+      status: ProductStatus.ACTIVE,
+      deletedAt: null,
+      vendor: { isApproved: true, deletedAt: null },
+      category: { isActive: true, deletedAt: null },
+      OR: [{ brandId: null }, { brand: { isActive: true, deletedAt: null } }],
+      ...extra,
+    } satisfies Prisma.ProductWhereInput;
+  }
+
   findPublicById(id: string) {
     return this.prisma.product.findFirst({
-      where: {
-        id,
-        status: ProductStatus.ACTIVE,
-        deletedAt: null,
-        vendor: { isApproved: true, deletedAt: null },
-        category: { isActive: true, deletedAt: null },
-        OR: [{ brandId: null }, { brand: { isActive: true, deletedAt: null } }],
-      },
+      where: this.publicProductWhere({ id }),
+      select: publicProductDetailSelect,
+    });
+  }
+
+  findPublicBySlug(slug: string) {
+    return this.prisma.product.findFirst({
+      where: this.publicProductWhere({ slug }),
       select: publicProductDetailSelect,
     });
   }
@@ -333,6 +467,9 @@ export class ProductsRepository {
     const where: Prisma.ProductWhereInput = {
       deletedAt: null,
       ...(filters.status && { status: filters.status }),
+      ...(filters.pendingContentReview !== undefined && {
+        pendingContentReview: filters.pendingContentReview,
+      }),
     };
 
     const [items, total] = await this.prisma.$transaction([
@@ -378,6 +515,13 @@ export class ProductsRepository {
     return this.prisma.brand.findFirst({
       where: { id, isActive: true, deletedAt: null },
       select: { id: true },
+    });
+  }
+
+  findVendorOwnerUserId(vendorId: string) {
+    return this.prisma.vendorProfile.findFirst({
+      where: { id: vendorId, deletedAt: null },
+      select: { userId: true },
     });
   }
 

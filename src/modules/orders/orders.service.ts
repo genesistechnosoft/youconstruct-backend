@@ -4,6 +4,7 @@ import {
   ForbiddenException,
   Inject,
   Injectable,
+  Logger,
   NotFoundException,
   forwardRef,
 } from '@nestjs/common';
@@ -13,16 +14,24 @@ import {
   OrderStatus,
   PaymentMethod,
   PaymentStatus,
+  PlatformRole,
   Prisma,
   ShipmentStatus,
   SubOrderStatus,
+  NotificationEventType,
+  MediaAccessLevel,
 } from '../../../generated/prisma/client.js';
-import {
-  paginate,
-  paginationMeta,
-} from '../../common/utils/pagination.util';
+import { DOMAIN_ERROR_CODES } from '../../common/errors/domain-error-code';
+import { domainBadRequest } from '../../common/errors/domain-exception';
+import { paginate, paginationMeta } from '../../common/utils/pagination.util';
+import { formatMoney, formatRate } from '../../common/utils/money.util';
 import { PAYMENT_TIMEOUT_QUEUE } from '../../queue/queue.constants';
+import { StorageService } from '../../storage/storage.service';
+import { NotificationEmitterService } from '../notifications/notification-emitter.service';
+import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
+import { CouponsService } from '../coupons/coupons.service';
 import { RazorpayClient } from '../payments/razorpay.client';
+import { CancelRefundService } from './cancel-refund.service';
 import { AdminRefundDto } from './dto/admin-refund.dto';
 import { AdminUpdateOrderStatusDto } from './dto/admin-update-order-status.dto';
 import { CheckoutDto } from './dto/checkout.dto';
@@ -48,6 +57,8 @@ import {
 
 @Injectable()
 export class OrdersService {
+  private readonly logger = new Logger(OrdersService.name);
+
   constructor(
     private readonly ordersRepository: OrdersRepository,
     private readonly shippingQuoteService: ShippingQuoteService,
@@ -55,9 +66,54 @@ export class OrdersService {
     private readonly razorpayClient: RazorpayClient,
     @InjectQueue(PAYMENT_TIMEOUT_QUEUE)
     private readonly paymentTimeoutQueue: Queue,
+    private readonly platformSettings: PlatformSettingsService,
+    private readonly notifications: NotificationEmitterService,
+    private readonly storageService: StorageService,
+    @Inject(forwardRef(() => CancelRefundService))
+    private readonly cancelRefundService: CancelRefundService,
+    private readonly couponsService: CouponsService,
   ) {}
 
   async checkout(userId: string, dto: CheckoutDto) {
+    const started = Date.now();
+    let orderId: string | undefined;
+    let ok = false;
+    try {
+      const result = await this.executeCheckout(userId, dto);
+      orderId =
+        result.data &&
+        typeof result.data === 'object' &&
+        'order' in result.data &&
+        result.data.order &&
+        typeof result.data.order === 'object' &&
+        'id' in result.data.order
+          ? String(result.data.order.id)
+          : undefined;
+      ok = true;
+      return result;
+    } catch (error) {
+      throw error;
+    } finally {
+      this.logger.log(
+        `checkout durationMs=${Date.now() - started} orderId=${orderId ?? 'n/a'} paymentMethod=${dto.paymentMethod} ${ok ? 'ok' : 'fail'}`,
+      );
+    }
+  }
+
+  private async executeCheckout(userId: string, dto: CheckoutDto) {
+    if (dto.paymentMethod === PaymentMethod.COD) {
+      const codEnabled = await this.platformSettings.getBoolean(
+        'commerce',
+        'codEnabled',
+      );
+      if (!codEnabled) {
+        throw domainBadRequest(
+          DOMAIN_ERROR_CODES.COD_DISABLED,
+          'Cash on delivery is currently disabled',
+        );
+      }
+    }
+
     const address = await this.ordersRepository.findAddressForUser(
       userId,
       dto.addressId,
@@ -68,9 +124,40 @@ export class OrdersService {
 
     const cart = await this.ordersRepository.findCartWithShippingData(userId);
     if (!cart) {
-      throw new BadRequestException('Cart is empty');
+      throw domainBadRequest(DOMAIN_ERROR_CODES.CART_EMPTY, 'Cart is empty');
     }
     this.ordersRepository.assertCheckoutCartValid(cart);
+
+    const productIds = cart.items.map((i) => i.variant.product.id);
+    const variantIds = cart.items.map((i) => i.variant.id);
+    const imageMap = await this.ordersRepository.findPrimaryImageSnapshots(
+      productIds,
+      variantIds,
+    );
+    const resolvedImages = new Map<
+      string,
+      {
+        imageUrlSnapshot: string | null;
+        imageStorageKeySnapshot: string | null;
+      }
+    >();
+    for (const [entityId, snap] of imageMap) {
+      let url: string | null = null;
+      if (snap.imageStorageKeySnapshot) {
+        try {
+          url = await this.storageService.getUrl(
+            snap.imageStorageKeySnapshot,
+            MediaAccessLevel.PUBLIC,
+          );
+        } catch {
+          url = null;
+        }
+      }
+      resolvedImages.set(entityId, {
+        imageStorageKeySnapshot: snap.imageStorageKeySnapshot,
+        imageUrlSnapshot: url,
+      });
+    }
 
     const vendorMap = new Map<string, VendorShippingQuoteInput>();
     const inventoryDecrements: Array<{ variantId: string; quantity: number }> =
@@ -122,8 +209,7 @@ export class OrdersService {
               methodType: product.shippingOverride.methodType,
               flatCharge: product.shippingOverride.flatCharge,
               isFree: product.shippingOverride.isFree,
-              freeAboveOrderValue:
-                product.shippingOverride.freeAboveOrderValue,
+              freeAboveOrderValue: product.shippingOverride.freeAboveOrderValue,
               freeWithinKm: product.shippingOverride.freeWithinKm,
               chargeBeyondKm: product.shippingOverride.chargeBeyondKm,
               unitCharge: product.shippingOverride.unitCharge,
@@ -133,10 +219,13 @@ export class OrdersService {
       });
     }
 
-    const quote = this.shippingQuoteService.computeQuote([...vendorMap.values()], {
-      latitude: address.latitude,
-      longitude: address.longitude,
-    });
+    const quote = this.shippingQuoteService.computeQuote(
+      [...vendorMap.values()],
+      {
+        latitude: address.latitude,
+        longitude: address.longitude,
+      },
+    );
 
     const isCod = dto.paymentMethod === PaymentMethod.COD;
     const orderStatus = isCod
@@ -171,6 +260,8 @@ export class OrdersService {
         quantity: number;
         itemShippingCharge: Prisma.Decimal;
         total: Prisma.Decimal;
+        imageUrlSnapshot: string | null;
+        imageStorageKeySnapshot: string | null;
       }>;
     }> = [];
 
@@ -189,8 +280,9 @@ export class OrdersService {
         (i) => i.variant.product.vendor.id === vendorGroup.vendorId,
       )!.variant.product.vendor;
 
-      const commissionRate =
-        this.ordersRepository.resolveCommissionRate(vendor.commissionRate);
+      const commissionRate = this.ordersRepository.resolveCommissionRate(
+        vendor.commissionRate,
+      );
 
       let subtotal = new Prisma.Decimal(0);
       const items: Array<{
@@ -203,6 +295,8 @@ export class OrdersService {
         quantity: number;
         itemShippingCharge: Prisma.Decimal;
         total: Prisma.Decimal;
+        imageUrlSnapshot: string | null;
+        imageStorageKeySnapshot: string | null;
       }> = [];
 
       for (const line of vendorGroup.lines) {
@@ -220,6 +314,10 @@ export class OrdersService {
           lineShip?.shippingCharge ?? '0',
         );
 
+        const snap =
+          resolvedImages.get(line.variantId) ??
+          resolvedImages.get(cartItem.variant.product.id);
+
         items.push({
           variantId: line.variantId,
           productName: cartItem.variant.product.name,
@@ -230,6 +328,8 @@ export class OrdersService {
           quantity: line.quantity,
           itemShippingCharge,
           total: lineTotal,
+          imageUrlSnapshot: snap?.imageUrlSnapshot ?? null,
+          imageStorageKeySnapshot: snap?.imageStorageKeySnapshot ?? null,
         });
       }
 
@@ -257,7 +357,7 @@ export class OrdersService {
           shippingCharge: breakdown.shippingCharge,
           distanceKm: breakdown.distanceKm,
           lineCharges: breakdown.lineCharges,
-        } as Prisma.InputJsonValue,
+        },
         taxAmount,
         total,
         platformCommissionRate: commissionRate,
@@ -268,9 +368,34 @@ export class OrdersService {
     }
 
     const taxTotal = new Prisma.Decimal(0);
-    const grandTotal = orderSubtotal.add(orderShipping).add(taxTotal);
 
-    let order;
+    const couponLines = cart.items.map((item) => ({
+      vendorId: item.variant.product.vendor.id,
+      lineTotal: item.variant.sellingPrice.mul(item.quantity),
+    }));
+
+    let discountAmount = new Prisma.Decimal(0);
+    let couponId: string | null = null;
+    if (dto.couponCode) {
+      const evaluation = await this.couponsService.evaluateCoupon(
+        dto.couponCode,
+        userId,
+        couponLines,
+      );
+      discountAmount = evaluation.discountAmount;
+      couponId = evaluation.couponId;
+    }
+
+    const grandTotal = Prisma.Decimal.max(
+      orderSubtotal.add(orderShipping).add(taxTotal).sub(discountAmount),
+      new Prisma.Decimal(0),
+    );
+
+    let order:
+      | NonNullable<
+          Awaited<ReturnType<OrdersRepository['createCheckoutOrder']>>
+        >
+      | undefined;
     for (let attempt = 0; attempt < 5; attempt++) {
       try {
         order = await this.ordersRepository.createCheckoutOrder({
@@ -280,6 +405,8 @@ export class OrdersService {
           notes: dto.notes,
           orderNumber,
           subtotal: orderSubtotal,
+          discountAmount,
+          couponId,
           shippingTotal: orderShipping,
           taxTotal,
           grandTotal,
@@ -307,9 +434,16 @@ export class OrdersService {
     }
 
     if (isCod) {
+      this.notifications.emit({
+        userId,
+        eventType: NotificationEventType.ORDER_PLACED,
+        title: 'Order placed',
+        body: `Your order ${order.orderNumber} has been placed`,
+        data: { orderId: order.id },
+      });
       return {
         message: 'Order placed successfully',
-        data: { order: this.serializeOrder(order) },
+        data: { order: this.serializeOrder(order, 'customer') },
       };
     }
 
@@ -320,13 +454,20 @@ export class OrdersService {
       notes: { orderId: order.id },
     });
 
+    const timeoutMinutes = await this.platformSettings.getNumber(
+      'commerce',
+      'onlinePaymentTimeoutMinutes',
+    );
+    const timeoutMs =
+      timeoutMinutes > 0 ? timeoutMinutes * 60 * 1000 : PAYMENT_TIMEOUT_MS;
+
     const jobId = `${PAYMENT_TIMEOUT_JOB_PREFIX}${order.id}`;
     await this.paymentTimeoutQueue.add(
       'cancel-unpaid-order',
       { orderId: order.id },
       {
         jobId,
-        delay: PAYMENT_TIMEOUT_MS,
+        delay: timeoutMs,
         attempts: 3,
         backoff: { type: 'exponential', delay: 2000 },
         removeOnComplete: true,
@@ -341,10 +482,18 @@ export class OrdersService {
 
     const refreshed = await this.ordersRepository.findOrderById(order.id);
 
+    this.notifications.emit({
+      userId,
+      eventType: NotificationEventType.ORDER_PLACED,
+      title: 'Order placed',
+      body: `Your order ${order.orderNumber} is awaiting payment`,
+      data: { orderId: order.id },
+    });
+
     return {
       message: 'Order created — complete payment',
       data: {
-        order: this.serializeOrder(refreshed!),
+        order: this.serializeOrder(refreshed!, 'customer'),
         razorpayOrder: {
           id: razorpayOrder.id,
           amount: razorpayOrder.amount,
@@ -372,7 +521,7 @@ export class OrdersService {
 
     return {
       message: 'Orders fetched successfully',
-      data: items.map((o) => this.serializeOrder(o)),
+      data: items.map((o) => this.serializeOrder(o, 'customer')),
       meta: paginationMeta(page, limit, total),
     };
   }
@@ -387,7 +536,7 @@ export class OrdersService {
     }
     return {
       message: 'Order fetched successfully',
-      data: this.serializeOrder(order),
+      data: this.serializeOrder(order, 'customer'),
     };
   }
 
@@ -408,7 +557,7 @@ export class OrdersService {
 
     return {
       message: 'Vendor orders fetched successfully',
-      data: items.map((so) => this.serializeSubOrder(so)),
+      data: items.map((so) => this.serializeSubOrder(so, 'vendor')),
       meta: paginationMeta(page, limit, total),
     };
   }
@@ -423,7 +572,7 @@ export class OrdersService {
     }
     return {
       message: 'Vendor order fetched successfully',
-      data: this.serializeSubOrder(so),
+      data: this.serializeSubOrder(so, 'vendor'),
     };
   }
 
@@ -442,14 +591,16 @@ export class OrdersService {
     }
 
     if (!isVendorTransitionAllowed(so.status, dto.status)) {
-      throw new BadRequestException(
+      throw domainBadRequest(
+        DOMAIN_ERROR_CODES.INVALID_STATUS_TRANSITION,
         `Cannot transition from ${so.status} to ${dto.status}`,
       );
     }
 
     if (
       dto.status === SubOrderStatus.SHIPPED &&
-      (!so.shipment?.trackingNumber && !dto.note)
+      !so.shipment?.trackingNumber &&
+      !dto.note
     ) {
       // tracking recommended but allow if shipment update done separately
     }
@@ -485,19 +636,37 @@ export class OrdersService {
       await this.ordersRepository.creditWalletForSubOrderId(subOrderId);
     }
 
-    const order = await this.ordersRepository.recomputeParentOrderStatus(
-      orderId,
-    );
+    const order =
+      await this.ordersRepository.recomputeParentOrderStatus(orderId);
     const refreshed = await this.ordersRepository.findSubOrderForVendor(
       subOrderId,
       vendorId,
     );
 
+    if (dto.status === SubOrderStatus.SHIPPED) {
+      this.notifications.emit({
+        userId: so.order.userId ?? order.userId,
+        eventType: NotificationEventType.ORDER_SHIPPED,
+        title: 'Order shipped',
+        body: `Sub-order ${so.subOrderNumber} has been shipped`,
+        data: { orderId, subOrderId },
+      });
+    }
+    if (dto.status === SubOrderStatus.DELIVERED) {
+      this.notifications.emit({
+        userId: so.order.userId ?? order.userId,
+        eventType: NotificationEventType.ORDER_DELIVERED,
+        title: 'Order delivered',
+        body: `Sub-order ${so.subOrderNumber} has been delivered`,
+        data: { orderId, subOrderId },
+      });
+    }
+
     return {
       message: 'Sub-order status updated',
       data: {
-        subOrder: this.serializeSubOrder(refreshed!),
-        order: this.serializeOrder(order),
+        subOrder: this.serializeSubOrder(refreshed!, 'vendor'),
+        order: this.serializeOrder(order, 'vendor', vendorId),
       },
     };
   }
@@ -534,7 +703,7 @@ export class OrdersService {
 
     return {
       message: 'Shipment updated',
-      data: this.serializeSubOrder(refreshed!),
+      data: this.serializeSubOrder(refreshed!, 'vendor'),
     };
   }
 
@@ -552,7 +721,7 @@ export class OrdersService {
 
     return {
       message: 'Orders fetched successfully',
-      data: items.map((o) => this.serializeOrder(o)),
+      data: items.map((o) => this.serializeOrder(o, 'admin')),
       meta: paginationMeta(page, limit, total),
     };
   }
@@ -564,7 +733,7 @@ export class OrdersService {
     }
     return {
       message: 'Order fetched successfully',
-      data: this.serializeOrder(order),
+      data: this.serializeOrder(order, 'admin'),
     };
   }
 
@@ -573,6 +742,45 @@ export class OrdersService {
     adminUserId: string,
     dto: AdminUpdateOrderStatusDto,
   ) {
+    if (dto.status === OrderStatus.REFUNDED) {
+      return this.cancelRefundService.adminRefundOrder({
+        orderId,
+        actorUserId: adminUserId,
+        note: dto.note,
+      });
+    }
+
+    if (dto.status === OrderStatus.CANCELLED) {
+      const existing = await this.ordersRepository.findOrderById(orderId);
+      if (!existing) {
+        throw new NotFoundException('Order not found');
+      }
+
+      const reason = dto.note?.trim() || 'Cancelled by admin';
+      for (const so of existing.subOrders) {
+        if (
+          so.status === SubOrderStatus.CANCELLED ||
+          so.status === SubOrderStatus.REFUNDED
+        ) {
+          continue;
+        }
+        await this.cancelRefundService.cancelSubOrder({
+          subOrderId: so.id,
+          orderId,
+          actorUserId: adminUserId,
+          actorRole: PlatformRole.ADMIN,
+          audience: 'admin',
+          reason,
+        });
+      }
+
+      const refreshed = await this.ordersRepository.findOrderById(orderId);
+      return {
+        message: 'Order cancelled successfully',
+        data: this.serializeOrder(refreshed!, 'admin'),
+      };
+    }
+
     const order = await this.ordersRepository.adminUpdateOrderStatus(
       orderId,
       dto.status,
@@ -581,7 +789,7 @@ export class OrdersService {
     );
     return {
       message: 'Order status updated',
-      data: this.serializeOrder(order),
+      data: this.serializeOrder(order, 'admin'),
     };
   }
 
@@ -600,7 +808,7 @@ export class OrdersService {
 
     return {
       message: 'Sub-orders fetched successfully',
-      data: items.map((so) => this.serializeSubOrder(so)),
+      data: items.map((so) => this.serializeSubOrder(so, 'admin')),
       meta: paginationMeta(page, limit, total),
     };
   }
@@ -615,8 +823,26 @@ export class OrdersService {
       throw new NotFoundException('Sub-order not found');
     }
 
+    if (dto.status === SubOrderStatus.CANCELLED) {
+      return this.cancelAdminSubOrder(
+        adminUserId,
+        subOrderId,
+        dto.note?.trim() || 'Cancelled by admin',
+      );
+    }
+
+    if (dto.status === SubOrderStatus.REFUNDED) {
+      return this.cancelRefundService.adminRefundOrder({
+        orderId: so.order.id,
+        actorUserId: adminUserId,
+        note: dto.note,
+        subOrderId,
+      });
+    }
+
     if (!isAdminTransitionAllowed(so.status, dto.status)) {
-      throw new BadRequestException(
+      throw domainBadRequest(
+        DOMAIN_ERROR_CODES.INVALID_STATUS_TRANSITION,
         `Cannot transition from ${so.status} to ${dto.status}`,
       );
     }
@@ -649,34 +875,72 @@ export class OrdersService {
       await this.ordersRepository.creditWalletForSubOrderId(subOrderId);
     }
 
-    const order = await this.ordersRepository.recomputeParentOrderStatus(
-      orderId,
-    );
+    const order =
+      await this.ordersRepository.recomputeParentOrderStatus(orderId);
     const refreshed = await this.ordersRepository.findSubOrderById(subOrderId);
 
     return {
       message: 'Sub-order status updated',
       data: {
-        subOrder: this.serializeSubOrder(refreshed!),
-        order: this.serializeOrder(order),
+        subOrder: this.serializeSubOrder(refreshed!, 'admin'),
+        order: this.serializeOrder(order, 'admin'),
       },
     };
   }
 
-  async adminRefund(
-    orderId: string,
-    adminUserId: string,
-    dto: AdminRefundDto,
-  ) {
-    const order = await this.ordersRepository.stubRefund(
+  async adminRefund(orderId: string, adminUserId: string, dto: AdminRefundDto) {
+    return this.cancelRefundService.adminRefundOrder({
       orderId,
-      dto.note,
-      adminUserId,
-    );
-    return {
-      message: 'Order refunded (stub — no payment reversal)',
-      data: this.serializeOrder(order),
-    };
+      actorUserId: adminUserId,
+      note: dto.note,
+      subOrderId: dto.subOrderId,
+    });
+  }
+
+  async cancelCustomerSubOrder(
+    userId: string,
+    orderId: string,
+    subOrderId: string,
+    reason?: string,
+  ) {
+    return this.cancelRefundService.cancelSubOrder({
+      subOrderId,
+      orderId,
+      actorUserId: userId,
+      actorRole: PlatformRole.CUSTOMER,
+      audience: 'customer',
+      reason: reason?.trim() || 'Cancelled by customer',
+    });
+  }
+
+  async cancelVendorSubOrder(
+    vendorId: string,
+    userId: string,
+    subOrderId: string,
+    reason: string,
+  ) {
+    return this.cancelRefundService.cancelSubOrder({
+      subOrderId,
+      vendorId,
+      actorUserId: userId,
+      actorRole: PlatformRole.VENDOR,
+      audience: 'vendor',
+      reason,
+    });
+  }
+
+  async cancelAdminSubOrder(
+    adminUserId: string,
+    subOrderId: string,
+    reason: string,
+  ) {
+    return this.cancelRefundService.cancelSubOrder({
+      subOrderId,
+      actorUserId: adminUserId,
+      actorRole: PlatformRole.ADMIN,
+      audience: 'admin',
+      reason,
+    });
   }
 
   async captureOnlinePayment(input: {
@@ -691,10 +955,7 @@ export class OrdersService {
       throw new NotFoundException('Order not found');
     }
 
-    if (
-      input.expectedUserId &&
-      order.userId !== input.expectedUserId
-    ) {
+    if (input.expectedUserId && order.userId !== input.expectedUserId) {
       throw new ForbiddenException('Order does not belong to user');
     }
 
@@ -717,14 +978,54 @@ export class OrdersService {
     }
 
     const refreshed = await this.ordersRepository.findOrderById(order.id);
+    if (refreshed && !result.alreadyPaid) {
+      this.notifications.emit({
+        userId: refreshed.userId,
+        eventType: NotificationEventType.ORDER_PAID,
+        title: 'Payment received',
+        body: `Payment confirmed for order ${refreshed.orderNumber}`,
+        data: { orderId: refreshed.id },
+      });
+    }
+
     return {
       alreadyPaid: result.alreadyPaid,
-      order: refreshed ? this.serializeOrder(refreshed) : null,
+      order: refreshed
+        ? this.serializeOrder(
+            refreshed,
+            input.expectedUserId ? 'customer' : 'admin',
+          )
+        : null,
     };
   }
 
   async handlePaymentTimeout(orderId: string) {
-    await this.ordersRepository.cancelTimedOutOrder(orderId);
+    const result = await this.ordersRepository.cancelTimedOutOrder(orderId);
+    if (result) {
+      this.notifications.emit({
+        userId: result.userId,
+        eventType: NotificationEventType.ORDER_CANCELLED,
+        title: 'Order cancelled',
+        body: 'Order cancelled due to payment timeout',
+        data: { orderId: result.orderId },
+      });
+    }
+  }
+
+  serializeOrderForAudience(
+    order: {
+      subtotal: Prisma.Decimal | string;
+      discountAmount: Prisma.Decimal | string;
+      shippingTotal: Prisma.Decimal | string;
+      taxTotal: Prisma.Decimal | string;
+      grandTotal: Prisma.Decimal | string;
+      subOrders: Array<Record<string, unknown>>;
+      [key: string]: unknown;
+    },
+    audience: 'customer' | 'vendor' | 'admin',
+    vendorId?: string,
+  ) {
+    return this.serializeOrder(order as never, audience, vendorId);
   }
 
   private formatDateStamp(date: Date): string {
@@ -744,57 +1045,87 @@ export class OrdersService {
     return `YC-${dateStamp}-V-${short}`;
   }
 
-  private serializeOrder(order: {
-    subtotal: Prisma.Decimal;
-    discountAmount: Prisma.Decimal;
-    shippingTotal: Prisma.Decimal;
-    taxTotal: Prisma.Decimal;
-    grandTotal: Prisma.Decimal;
-    subOrders: Array<Record<string, unknown>>;
-    [key: string]: unknown;
-  }) {
-    return {
+  private serializeOrder(
+    order: {
+      subtotal: Prisma.Decimal;
+      discountAmount: Prisma.Decimal;
+      shippingTotal: Prisma.Decimal;
+      taxTotal: Prisma.Decimal;
+      grandTotal: Prisma.Decimal;
+      subOrders: Array<Record<string, unknown>>;
+      [key: string]: unknown;
+    },
+    audience: 'customer' | 'vendor' | 'admin',
+    vendorId?: string,
+  ) {
+    const subOrders =
+      audience === 'vendor' && vendorId
+        ? order.subOrders.filter((so) => so.vendorId === vendorId)
+        : order.subOrders;
+
+    const serialized: Record<string, unknown> = {
       ...order,
-      subtotal: order.subtotal.toString(),
-      discountAmount: order.discountAmount.toString(),
-      shippingTotal: order.shippingTotal.toString(),
-      taxTotal: order.taxTotal.toString(),
-      grandTotal: order.grandTotal.toString(),
-      subOrders: order.subOrders.map((so) => this.serializeSubOrder(so as never)),
+      subtotal: formatMoney(order.subtotal),
+      discountAmount: formatMoney(order.discountAmount),
+      shippingTotal: formatMoney(order.shippingTotal),
+      taxTotal: formatMoney(order.taxTotal),
+      grandTotal: formatMoney(order.grandTotal),
+      subOrders: subOrders.map((so) =>
+        this.serializeSubOrder(so as never, audience),
+      ),
     };
+
+    if (audience === 'customer') {
+      delete serialized.paymentTimeoutJobId;
+      delete serialized.razorpayPaymentId;
+    }
+
+    return serialized;
   }
 
-  private serializeSubOrder(so: {
-    subtotal: Prisma.Decimal;
-    shippingCharge: Prisma.Decimal;
-    taxAmount: Prisma.Decimal;
-    total: Prisma.Decimal;
-    platformCommissionRate: Prisma.Decimal;
-    platformCommission: Prisma.Decimal;
-    vendorEarning: Prisma.Decimal;
-    items?: Array<{
-      unitPrice: Prisma.Decimal;
-      itemShippingCharge: Prisma.Decimal;
+  private serializeSubOrder(
+    so: {
+      subtotal: Prisma.Decimal;
+      shippingCharge: Prisma.Decimal;
+      taxAmount: Prisma.Decimal;
       total: Prisma.Decimal;
+      platformCommissionRate: Prisma.Decimal;
+      platformCommission: Prisma.Decimal;
+      vendorEarning: Prisma.Decimal;
+      items?: Array<{
+        unitPrice: Prisma.Decimal;
+        itemShippingCharge: Prisma.Decimal;
+        total: Prisma.Decimal;
+        [key: string]: unknown;
+      }>;
       [key: string]: unknown;
-    }>;
-    [key: string]: unknown;
-  }) {
-    return {
+    },
+    audience: 'customer' | 'vendor' | 'admin',
+  ) {
+    const serialized: Record<string, unknown> = {
       ...so,
-      subtotal: so.subtotal.toString(),
-      shippingCharge: so.shippingCharge.toString(),
-      taxAmount: so.taxAmount.toString(),
-      total: so.total.toString(),
-      platformCommissionRate: so.platformCommissionRate.toString(),
-      platformCommission: so.platformCommission.toString(),
-      vendorEarning: so.vendorEarning.toString(),
+      subtotal: formatMoney(so.subtotal),
+      shippingCharge: formatMoney(so.shippingCharge),
+      taxAmount: formatMoney(so.taxAmount),
+      total: formatMoney(so.total),
+      platformCommissionRate: formatRate(so.platformCommissionRate),
+      platformCommission: formatMoney(so.platformCommission),
+      vendorEarning: formatMoney(so.vendorEarning),
       items: so.items?.map((item) => ({
         ...item,
-        unitPrice: item.unitPrice.toString(),
-        itemShippingCharge: item.itemShippingCharge.toString(),
-        total: item.total.toString(),
+        unitPrice: formatMoney(item.unitPrice),
+        itemShippingCharge: formatMoney(item.itemShippingCharge),
+        total: formatMoney(item.total),
       })),
     };
+
+    if (audience === 'customer') {
+      delete serialized.platformCommissionRate;
+      delete serialized.platformCommission;
+      delete serialized.vendorEarning;
+      delete serialized.walletCreditedAt;
+    }
+
+    return serialized;
   }
 }

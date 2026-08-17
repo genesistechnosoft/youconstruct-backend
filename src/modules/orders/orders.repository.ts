@@ -5,20 +5,24 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import {
+  MediaContext,
+  MediaEntityType,
+  MediaProcessingStatus,
+  OrderRefundStatus,
   OrderStatus,
   PaymentMethod,
   PaymentStatus,
+  PlatformRole,
   Prisma,
   ProductStatus,
+  RestockStatus,
   ShipmentStatus,
   SubOrderStatus,
   TransactionReason,
   TransactionType,
 } from '../../../generated/prisma/client.js';
 import { PrismaService } from '../../prisma/prisma.service';
-import {
-  aggregateParentOrderStatus,
-} from './order-status.util';
+import { aggregateParentOrderStatus } from './order-status.util';
 import { DEFAULT_PLATFORM_COMMISSION_RATE } from './order.constants';
 
 const ADDRESS_SELECT = {
@@ -125,6 +129,8 @@ export const ORDER_DETAIL_SELECT = {
           quantity: true,
           itemShippingCharge: true,
           total: true,
+          imageUrlSnapshot: true,
+          imageStorageKeySnapshot: true,
         },
       },
       shipment: {
@@ -151,6 +157,78 @@ export const ORDER_DETAIL_SELECT = {
         },
       },
     },
+  },
+} as const;
+
+const SUB_ORDER_LIST_SELECT = {
+  id: true,
+  subOrderNumber: true,
+  vendorId: true,
+  status: true,
+  subtotal: true,
+  shippingCharge: true,
+  taxAmount: true,
+  total: true,
+  platformCommissionRate: true,
+  platformCommission: true,
+  vendorEarning: true,
+  walletCreditedAt: true,
+  notes: true,
+  createdAt: true,
+  updatedAt: true,
+  vendor: {
+    select: { id: true, businessName: true },
+  },
+  items: {
+    select: {
+      id: true,
+      variantId: true,
+      productName: true,
+      variantName: true,
+      sku: true,
+      unitPrice: true,
+      unitSymbol: true,
+      quantity: true,
+      itemShippingCharge: true,
+      total: true,
+      imageUrlSnapshot: true,
+      imageStorageKeySnapshot: true,
+    },
+  },
+  shipment: {
+    select: {
+      id: true,
+      trackingNumber: true,
+      courierName: true,
+      status: true,
+      shippedAt: true,
+      deliveredAt: true,
+      updatedAt: true,
+    },
+  },
+} as const;
+
+export const ORDER_LIST_SELECT = {
+  id: true,
+  orderNumber: true,
+  userId: true,
+  status: true,
+  paymentStatus: true,
+  paymentMethod: true,
+  subtotal: true,
+  discountAmount: true,
+  shippingTotal: true,
+  taxTotal: true,
+  grandTotal: true,
+  addressCity: true,
+  addressState: true,
+  addressPincode: true,
+  razorpayOrderId: true,
+  notes: true,
+  createdAt: true,
+  updatedAt: true,
+  subOrders: {
+    select: SUB_ORDER_LIST_SELECT,
   },
 } as const;
 
@@ -233,6 +311,8 @@ export class OrdersRepository {
     notes?: string;
     orderNumber: string;
     subtotal: Prisma.Decimal;
+    discountAmount: Prisma.Decimal;
+    couponId?: string | null;
     shippingTotal: Prisma.Decimal;
     taxTotal: Prisma.Decimal;
     grandTotal: Prisma.Decimal;
@@ -260,6 +340,8 @@ export class OrdersRepository {
         quantity: number;
         itemShippingCharge: Prisma.Decimal;
         total: Prisma.Decimal;
+        imageUrlSnapshot?: string | null;
+        imageStorageKeySnapshot?: string | null;
       }>;
     }>;
     inventoryDecrements: Array<{ variantId: string; quantity: number }>;
@@ -294,7 +376,8 @@ export class OrdersRepository {
             paymentStatus: input.paymentStatus,
             paymentMethod: input.paymentMethod,
             subtotal: input.subtotal,
-            discountAmount: new Prisma.Decimal(0),
+            discountAmount: input.discountAmount,
+            couponId: input.couponId ?? null,
             shippingTotal: input.shippingTotal,
             taxTotal: input.taxTotal,
             grandTotal: input.grandTotal,
@@ -331,6 +414,9 @@ export class OrdersRepository {
                     quantity: item.quantity,
                     itemShippingCharge: item.itemShippingCharge,
                     total: item.total,
+                    imageUrlSnapshot: item.imageUrlSnapshot ?? null,
+                    imageStorageKeySnapshot:
+                      item.imageStorageKeySnapshot ?? null,
                   })),
                 },
                 statusHistory: {
@@ -351,6 +437,17 @@ export class OrdersRepository {
           select: ORDER_DETAIL_SELECT,
         });
 
+        if (input.couponId && input.discountAmount.greaterThan(0)) {
+          await tx.couponUsage.create({
+            data: {
+              couponId: input.couponId,
+              userId: input.userId,
+              orderId: order.id,
+              amount: input.discountAmount,
+            },
+          });
+        }
+
         await tx.cartItem.deleteMany({ where: { cartId: input.cartId } });
         return order;
       });
@@ -363,6 +460,84 @@ export class OrdersRepository {
       }
       throw error;
     }
+  }
+
+  async findPrimaryImageSnapshots(
+    productIds: string[],
+    variantIds: string[],
+  ): Promise<
+    Map<
+      string,
+      {
+        imageUrlSnapshot: string | null;
+        imageStorageKeySnapshot: string | null;
+      }
+    >
+  > {
+    const result = new Map<
+      string,
+      {
+        imageUrlSnapshot: string | null;
+        imageStorageKeySnapshot: string | null;
+      }
+    >();
+
+    if (variantIds.length === 0 && productIds.length === 0) {
+      return result;
+    }
+
+    const links = await this.prisma.mediaLink.findMany({
+      where: {
+        deletedAt: null,
+        OR: [
+          {
+            entityType: MediaEntityType.PRODUCT_VARIANT,
+            entityId: { in: variantIds },
+            context: { in: [MediaContext.PRIMARY, MediaContext.GALLERY] },
+          },
+          {
+            entityType: MediaEntityType.PRODUCT,
+            entityId: { in: productIds },
+            context: { in: [MediaContext.PRIMARY, MediaContext.GALLERY] },
+          },
+        ],
+        media: {
+          deletedAt: null,
+          processingStatus: MediaProcessingStatus.READY,
+        },
+      },
+      orderBy: [{ isPrimary: 'desc' }, { sortOrder: 'asc' }],
+      select: {
+        entityType: true,
+        entityId: true,
+        isPrimary: true,
+        sortOrder: true,
+        media: {
+          select: {
+            optimizedKey: true,
+            originalKey: true,
+            thumbnailKey: true,
+            accessLevel: true,
+          },
+        },
+      },
+    });
+
+    for (const link of links) {
+      if (result.has(link.entityId)) {
+        continue;
+      }
+      const key =
+        link.media.optimizedKey ??
+        link.media.thumbnailKey ??
+        link.media.originalKey;
+      result.set(link.entityId, {
+        imageStorageKeySnapshot: key,
+        imageUrlSnapshot: null,
+      });
+    }
+
+    return result;
   }
 
   updateRazorpayOrderMeta(
@@ -430,7 +605,7 @@ export class OrdersRepository {
         orderBy: { createdAt: 'desc' },
         skip: filters.skip,
         take: filters.take,
-        select: ORDER_DETAIL_SELECT,
+        select: ORDER_LIST_SELECT,
       }),
       this.prisma.order.count({ where }),
     ]);
@@ -464,7 +639,7 @@ export class OrdersRepository {
         orderBy: { createdAt: 'desc' },
         skip: filters.skip,
         take: filters.take,
-        select: ORDER_DETAIL_SELECT,
+        select: ORDER_LIST_SELECT,
       }),
       this.prisma.order.count({ where }),
     ]);
@@ -502,7 +677,19 @@ export class OrdersRepository {
         orderBy: { createdAt: 'desc' },
         skip: filters.skip,
         take: filters.take,
-        select: ORDER_DETAIL_SELECT.subOrders.select,
+        select: {
+          ...SUB_ORDER_LIST_SELECT,
+          order: {
+            select: {
+              id: true,
+              orderNumber: true,
+              paymentMethod: true,
+              paymentStatus: true,
+              status: true,
+              userId: true,
+            },
+          },
+        },
       }),
       this.prisma.subOrder.count({ where }),
     ]);
@@ -539,7 +726,7 @@ export class OrdersRepository {
         skip: filters.skip,
         take: filters.take,
         select: {
-          ...ORDER_DETAIL_SELECT.subOrders.select,
+          ...SUB_ORDER_LIST_SELECT,
           order: {
             select: {
               id: true,
@@ -574,6 +761,7 @@ export class OrdersRepository {
             paymentMethod: true,
             paymentStatus: true,
             status: true,
+            userId: true,
           },
         },
       },
@@ -592,6 +780,7 @@ export class OrdersRepository {
             paymentMethod: true,
             paymentStatus: true,
             status: true,
+            userId: true,
           },
         },
       },
@@ -714,6 +903,15 @@ export class OrdersRepository {
     note: string | undefined,
     changedByUserId: string,
   ) {
+    if (
+      status === OrderStatus.CANCELLED ||
+      status === OrderStatus.REFUNDED
+    ) {
+      throw new BadRequestException(
+        'Use cancel/refund endpoints for CANCELLED or REFUNDED status',
+      );
+    }
+
     return this.prisma.$transaction(async (tx) => {
       const order = await tx.order.findFirst({
         where: { id: orderId, deletedAt: null },
@@ -730,18 +928,14 @@ export class OrdersRepository {
 
       // Map parent status loosely onto sub-orders when admin forces parent
       const subStatus =
-        status === OrderStatus.CANCELLED
-          ? SubOrderStatus.CANCELLED
-          : status === OrderStatus.REFUNDED
-            ? SubOrderStatus.REFUNDED
-            : status === OrderStatus.DELIVERED
-              ? SubOrderStatus.DELIVERED
-              : status === OrderStatus.SHIPPED ||
-                  status === OrderStatus.PARTIALLY_SHIPPED
-                ? SubOrderStatus.SHIPPED
-                : status === OrderStatus.PENDING_PAYMENT
-                  ? SubOrderStatus.PENDING
-                  : SubOrderStatus.CONFIRMED;
+        status === OrderStatus.DELIVERED
+          ? SubOrderStatus.DELIVERED
+          : status === OrderStatus.SHIPPED ||
+              status === OrderStatus.PARTIALLY_SHIPPED
+            ? SubOrderStatus.SHIPPED
+            : status === OrderStatus.PENDING_PAYMENT
+              ? SubOrderStatus.PENDING
+              : SubOrderStatus.CONFIRMED;
 
       for (const so of order.subOrders) {
         if (so.status === subStatus) continue;
@@ -766,43 +960,339 @@ export class OrdersRepository {
     });
   }
 
-  async stubRefund(orderId: string, note: string | undefined, adminUserId: string) {
+  async findSubOrderForCancelRefund(subOrderId: string) {
+    return this.prisma.subOrder.findFirst({
+      where: { id: subOrderId, order: { deletedAt: null } },
+      select: {
+        id: true,
+        orderId: true,
+        vendorId: true,
+        status: true,
+        total: true,
+        vendorEarning: true,
+        walletCreditedAt: true,
+        items: {
+          select: { variantId: true, quantity: true },
+        },
+        order: {
+          select: {
+            id: true,
+            userId: true,
+            paymentMethod: true,
+            paymentStatus: true,
+            razorpayPaymentId: true,
+            status: true,
+          },
+        },
+      },
+    });
+  }
+
+  findCompletedRefundForSubOrder(subOrderId: string) {
+    return this.prisma.orderRefund.findFirst({
+      where: {
+        subOrderId,
+        status: {
+          in: [OrderRefundStatus.COMPLETED, OrderRefundStatus.PROCESSING],
+        },
+      },
+      select: { id: true, razorpayRefundId: true, status: true },
+    });
+  }
+
+  /**
+   * Applies cancel/refund ledger for one sub-order inside a transaction.
+   * Caller must perform Razorpay refund first when needed and pass provider ids.
+   */
+  async applySubOrderCancelOrRefund(input: {
+    subOrderId: string;
+    actorUserId: string | null;
+    actorRole: PlatformRole | null;
+    reason: string;
+    targetStatus: SubOrderStatus;
+    restock: boolean;
+    clawbackWallet: boolean;
+    createRefund: boolean;
+    refundAmount?: Prisma.Decimal;
+    razorpayRefundId?: string | null;
+    providerPayload?: Prisma.InputJsonValue;
+    refundStatus?: OrderRefundStatus;
+  }) {
     return this.prisma.$transaction(async (tx) => {
-      const order = await tx.order.findFirst({
-        where: { id: orderId, deletedAt: null },
-        select: { id: true, subOrders: { select: { id: true } } },
+      const so = await tx.subOrder.findFirst({
+        where: { id: input.subOrderId, order: { deletedAt: null } },
+        select: {
+          id: true,
+          orderId: true,
+          vendorId: true,
+          status: true,
+          total: true,
+          vendorEarning: true,
+          walletCreditedAt: true,
+          items: { select: { variantId: true, quantity: true } },
+        },
       });
-      if (!order) {
-        throw new NotFoundException('Order not found');
+      if (!so) {
+        throw new NotFoundException('Sub-order not found');
+      }
+      if (
+        so.status === SubOrderStatus.CANCELLED ||
+        so.status === SubOrderStatus.REFUNDED
+      ) {
+        throw new ConflictException('Sub-order already cancelled or refunded');
       }
 
-      await tx.order.update({
-        where: { id: orderId },
+      let refundId: string | undefined;
+      if (input.createRefund) {
+        const refund = await tx.orderRefund.create({
+          data: {
+            orderId: so.orderId,
+            subOrderId: so.id,
+            amount: input.refundAmount ?? so.total,
+            status: input.refundStatus ?? OrderRefundStatus.COMPLETED,
+            reason: input.reason,
+            initiatedByUserId: input.actorUserId,
+            razorpayRefundId: input.razorpayRefundId ?? null,
+            providerPayload: input.providerPayload ?? undefined,
+          },
+          select: { id: true },
+        });
+        refundId = refund.id;
+      }
+
+      let restockStatus: RestockStatus = RestockStatus.NOT_REQUIRED;
+      if (input.restock) {
+        for (const item of so.items) {
+          await tx.productInventory.updateMany({
+            where: { variantId: item.variantId },
+            data: { quantity: { increment: item.quantity } },
+          });
+        }
+        restockStatus = RestockStatus.COMPLETED;
+      }
+
+      if (input.clawbackWallet && so.walletCreditedAt) {
+        await this.clawbackWalletForSubOrder(tx, so);
+      }
+
+      await tx.subOrder.update({
+        where: { id: so.id },
+        data: { status: input.targetStatus },
+      });
+
+      await tx.orderStatusHistory.create({
         data: {
-          status: OrderStatus.REFUNDED,
-          paymentStatus: PaymentStatus.REFUNDED,
+          subOrderId: so.id,
+          status: input.targetStatus,
+          changedByUserId: input.actorUserId,
+          note: input.reason,
         },
       });
 
+      await tx.orderCancellation.create({
+        data: {
+          orderId: so.orderId,
+          subOrderId: so.id,
+          actorUserId: input.actorUserId,
+          actorRole: input.actorRole,
+          reason: input.reason,
+          restockStatus,
+          refundId: refundId ?? null,
+        },
+      });
+
+      const siblings = await tx.subOrder.findMany({
+        where: { orderId: so.orderId },
+        select: { status: true },
+      });
+      const parentStatus = aggregateParentOrderStatus(
+        siblings.map((s) => s.status),
+      );
+
+      const paymentUpdate: {
+        status: OrderStatus;
+        paymentStatus?: PaymentStatus;
+        paymentTimeoutJobId?: null;
+      } = { status: parentStatus };
+
+      if (siblings.every((s) => s.status === SubOrderStatus.CANCELLED)) {
+        paymentUpdate.paymentStatus = PaymentStatus.FAILED;
+        paymentUpdate.paymentTimeoutJobId = null;
+      } else if (siblings.every((s) => s.status === SubOrderStatus.REFUNDED)) {
+        paymentUpdate.paymentStatus = PaymentStatus.REFUNDED;
+      } else if (
+        siblings.some((s) => s.status === SubOrderStatus.REFUNDED) &&
+        !siblings.some(
+          (s) =>
+            s.status !== SubOrderStatus.CANCELLED &&
+            s.status !== SubOrderStatus.REFUNDED,
+        )
+      ) {
+        paymentUpdate.paymentStatus = PaymentStatus.REFUNDED;
+      }
+
+      await tx.order.update({
+        where: { id: so.orderId },
+        data: paymentUpdate,
+      });
+
+      return {
+        orderId: so.orderId,
+        subOrderId: so.id,
+        refundId: refundId ?? null,
+        vendorId: so.vendorId,
+      };
+    });
+  }
+
+  private async clawbackWalletForSubOrder(
+    tx: Prisma.TransactionClient,
+    so: {
+      id: string;
+      vendorId: string;
+      vendorEarning: Prisma.Decimal;
+      walletCreditedAt: Date | null;
+    },
+  ) {
+    const existing = await tx.vendorTransaction.findFirst({
+      where: {
+        reason: TransactionReason.REFUND_DEDUCTION,
+        referenceType: 'SUB_ORDER',
+        referenceId: so.id,
+      },
+      select: { id: true },
+    });
+    if (existing) {
+      return;
+    }
+
+    const wallet = await tx.vendorWallet.upsert({
+      where: { vendorId: so.vendorId },
+      update: {},
+      create: { vendorId: so.vendorId },
+      select: { id: true, balance: true },
+    });
+
+    const balanceBefore = wallet.balance;
+    const balanceAfter = balanceBefore.sub(so.vendorEarning);
+
+    await tx.vendorWallet.update({
+      where: { id: wallet.id },
+      data: { balance: balanceAfter },
+    });
+
+    await tx.vendorTransaction.create({
+      data: {
+        vendorId: so.vendorId,
+        walletId: wallet.id,
+        type: TransactionType.DEBIT,
+        reason: TransactionReason.REFUND_DEDUCTION,
+        amount: so.vendorEarning,
+        balanceBefore,
+        balanceAfter,
+        referenceId: so.id,
+        referenceType: 'SUB_ORDER',
+        note: 'Refund clawback',
+      },
+    });
+  }
+
+  async markRefundFailed(input: {
+    orderId: string;
+    subOrderId: string;
+    actorUserId: string | null;
+    amount: Prisma.Decimal;
+    reason: string;
+    providerPayload?: Prisma.InputJsonValue;
+  }) {
+    return this.prisma.orderRefund.create({
+      data: {
+        orderId: input.orderId,
+        subOrderId: input.subOrderId,
+        amount: input.amount,
+        status: OrderRefundStatus.FAILED,
+        reason: input.reason,
+        initiatedByUserId: input.actorUserId,
+        providerPayload: input.providerPayload ?? undefined,
+      },
+      select: { id: true, status: true },
+    });
+  }
+
+  async cancelTimedOutOrder(orderId: string) {
+    return this.prisma.$transaction(async (tx) => {
+      const order = await tx.order.findFirst({
+        where: {
+          id: orderId,
+          deletedAt: null,
+          status: OrderStatus.PENDING_PAYMENT,
+          paymentStatus: PaymentStatus.PENDING,
+        },
+        select: {
+          id: true,
+          userId: true,
+          subOrders: {
+            select: {
+              id: true,
+              status: true,
+              items: { select: { variantId: true, quantity: true } },
+            },
+          },
+        },
+      });
+
+      if (!order) {
+        return null;
+      }
+
       for (const so of order.subOrders) {
+        if (
+          so.status === SubOrderStatus.CANCELLED ||
+          so.status === SubOrderStatus.REFUNDED
+        ) {
+          continue;
+        }
+
+        for (const item of so.items) {
+          await tx.productInventory.updateMany({
+            where: { variantId: item.variantId },
+            data: { quantity: { increment: item.quantity } },
+          });
+        }
+
         await tx.subOrder.update({
           where: { id: so.id },
-          data: { status: SubOrderStatus.REFUNDED },
+          data: { status: SubOrderStatus.CANCELLED },
         });
         await tx.orderStatusHistory.create({
           data: {
             subOrderId: so.id,
-            status: SubOrderStatus.REFUNDED,
-            changedByUserId: adminUserId,
-            note: note ?? 'Refund stub — no payment reversal',
+            status: SubOrderStatus.CANCELLED,
+            note: 'Payment timeout',
+          },
+        });
+        await tx.orderCancellation.create({
+          data: {
+            orderId: order.id,
+            subOrderId: so.id,
+            actorUserId: null,
+            actorRole: null,
+            reason: 'Payment timeout',
+            restockStatus: RestockStatus.COMPLETED,
           },
         });
       }
 
-      return tx.order.findFirstOrThrow({
-        where: { id: orderId },
-        select: ORDER_DETAIL_SELECT,
+      await tx.order.update({
+        where: { id: order.id },
+        data: {
+          status: OrderStatus.CANCELLED,
+          paymentStatus: PaymentStatus.FAILED,
+          paymentTimeoutJobId: null,
+        },
       });
+
+      return { orderId: order.id, userId: order.userId };
     });
   }
 
@@ -834,7 +1324,11 @@ export class OrdersRepository {
       }
 
       if (order.paymentStatus === PaymentStatus.PAID) {
-        return { alreadyPaid: true as const, orderId: order.id, paymentTimeoutJobId: order.paymentTimeoutJobId };
+        return {
+          alreadyPaid: true as const,
+          orderId: order.id,
+          paymentTimeoutJobId: order.paymentTimeoutJobId,
+        };
       }
 
       await tx.order.update({
@@ -955,70 +1449,14 @@ export class OrdersRepository {
     });
   }
 
-  async cancelTimedOutOrder(orderId: string) {
-    return this.prisma.$transaction(async (tx) => {
-      const order = await tx.order.findFirst({
-        where: {
-          id: orderId,
-          deletedAt: null,
-          status: OrderStatus.PENDING_PAYMENT,
-          paymentStatus: PaymentStatus.PENDING,
-        },
-        select: {
-          id: true,
-          subOrders: {
-            select: {
-              id: true,
-              items: { select: { variantId: true, quantity: true } },
-            },
-          },
-        },
-      });
-
-      if (!order) {
-        return null;
-      }
-
-      for (const so of order.subOrders) {
-        for (const item of so.items) {
-          await tx.productInventory.updateMany({
-            where: { variantId: item.variantId },
-            data: { quantity: { increment: item.quantity } },
-          });
-        }
-
-        await tx.subOrder.update({
-          where: { id: so.id },
-          data: { status: SubOrderStatus.CANCELLED },
-        });
-        await tx.orderStatusHistory.create({
-          data: {
-            subOrderId: so.id,
-            status: SubOrderStatus.CANCELLED,
-            note: 'Payment timeout',
-          },
-        });
-      }
-
-      await tx.order.update({
-        where: { id: order.id },
-        data: {
-          status: OrderStatus.CANCELLED,
-          paymentStatus: PaymentStatus.FAILED,
-          paymentTimeoutJobId: null,
-        },
-      });
-
-      return order.id;
-    });
-  }
-
   resolveCommissionRate(vendorRate: Prisma.Decimal | null): Prisma.Decimal {
     return vendorRate ?? DEFAULT_PLATFORM_COMMISSION_RATE;
   }
 
   assertCheckoutCartValid(
-    cart: NonNullable<Awaited<ReturnType<OrdersRepository['findCartWithShippingData']>>>,
+    cart: NonNullable<
+      Awaited<ReturnType<OrdersRepository['findCartWithShippingData']>>
+    >,
   ) {
     if (cart.items.length === 0) {
       throw new BadRequestException('Cart is empty');
@@ -1034,9 +1472,7 @@ export class OrdersRepository {
         !v.product.vendor.isApproved ||
         v.product.vendor.deletedAt
       ) {
-        throw new ConflictException(
-          `Variant ${v.sku} is no longer available`,
-        );
+        throw new ConflictException(`Variant ${v.sku} is no longer available`);
       }
       if (
         v.inventory &&

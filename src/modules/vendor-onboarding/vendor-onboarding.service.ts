@@ -6,12 +6,19 @@ import {
 } from '@nestjs/common';
 import {
   KycDocumentType,
+  KycStatus,
   MediaOwnerType,
+  NotificationEventType,
   PlatformRole,
   VendorOnboardingStatus,
 } from '../../../generated/prisma/client.js';
 import { paginationMeta } from '../../common/utils/pagination.util';
+import { generateSlug } from '../../common/utils/slug.util';
 import { MediaService } from '../media/media.service';
+import { NotificationEmitterService } from '../notifications/notification-emitter.service';
+import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
+import { SecurityAuditService } from '../rbac/security-audit.service';
+import { RejectKycDocumentDto } from './dto/reject-kyc-document.dto';
 import { RejectVendorDto } from './dto/reject-vendor.dto';
 import { UpdateVendorProfileDto } from './dto/update-vendor-profile.dto';
 import { UploadKycDocumentDto } from './dto/upload-kyc-document.dto';
@@ -19,11 +26,7 @@ import { UpsertKycDocumentDto } from './dto/upsert-kyc-document.dto';
 import { VendorFiltersDto } from './dto/vendor-filters.dto';
 import { VendorOnboardingRepository } from './vendor-onboarding.repository';
 
-const REQUIRED_KYC_DOCUMENTS = [
-  KycDocumentType.AADHAAR,
-  KycDocumentType.PAN,
-  KycDocumentType.GST,
-] as const;
+const KYC_DOCUMENT_TYPES = new Set<string>(Object.values(KycDocumentType));
 
 type VendorForValidation = {
   businessName: string;
@@ -39,6 +42,7 @@ type VendorForValidation = {
     kycDocuments: {
       documentType: KycDocumentType;
       fileUrl: string | null;
+      status: KycStatus;
     }[];
   };
 };
@@ -48,6 +52,9 @@ export class VendorOnboardingService {
   constructor(
     private readonly vendorOnboardingRepository: VendorOnboardingRepository,
     private readonly mediaService: MediaService,
+    private readonly securityAudit: SecurityAuditService,
+    private readonly notifications: NotificationEmitterService,
+    private readonly platformSettings: PlatformSettingsService,
   ) {}
 
   async getMyOnboarding(userId: string) {
@@ -81,6 +88,13 @@ export class VendorOnboardingService {
         ...(vendor.onboardingStatus === VendorOnboardingStatus.REJECTED && {
           onboardingStatus: VendorOnboardingStatus.DRAFT,
         }),
+        ...(!vendor.slug
+          ? {
+              slug: await this.allocateUniqueSlug(
+                dto.businessName ?? vendor.businessName,
+              ),
+            }
+          : {}),
       },
     );
 
@@ -165,7 +179,8 @@ export class VendorOnboardingService {
       throw new BadRequestException('Vendor is already approved');
     }
 
-    this.validateReadyForReview(vendor);
+    const requiredDocs = await this.getRequiredKycDocuments();
+    this.validateReadyForSubmit(vendor, requiredDocs);
 
     const submitted = await this.vendorOnboardingRepository.submitVendor(
       vendor.id,
@@ -200,7 +215,116 @@ export class VendorOnboardingService {
     };
   }
 
-  async approveVendor(id: string) {
+  async verifyKycDocument(
+    vendorId: string,
+    documentType: KycDocumentType,
+    actorUserId: string,
+  ) {
+    const vendor =
+      await this.vendorOnboardingRepository.findVendorById(vendorId);
+    if (!vendor) {
+      throw new NotFoundException('Vendor not found');
+    }
+
+    const document = await this.vendorOnboardingRepository.findKycDocument(
+      vendor.userId,
+      documentType,
+    );
+    if (!document || !this.hasText(document.fileUrl)) {
+      throw new NotFoundException('KYC document not found');
+    }
+
+    if (document.status === KycStatus.VERIFIED) {
+      throw new BadRequestException('KYC document is already verified');
+    }
+
+    const updated =
+      await this.vendorOnboardingRepository.updateKycDocumentStatus(
+        vendor.userId,
+        documentType,
+        { status: KycStatus.VERIFIED, rejectionNote: null },
+      );
+
+    this.securityAudit.log({
+      actorUserId,
+      action: 'KYC_DOC_VERIFY',
+      result: 'SUCCESS',
+      targetType: 'kycDocument',
+      targetId: document.id,
+      metadata: { vendorId, documentType },
+    });
+    this.notifications.emit({
+      userId: vendor.userId,
+      eventType: NotificationEventType.KYC_APPROVED,
+      title: 'KYC document verified',
+      body: `Your ${documentType} document has been verified`,
+      data: { vendorId, documentType },
+    });
+
+    const autoApproved = await this.maybeAutoApproveVendor(
+      vendorId,
+      actorUserId,
+    );
+
+    return {
+      message: 'KYC document verified successfully',
+      data: {
+        document: updated,
+        vendorAutoApproved: autoApproved,
+      },
+    };
+  }
+
+  async rejectKycDocument(
+    vendorId: string,
+    documentType: KycDocumentType,
+    actorUserId: string,
+    dto: RejectKycDocumentDto,
+  ) {
+    const vendor =
+      await this.vendorOnboardingRepository.findVendorById(vendorId);
+    if (!vendor) {
+      throw new NotFoundException('Vendor not found');
+    }
+
+    const document = await this.vendorOnboardingRepository.findKycDocument(
+      vendor.userId,
+      documentType,
+    );
+    if (!document || !this.hasText(document.fileUrl)) {
+      throw new NotFoundException('KYC document not found');
+    }
+
+    const updated =
+      await this.vendorOnboardingRepository.updateKycDocumentStatus(
+        vendor.userId,
+        documentType,
+        { status: KycStatus.REJECTED, rejectionNote: dto.rejectionNote },
+      );
+
+    this.securityAudit.log({
+      actorUserId,
+      action: 'KYC_DOC_REJECT',
+      result: 'SUCCESS',
+      targetType: 'kycDocument',
+      targetId: document.id,
+      metadata: { vendorId, documentType, reason: dto.rejectionNote },
+    });
+    this.notifications.emit({
+      userId: vendor.userId,
+      eventType: NotificationEventType.KYC_REJECTED,
+      title: 'KYC document rejected',
+      body: dto.rejectionNote,
+      data: { vendorId, documentType },
+    });
+
+    return {
+      message: 'KYC document rejected successfully',
+      data: updated,
+    };
+  }
+
+  async approveVendor(id: string, actorUserId: string) {
     const vendor = await this.vendorOnboardingRepository.findVendorById(id);
     if (!vendor) {
       throw new NotFoundException('Vendor not found');
@@ -210,16 +334,32 @@ export class VendorOnboardingService {
       throw new BadRequestException('Only submitted vendors can be approved');
     }
 
-    this.validateReadyForReview(vendor);
+    const requiredDocs = await this.getRequiredKycDocuments();
+    this.validateReadyForApprove(vendor, requiredDocs);
+    await this.ensureVendorHasSlug(vendor);
 
     const approved = await this.vendorOnboardingRepository.approveVendor(id);
+    this.securityAudit.log({
+      actorUserId,
+      action: 'VENDOR_APPROVE',
+      result: 'SUCCESS',
+      targetType: 'vendorProfile',
+      targetId: id,
+    });
+    this.notifications.emit({
+      userId: vendor.userId,
+      eventType: NotificationEventType.KYC_APPROVED,
+      title: 'Vendor approved',
+      body: 'Your vendor onboarding has been approved',
+      data: { vendorId: id },
+    });
     return {
       message: 'Vendor approved successfully',
       data: approved,
     };
   }
 
-  async rejectVendor(id: string, dto: RejectVendorDto) {
+  async rejectVendor(id: string, actorUserId: string, dto: RejectVendorDto) {
     const vendor = await this.vendorOnboardingRepository.findVendorById(id);
     if (!vendor) {
       throw new NotFoundException('Vendor not found');
@@ -233,6 +373,21 @@ export class VendorOnboardingService {
       id,
       dto.rejectionReason,
     );
+    this.securityAudit.log({
+      actorUserId,
+      action: 'VENDOR_REJECT',
+      result: 'SUCCESS',
+      targetType: 'vendorProfile',
+      targetId: id,
+      metadata: { reason: dto.rejectionReason },
+    });
+    this.notifications.emit({
+      userId: vendor.userId,
+      eventType: NotificationEventType.KYC_REJECTED,
+      title: 'Vendor rejected',
+      body: dto.rejectionReason,
+      data: { vendorId: id },
+    });
 
     return {
       message: 'Vendor rejected successfully',
@@ -240,10 +395,47 @@ export class VendorOnboardingService {
     };
   }
 
+  private async maybeAutoApproveVendor(
+    vendorId: string,
+    actorUserId: string,
+  ): Promise<boolean> {
+    const autoApprove = await this.platformSettings.getBoolean(
+      'vendor',
+      'autoApproveAfterRequiredDocsVerified',
+    );
+    if (!autoApprove) {
+      return false;
+    }
+
+    const vendor =
+      await this.vendorOnboardingRepository.findVendorById(vendorId);
+    if (
+      !vendor ||
+      vendor.onboardingStatus !== VendorOnboardingStatus.SUBMITTED
+    ) {
+      return false;
+    }
+
+    const requiredDocs = await this.getRequiredKycDocuments();
+    const allVerified = this.areRequiredDocsVerified(vendor, requiredDocs);
+    if (!allVerified) {
+      return false;
+    }
+
+    await this.approveVendor(vendorId, actorUserId);
+    return true;
+  }
+
   private async ensureVendorProfile(userId: string) {
     const existing =
       await this.vendorOnboardingRepository.findVendorByUserId(userId);
     if (existing) {
+      if (!existing.slug) {
+        const slug = await this.allocateUniqueSlug(existing.businessName);
+        return this.vendorOnboardingRepository.updateProfile(existing.id, {
+          slug,
+        });
+      }
       return existing;
     }
 
@@ -264,16 +456,62 @@ export class VendorOnboardingService {
       );
     }
 
+    const slug = await this.allocateUniqueSlug(user.name);
     return this.vendorOnboardingRepository.createDraftVendorProfile(
       user.id,
       user.name,
+      slug,
     );
   }
 
-  /**
-   * Replace stored fileUrl with a freshly signed URL when mediaId is present.
-   * KYC media is USER-owned PRIVATE and must not be served via /vendor/media.
-   */
+  private async allocateUniqueSlug(businessName: string) {
+    const base = generateSlug(businessName) || 'vendor';
+    let candidate = base;
+    let suffix = 2;
+
+    while (await this.vendorOnboardingRepository.findBySlug(candidate)) {
+      candidate = `${base}-${suffix}`;
+      suffix += 1;
+    }
+
+    return candidate;
+  }
+
+  private async ensureVendorHasSlug(vendor: {
+    id: string;
+    slug: string | null;
+    businessName: string;
+  }) {
+    if (vendor.slug) {
+      return;
+    }
+
+    const slug = await this.allocateUniqueSlug(vendor.businessName);
+    await this.vendorOnboardingRepository.updateProfile(vendor.id, { slug });
+  }
+
+  private async getRequiredKycDocuments(): Promise<KycDocumentType[]> {
+    const value = await this.platformSettings.getValue(
+      'vendor',
+      'requiredKycDocuments',
+    );
+    const raw = Array.isArray(value) ? value : [];
+    const docs = raw
+      .filter((item): item is string => typeof item === 'string')
+      .filter((item) => KYC_DOCUMENT_TYPES.has(item))
+      .map((item) => item as KycDocumentType);
+
+    if (docs.length === 0) {
+      return [
+        KycDocumentType.AADHAAR,
+        KycDocumentType.PAN,
+        KycDocumentType.GST,
+      ];
+    }
+
+    return docs;
+  }
+
   private async withFreshKycUrls<
     T extends {
       user: {
@@ -324,34 +562,18 @@ export class VendorOnboardingService {
     }
   }
 
-  private validateReadyForReview(vendor: VendorForValidation) {
-    const missingFields = [
-      ['businessName', vendor.businessName],
-      ['businessAddress', vendor.businessAddress],
-      ['city', vendor.city],
-      ['state', vendor.state],
-      ['pincode', vendor.pincode],
-      ['gstNumber', vendor.gstNumber],
-      ['bio', vendor.bio],
-    ]
-      .filter(([, value]) => !this.hasText(value))
-      .map(([field]) => field);
-
-    if (vendor.latitude === null) {
-      missingFields.push('latitude');
-    }
-
-    if (vendor.longitude === null) {
-      missingFields.push('longitude');
-    }
-
+  private validateReadyForSubmit(
+    vendor: VendorForValidation,
+    requiredDocs: KycDocumentType[],
+  ) {
+    const missingFields = this.collectMissingProfileFields(vendor);
     const documentsByType = new Map(
       vendor.user.kycDocuments.map((document) => [
         document.documentType,
         document,
       ]),
     );
-    const missingDocuments = REQUIRED_KYC_DOCUMENTS.filter((documentType) => {
+    const missingDocuments = requiredDocs.filter((documentType) => {
       const document = documentsByType.get(documentType);
       return !document || !this.hasText(document.fileUrl);
     });
@@ -371,6 +593,64 @@ export class VendorOnboardingService {
         ],
       });
     }
+  }
+
+  private validateReadyForApprove(
+    vendor: VendorForValidation,
+    requiredDocs: KycDocumentType[],
+  ) {
+    this.validateReadyForSubmit(vendor, requiredDocs);
+
+    if (!this.areRequiredDocsVerified(vendor, requiredDocs)) {
+      throw new BadRequestException(
+        'All required KYC documents must be verified before approval',
+      );
+    }
+  }
+
+  private areRequiredDocsVerified(
+    vendor: VendorForValidation,
+    requiredDocs: KycDocumentType[],
+  ) {
+    const documentsByType = new Map(
+      vendor.user.kycDocuments.map((document) => [
+        document.documentType,
+        document,
+      ]),
+    );
+
+    return requiredDocs.every((documentType) => {
+      const document = documentsByType.get(documentType);
+      return (
+        document &&
+        this.hasText(document.fileUrl) &&
+        document.status === KycStatus.VERIFIED
+      );
+    });
+  }
+
+  private collectMissingProfileFields(vendor: VendorForValidation) {
+    const missingFields = [
+      ['businessName', vendor.businessName],
+      ['businessAddress', vendor.businessAddress],
+      ['city', vendor.city],
+      ['state', vendor.state],
+      ['pincode', vendor.pincode],
+      ['gstNumber', vendor.gstNumber],
+      ['bio', vendor.bio],
+    ]
+      .filter(([, value]) => !this.hasText(value))
+      .map(([field]) => field as string);
+
+    if (vendor.latitude === null) {
+      missingFields.push('latitude');
+    }
+
+    if (vendor.longitude === null) {
+      missingFields.push('longitude');
+    }
+
+    return missingFields;
   }
 
   private hasText(value: string | null | undefined) {

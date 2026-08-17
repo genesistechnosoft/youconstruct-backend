@@ -10,12 +10,14 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Public } from '../../common/decorators/public.decorator';
 import type { AuthenticatedUser } from '../../common/types/auth-user.type';
 import { AuthService } from './auth.service';
+import { ChangePasswordDto } from './dto/change-password.dto';
 import { DashboardLoginDto } from './dto/dashboard-login.dto';
 import { LoginDto } from './dto/login.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { RegisterDto } from './dto/register.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
 import { SendOtpDto } from './dto/send-otp.dto';
+import { SendStepUpOtpDto, VerifyStepUpOtpDto } from './dto/step-up-otp.dto';
 import { VerifyOtpDto } from './dto/verify-otp.dto';
 
 @ApiTags('Auth')
@@ -105,6 +107,44 @@ export class AuthController {
   @ApiResponse({ status: 401, description: 'Invalid or expired token' })
   resetPassword(@Body() dto: ResetPasswordDto) {
     return this.authService.resetPassword(dto);
+  }
+
+  @Post('password/change')
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
+  @HttpCode(200)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Change password for the current user' })
+  changePassword(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: ChangePasswordDto,
+  ) {
+    return this.authService.changePassword(user.userId, dto);
+  }
+
+  @Post('step-up/send')
+  @Throttle({ default: { limit: 3, ttl: 60000 } })
+  @HttpCode(200)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Send OTP for a sensitive authenticated action' })
+  sendStepUpOtp(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: SendStepUpOtpDto,
+  ) {
+    return this.authService.sendStepUpOtp(user.userId, dto.purpose);
+  }
+
+  @Post('step-up/verify')
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
+  @HttpCode(200)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Verify sensitive-action OTP and receive a short-lived token',
+  })
+  verifyStepUpOtp(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: VerifyStepUpOtpDto,
+  ) {
+    return this.authService.verifyStepUpOtp(user.userId, dto);
   }
 
   @Public()

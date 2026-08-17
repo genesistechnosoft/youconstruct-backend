@@ -73,6 +73,23 @@ export class AuthRepository {
         isPhoneVerified: true,
         avatarUrl: true,
         fcmToken: true,
+        updatedAt: true,
+      },
+    });
+  }
+
+  findUserWithPasswordById(id: string) {
+    return this.prisma.user.findFirst({
+      where: { id, deletedAt: null },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        phone: true,
+        platformRole: true,
+        passwordHash: true,
+        isActive: true,
+        updatedAt: true,
       },
     });
   }
@@ -143,6 +160,13 @@ export class AuthRepository {
       where: { id },
       data: { revokedAt: new Date() },
       select: { id: true },
+    });
+  }
+
+  revokeRefreshTokensForUser(userId: string) {
+    return this.prisma.refreshToken.updateMany({
+      where: { userId, revokedAt: null },
+      data: { revokedAt: new Date() },
     });
   }
 

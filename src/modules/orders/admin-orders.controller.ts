@@ -17,6 +17,7 @@ import { RequireActiveContext } from '../../common/decorators/require-active-con
 import { PlatformRole, Roles } from '../../common/decorators/roles.decorator';
 import { PERMISSIONS } from '../rbac/permissions.constants';
 import { AdminRefundDto } from './dto/admin-refund.dto';
+import { AdminCancelSubOrderDto } from './dto/cancel-sub-order.dto';
 import { AdminUpdateOrderStatusDto } from './dto/admin-update-order-status.dto';
 import {
   ListOrdersQueryDto,
@@ -64,7 +65,9 @@ export class AdminOrdersController {
   @Post(':id/refund')
   @HttpCode(200)
   @Permissions(PERMISSIONS.ADMIN.ORDERS_MANAGE)
-  @ApiOperation({ summary: 'Stub refund — no payment reversal' })
+  @ApiOperation({
+    summary: 'Full refund of order or sub-order (Razorpay + restock + wallet)',
+  })
   refund(
     @CurrentUser() user: { userId: string },
     @Param('id', ParseUUIDPipe) id: string,
@@ -90,6 +93,18 @@ export class AdminSubOrdersController {
     return this.ordersService.listAdminSubOrders(query);
   }
 
+  @Post(':id/cancel')
+  @HttpCode(200)
+  @Permissions(PERMISSIONS.ADMIN.ORDERS_MANAGE)
+  @ApiOperation({ summary: 'Cancel a sub-order with ledger + restock' })
+  cancel(
+    @CurrentUser() user: { userId: string },
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: AdminCancelSubOrderDto,
+  ) {
+    return this.ordersService.cancelAdminSubOrder(user.userId, id, dto.reason);
+  }
+
   @Patch(':id/status')
   @HttpCode(200)
   @Permissions(PERMISSIONS.ADMIN.ORDERS_MANAGE)
@@ -99,10 +114,6 @@ export class AdminSubOrdersController {
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UpdateSubOrderStatusDto,
   ) {
-    return this.ordersService.adminUpdateSubOrderStatus(
-      id,
-      user.userId,
-      dto,
-    );
+    return this.ordersService.adminUpdateSubOrderStatus(id, user.userId, dto);
   }
 }

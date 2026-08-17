@@ -17,6 +17,7 @@ import type { AuthenticatedUser } from '../../common/types/auth-user.type';
 import { requireVendorEntityId } from '../../common/utils/active-context.util';
 import { PERMISSIONS } from '../rbac/permissions.constants';
 import { CreateBankAccountDto } from './dto/create-bank-account.dto';
+import { StepUpTokenDto } from './dto/step-up-token.dto';
 import { UpdateBankAccountDto } from './dto/update-bank-account.dto';
 import { VendorFinanceService } from './vendor-finance.service';
 
@@ -47,6 +48,7 @@ export class VendorBankAccountController {
     @Body() dto: CreateBankAccountDto,
   ) {
     return this.vendorFinanceService.createBankAccount(
+      user.userId,
       requireVendorEntityId(user),
       dto,
     );
@@ -61,6 +63,7 @@ export class VendorBankAccountController {
     @Body() dto: UpdateBankAccountDto,
   ) {
     return this.vendorFinanceService.updateBankAccount(
+      user.userId,
       requireVendorEntityId(user),
       dto,
     );
@@ -70,9 +73,14 @@ export class VendorBankAccountController {
   @HttpCode(200)
   @Permissions(PERMISSIONS.VENDOR.BANK_MANAGE)
   @ApiOperation({ summary: 'Delete vendor bank account' })
-  deleteBankAccount(@CurrentUser() user: AuthenticatedUser) {
+  deleteBankAccount(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: StepUpTokenDto,
+  ) {
     return this.vendorFinanceService.deleteBankAccount(
+      user.userId,
       requireVendorEntityId(user),
+      dto.stepUpToken,
     );
   }
 }
