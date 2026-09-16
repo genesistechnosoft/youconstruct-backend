@@ -80,7 +80,7 @@ export class CartRepository {
     });
   }
 
-  findVariantForCart(variantId: string) {
+  findVariantForCart(variantId: string, visibleCategoryIds: string[]) {
     return this.prisma.productVariant.findFirst({
       where: {
         id: variantId,
@@ -89,10 +89,15 @@ export class CartRepository {
         product: {
           deletedAt: null,
           status: ProductStatus.ACTIVE,
+          categoryId: { in: visibleCategoryIds },
           vendor: {
             isApproved: true,
             deletedAt: null,
           },
+          OR: [
+            { brandId: null },
+            { brand: { isActive: true, deletedAt: null } },
+          ],
         },
       },
       select: {

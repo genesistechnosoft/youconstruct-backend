@@ -61,8 +61,7 @@ export class ImpersonationService {
 
       if (
         target.platformRole === PlatformRole.SUPER_ADMIN ||
-        target.platformRole === PlatformRole.ADMIN ||
-        target.platformRole === PlatformRole.SUPPORT
+        target.platformRole === PlatformRole.ADMIN
       ) {
         throw new ForbiddenException('Cannot impersonate platform staff');
       }

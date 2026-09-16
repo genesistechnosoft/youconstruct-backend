@@ -2,6 +2,7 @@ import { Module, forwardRef } from '@nestjs/common';
 import { BullModule } from '@nestjs/bullmq';
 import { PAYMENT_TIMEOUT_QUEUE } from '../../queue/queue.constants';
 import { StorageModule } from '../../storage/storage.module';
+import { CategoriesModule } from '../categories/categories.module';
 import { CouponsModule } from '../coupons/coupons.module';
 import { PaymentsModule } from '../payments/payments.module';
 import { PlatformSettingsModule } from '../platform-settings/platform-settings.module';
@@ -23,6 +24,7 @@ import { VendorOrdersController } from './vendor-orders.controller';
     PlatformSettingsModule,
     StorageModule,
     CouponsModule,
+    CategoriesModule,
     BullModule.registerQueue({ name: PAYMENT_TIMEOUT_QUEUE }),
   ],
   controllers: [

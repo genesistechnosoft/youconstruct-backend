@@ -1,4 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { Transform } from 'class-transformer';
 import {
   IsBoolean,
   IsDateString,
@@ -7,7 +8,6 @@ import {
   IsOptional,
   IsString,
   IsUrl,
-  IsUUID,
   MaxLength,
   Min,
 } from 'class-validator';
@@ -25,11 +25,6 @@ export class CreateBannerDto {
   @MaxLength(500)
   subtitle?: string;
 
-  @ApiPropertyOptional({ example: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890' })
-  @IsOptional()
-  @IsUUID()
-  mediaId?: string;
-
   @ApiPropertyOptional({ example: 'https://youconstruct.com/sale' })
   @IsOptional()
   @IsString()
@@ -38,12 +33,21 @@ export class CreateBannerDto {
 
   @ApiPropertyOptional({ example: 0, default: 0 })
   @IsOptional()
+  @Transform(({ value }: { value: unknown }) => {
+    const n = Number(value);
+    return isNaN(n) ? value : n;
+  })
   @IsInt()
   @Min(0)
   sortOrder?: number;
 
   @ApiPropertyOptional({ example: true, default: true })
   @IsOptional()
+  @Transform(({ value }: { value: unknown }) => {
+    if (value === 'true' || value === true) return true;
+    if (value === 'false' || value === false) return false;
+    return value;
+  })
   @IsBoolean()
   isActive?: boolean;
 

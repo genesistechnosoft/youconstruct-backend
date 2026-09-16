@@ -28,7 +28,7 @@ import { CouponsService } from './coupons.service';
 
 @ApiTags('Admin - Coupons')
 @Controller('admin/coupons')
-@Roles(PlatformRole.ADMIN, PlatformRole.SUPPORT)
+@Roles(PlatformRole.ADMIN)
 @RequireActiveContext(PermissionScope.ADMIN)
 @Permissions(PERMISSIONS.ADMIN.ORDERS_MANAGE)
 @ApiBearerAuth()

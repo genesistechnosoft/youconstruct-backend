@@ -1,6 +1,7 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { Type } from 'class-transformer';
-import { IsNumber, IsOptional, IsString } from 'class-validator';
+import { Transform, Type } from 'class-transformer';
+import { IsNumber, IsOptional, IsString, Matches } from 'class-validator';
+import { GSTIN_PATTERN } from '../vendor-onboarding.constants.js';
 
 export class UpdateVendorProfileDto {
   @ApiPropertyOptional({ example: 'Lakshmi Tiles' })
@@ -42,7 +43,13 @@ export class UpdateVendorProfileDto {
 
   @ApiPropertyOptional({ example: '33ABCDE1234F1Z5' })
   @IsOptional()
+  @Transform(({ value }: { value: unknown }) =>
+    typeof value === 'string' ? value.trim().toUpperCase() : undefined,
+  )
   @IsString()
+  @Matches(GSTIN_PATTERN, {
+    message: 'gstNumber must be a valid 15-character GSTIN',
+  })
   gstNumber?: string;
 
   @ApiPropertyOptional({ example: 'Premium construction materials supplier.' })

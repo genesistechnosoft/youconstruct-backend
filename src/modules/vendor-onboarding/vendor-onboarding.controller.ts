@@ -18,6 +18,7 @@ import {
   ApiBearerAuth,
   ApiBody,
   ApiConsumes,
+  ApiOkResponse,
   ApiOperation,
   ApiTags,
 } from '@nestjs/swagger';
@@ -32,6 +33,8 @@ import { Permissions } from '../../common/decorators/permissions.decorator';
 import { RequireActiveContext } from '../../common/decorators/require-active-context.decorator';
 import { PlatformRole, Roles } from '../../common/decorators/roles.decorator';
 import { PERMISSIONS } from '../rbac/permissions.constants';
+import { AdminVendorListItemDto } from './dto/admin-vendor-list-item.dto';
+import { OnboardingChecklistDto } from './dto/onboarding-checklist.dto';
 import { RejectKycDocumentDto } from './dto/reject-kyc-document.dto';
 import { RejectVendorDto } from './dto/reject-vendor.dto';
 import { UpdateVendorProfileDto } from './dto/update-vendor-profile.dto';
@@ -56,7 +59,12 @@ export class VendorOnboardingController {
 
   @Get()
   @HttpCode(200)
-  @ApiOperation({ summary: 'Get my vendor onboarding status' })
+  @ApiOperation({
+    summary: 'Get my vendor onboarding status',
+    description:
+      'Returns the vendor profile plus a `checklist` of missing/rejected items and `canSubmit`.',
+  })
+  @ApiOkResponse({ type: OnboardingChecklistDto })
   getMyOnboarding(@CurrentUser() user: AuthUser) {
     return this.vendorOnboardingService.getMyOnboarding(user.userId);
   }
@@ -126,7 +134,7 @@ export class VendorOnboardingController {
 
 @ApiTags('Admin - Vendors')
 @Controller('admin/vendors')
-@Roles(PlatformRole.ADMIN, PlatformRole.SUPPORT)
+@Roles(PlatformRole.ADMIN)
 @RequireActiveContext(PermissionScope.ADMIN)
 @ApiBearerAuth()
 export class AdminVendorsController {
@@ -138,6 +146,7 @@ export class AdminVendorsController {
   @HttpCode(200)
   @Permissions(PERMISSIONS.ADMIN.VENDORS_VIEW)
   @ApiOperation({ summary: 'List vendors for admin review' })
+  @ApiOkResponse({ type: [AdminVendorListItemDto] })
   getVendors(@Query() filters: VendorFiltersDto) {
     return this.vendorOnboardingService.getVendors(filters);
   }
@@ -145,7 +154,12 @@ export class AdminVendorsController {
   @Get(':id')
   @HttpCode(200)
   @Permissions(PERMISSIONS.ADMIN.VENDORS_VIEW)
-  @ApiOperation({ summary: 'Get vendor review detail' })
+  @ApiOperation({
+    summary: 'Get vendor review detail',
+    description:
+      'Returns the vendor review payload plus a `checklist` of missing/rejected items and `canSubmit`.',
+  })
+  @ApiOkResponse({ type: OnboardingChecklistDto })
   getVendor(@Param('id', ParseUUIDPipe) id: string) {
     return this.vendorOnboardingService.getVendor(id);
   }
@@ -153,7 +167,11 @@ export class AdminVendorsController {
   @Patch(':id/approve')
   @HttpCode(200)
   @Permissions(PERMISSIONS.ADMIN.VENDORS_APPROVE)
-  @ApiOperation({ summary: 'Approve a submitted vendor' })
+  @ApiOperation({
+    summary: 'Approve a vendor',
+    description:
+      'High-level admin override. Works from DRAFT, SUBMITTED, or REJECTED. Already APPROVED is idempotent. Auto-approve still runs only after all required KYC docs are verified on a SUBMITTED vendor.',
+  })
   approveVendor(
     @CurrentUser() user: AuthUser,
     @Param('id', ParseUUIDPipe) id: string,

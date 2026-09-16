@@ -33,6 +33,7 @@ import type { AuthenticatedUser } from '../../common/types/auth-user.type';
 import { requireVendorEntityId } from '../../common/utils/active-context.util';
 import { PERMISSIONS } from '../rbac/permissions.constants';
 import { CreateMediaFolderDto } from './dto/create-media-folder.dto';
+import { FolderContentsQueryDto } from './dto/folder-contents-query.dto';
 import { MediaFiltersDto } from './dto/media-filters.dto';
 import { UpdateMediaDto } from './dto/update-media.dto';
 import { UpdateMediaFolderDto } from './dto/update-media-folder.dto';
@@ -61,6 +62,14 @@ export class VendorMediaController {
     );
   }
 
+  @Get('stats')
+  @HttpCode(200)
+  @Permissions(PERMISSIONS.VENDOR.MEDIA_UPLOAD)
+  @ApiOperation({ summary: 'Library-wide media stats for Asset Manager cards' })
+  getStats(@CurrentUser() user: AuthenticatedUser) {
+    return this.mediaService.getVendorMediaStats(requireVendorEntityId(user));
+  }
+
   @Post()
   @HttpCode(200)
   @Permissions(PERMISSIONS.VENDOR.MEDIA_UPLOAD)
@@ -81,39 +90,43 @@ export class VendorMediaController {
     );
   }
 
-  @Patch(':id')
-  @HttpCode(200)
-  @Permissions(PERMISSIONS.VENDOR.MEDIA_UPLOAD)
-  @ApiOperation({ summary: 'Update media metadata' })
-  updateMedia(
-    @CurrentUser() user: AuthenticatedUser,
-    @Param('id', ParseUUIDPipe) id: string,
-    @Body() dto: UpdateMediaDto,
-  ) {
-    return this.mediaService.updateVendorMedia(
-      requireVendorEntityId(user),
-      id,
-      dto,
-    );
-  }
-
-  @Delete(':id')
-  @HttpCode(200)
-  @Permissions(PERMISSIONS.VENDOR.MEDIA_DELETE)
-  @ApiOperation({ summary: 'Delete unused media' })
-  deleteMedia(
-    @CurrentUser() user: AuthenticatedUser,
-    @Param('id', ParseUUIDPipe) id: string,
-  ) {
-    return this.mediaService.deleteVendorMedia(requireVendorEntityId(user), id);
-  }
-
   @Get('folders')
   @HttpCode(200)
   @Permissions(PERMISSIONS.VENDOR.MEDIA_UPLOAD)
   @ApiOperation({ summary: 'List my media folders' })
   listFolders(@CurrentUser() user: AuthenticatedUser) {
     return this.mediaService.listVendorFolders(requireVendorEntityId(user));
+  }
+
+  @Get('folders/root')
+  @HttpCode(200)
+  @Permissions(PERMISSIONS.VENDOR.MEDIA_UPLOAD)
+  @ApiOperation({ summary: 'Browse unfiled media and top-level folders' })
+  getRootFolder(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query() query: FolderContentsQueryDto,
+  ) {
+    return this.mediaService.getVendorFolderContents(
+      requireVendorEntityId(user),
+      null,
+      query,
+    );
+  }
+
+  @Get('folders/:id')
+  @HttpCode(200)
+  @Permissions(PERMISSIONS.VENDOR.MEDIA_UPLOAD)
+  @ApiOperation({ summary: 'Browse media and child folders in a folder' })
+  getFolder(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query() query: FolderContentsQueryDto,
+  ) {
+    return this.mediaService.getVendorFolderContents(
+      requireVendorEntityId(user),
+      id,
+      query,
+    );
   }
 
   @Post('folders')
@@ -158,5 +171,32 @@ export class VendorMediaController {
       requireVendorEntityId(user),
       id,
     );
+  }
+
+  @Patch(':id')
+  @HttpCode(200)
+  @Permissions(PERMISSIONS.VENDOR.MEDIA_UPLOAD)
+  @ApiOperation({ summary: 'Update media metadata' })
+  updateMedia(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdateMediaDto,
+  ) {
+    return this.mediaService.updateVendorMedia(
+      requireVendorEntityId(user),
+      id,
+      dto,
+    );
+  }
+
+  @Delete(':id')
+  @HttpCode(200)
+  @Permissions(PERMISSIONS.VENDOR.MEDIA_DELETE)
+  @ApiOperation({ summary: 'Delete unused media' })
+  deleteMedia(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.mediaService.deleteVendorMedia(requireVendorEntityId(user), id);
   }
 }

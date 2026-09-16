@@ -38,7 +38,7 @@ export class VendorMembershipController {
 
 @ApiTags('Admin - Vendor Membership')
 @Controller('admin/vendors')
-@Roles(PlatformRole.ADMIN, PlatformRole.SUPPORT)
+@Roles(PlatformRole.ADMIN)
 @RequireActiveContext(PermissionScope.ADMIN)
 @ApiBearerAuth()
 export class AdminVendorMembershipController {

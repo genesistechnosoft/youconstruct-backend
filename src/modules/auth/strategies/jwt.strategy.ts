@@ -39,12 +39,14 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       authenticated.impersonatedBy = payload.impersonatedBy;
     }
 
-    const activeContext = await this.rbacService.resolveRequestContext(
-      user.id,
-      user.platformRole,
-    );
-    if (activeContext) {
-      authenticated.activeContext = activeContext;
+    const { context, accessRevoked } =
+      await this.rbacService.resolveMembershipState(user.id, user.platformRole);
+
+    if (context) {
+      authenticated.activeContext = context;
+    }
+    if (accessRevoked) {
+      authenticated.accessRevoked = true;
     }
 
     return authenticated;

@@ -22,14 +22,12 @@ import { AuthRepository } from './auth.repository';
 const BLOCKED_REGISTER_ROLES: PlatformRole[] = [
   PlatformRole.SUPER_ADMIN,
   PlatformRole.ADMIN,
-  PlatformRole.SUPPORT,
 ];
 
 const DASHBOARD_ROLES: PlatformRole[] = [
   PlatformRole.VENDOR,
   PlatformRole.PROFESSIONAL,
   PlatformRole.ADMIN,
-  PlatformRole.SUPPORT,
   PlatformRole.SUPER_ADMIN,
 ];
 
@@ -716,6 +714,19 @@ export class AuthService {
     }
 
     return user;
+  }
+
+  async issueTokensForUser(userId: string, platformRole: PlatformRole) {
+    return this.generateTokens(userId, platformRole);
+  }
+
+  /** Decodes an access token without throwing. Returns null if absent or invalid. */
+  decodeAccessTokenOptional(rawToken: string): JwtPayload | null {
+    try {
+      return this.jwtService.verify<JwtPayload>(rawToken);
+    } catch {
+      return null;
+    }
   }
 
   private async generateTokens(userId: string, platformRole: PlatformRole) {

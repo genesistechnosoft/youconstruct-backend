@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   NotFoundException,
@@ -18,12 +19,14 @@ import { MediaService } from '../media/media.service';
 import { NotificationEmitterService } from '../notifications/notification-emitter.service';
 import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
 import { SecurityAuditService } from '../rbac/security-audit.service';
+import { OnboardingChecklistDto } from './dto/onboarding-checklist.dto';
 import { RejectKycDocumentDto } from './dto/reject-kyc-document.dto';
 import { RejectVendorDto } from './dto/reject-vendor.dto';
 import { UpdateVendorProfileDto } from './dto/update-vendor-profile.dto';
 import { UploadKycDocumentDto } from './dto/upload-kyc-document.dto';
 import { UpsertKycDocumentDto } from './dto/upsert-kyc-document.dto';
 import { VendorFiltersDto } from './dto/vendor-filters.dto';
+import { GSTIN_PATTERN } from './vendor-onboarding.constants.js';
 import { VendorOnboardingRepository } from './vendor-onboarding.repository';
 
 const KYC_DOCUMENT_TYPES = new Set<string>(Object.values(KycDocumentType));
@@ -41,8 +44,10 @@ type VendorForValidation = {
   user: {
     kycDocuments: {
       documentType: KycDocumentType;
+      documentNo: string | null;
       fileUrl: string | null;
       status: KycStatus;
+      rejectionNote: string | null;
     }[];
   };
 };
@@ -61,13 +66,25 @@ export class VendorOnboardingService {
     const vendor = await this.ensureVendorProfile(userId);
     return {
       message: 'Vendor onboarding fetched successfully',
-      data: await this.withFreshKycUrls(vendor),
+      data: await this.withChecklist(await this.withFreshKycUrls(vendor)),
     };
   }
 
   async updateProfile(userId: string, dto: UpdateVendorProfileDto) {
     const vendor = await this.ensureVendorProfile(userId);
     this.ensureVendorCanEdit(vendor.onboardingStatus);
+
+    if (dto.gstNumber !== undefined) {
+      const nextGst = this.normalizeGstin(dto.gstNumber);
+      const currentGst = this.hasText(vendor.gstNumber)
+        ? this.normalizeGstin(vendor.gstNumber)
+        : '';
+
+      if (nextGst !== currentGst) {
+        await this.ensureGstNumberAvailable(nextGst, vendor.id);
+        await this.resetGstKycIfNumberChanged(vendor, nextGst);
+      }
+    }
 
     const updated = await this.vendorOnboardingRepository.updateProfile(
       vendor.id,
@@ -85,9 +102,6 @@ export class VendorOnboardingService {
         ...(dto.longitude !== undefined && { longitude: dto.longitude }),
         ...(dto.gstNumber !== undefined && { gstNumber: dto.gstNumber }),
         ...(dto.bio !== undefined && { bio: dto.bio }),
-        ...(vendor.onboardingStatus === VendorOnboardingStatus.REJECTED && {
-          onboardingStatus: VendorOnboardingStatus.DRAFT,
-        }),
         ...(!vendor.slug
           ? {
               slug: await this.allocateUniqueSlug(
@@ -111,18 +125,21 @@ export class VendorOnboardingService {
   ) {
     const vendor = await this.ensureVendorProfile(userId);
     this.ensureVendorCanEdit(vendor.onboardingStatus);
+    const documentNo = this.resolveGstDocumentNo(
+      documentType,
+      dto.documentNo,
+      vendor.gstNumber,
+    );
+    this.ensureGstKycMatchesProfile(documentType, documentNo, vendor);
 
     const document = await this.vendorOnboardingRepository.upsertKycDocument(
       userId,
       documentType,
-      dto,
+      {
+        ...dto,
+        ...(documentNo !== undefined ? { documentNo } : {}),
+      },
     );
-
-    if (vendor.onboardingStatus === VendorOnboardingStatus.REJECTED) {
-      await this.vendorOnboardingRepository.updateProfile(vendor.id, {
-        onboardingStatus: VendorOnboardingStatus.DRAFT,
-      });
-    }
 
     return {
       message: 'KYC document saved successfully',
@@ -138,6 +155,12 @@ export class VendorOnboardingService {
   ) {
     const vendor = await this.ensureVendorProfile(userId);
     this.ensureVendorCanEdit(vendor.onboardingStatus);
+    const documentNo = this.resolveGstDocumentNo(
+      documentType,
+      dto.documentNo,
+      vendor.gstNumber,
+    );
+    this.ensureGstKycMatchesProfile(documentType, documentNo, vendor);
 
     const media = await this.mediaService.uploadPrivateDocument(
       userId,
@@ -152,15 +175,9 @@ export class VendorOnboardingService {
       {
         fileUrl: mediaWithUrls.originalUrl,
         mediaId: media.id,
-        documentNo: dto.documentNo,
+        documentNo,
       },
     );
-
-    if (vendor.onboardingStatus === VendorOnboardingStatus.REJECTED) {
-      await this.vendorOnboardingRepository.updateProfile(vendor.id, {
-        onboardingStatus: VendorOnboardingStatus.DRAFT,
-      });
-    }
 
     return {
       message: 'KYC document uploaded successfully',
@@ -181,6 +198,9 @@ export class VendorOnboardingService {
 
     const requiredDocs = await this.getRequiredKycDocuments();
     this.validateReadyForSubmit(vendor, requiredDocs);
+    if (vendor.gstNumber) {
+      await this.ensureGstNumberAvailable(vendor.gstNumber, vendor.id);
+    }
 
     const submitted = await this.vendorOnboardingRepository.submitVendor(
       vendor.id,
@@ -211,7 +231,7 @@ export class VendorOnboardingService {
 
     return {
       message: 'Vendor fetched successfully',
-      data: await this.withFreshKycUrls(vendor),
+      data: await this.withChecklist(await this.withFreshKycUrls(vendor)),
     };
   }
 
@@ -302,6 +322,13 @@ export class VendorOnboardingService {
         { status: KycStatus.REJECTED, rejectionNote: dto.rejectionNote },
       );
 
+    if (vendor.onboardingStatus === VendorOnboardingStatus.SUBMITTED) {
+      await this.vendorOnboardingRepository.rejectVendor(
+        vendor.id,
+        `${documentType}: ${dto.rejectionNote}`,
+      );
+    }
+
     this.securityAudit.log({
       actorUserId,
       action: 'KYC_DOC_REJECT',
@@ -330,15 +357,25 @@ export class VendorOnboardingService {
       throw new NotFoundException('Vendor not found');
     }
 
-    if (vendor.onboardingStatus !== VendorOnboardingStatus.SUBMITTED) {
-      throw new BadRequestException('Only submitted vendors can be approved');
+    if (vendor.onboardingStatus === VendorOnboardingStatus.APPROVED) {
+      return {
+        message: 'Vendor is already approved',
+        data: vendor,
+      };
     }
 
     const requiredDocs = await this.getRequiredKycDocuments();
-    this.validateReadyForApprove(vendor, requiredDocs);
+    this.validateReadyForAdminApprove(vendor, requiredDocs);
+    if (vendor.gstNumber) {
+      await this.ensureGstNumberAvailable(vendor.gstNumber, vendor.id);
+    }
     await this.ensureVendorHasSlug(vendor);
 
-    const approved = await this.vendorOnboardingRepository.approveVendor(id);
+    const approved = await this.vendorOnboardingRepository.approveVendor(
+      id,
+      vendor.userId,
+      requiredDocs,
+    );
     this.securityAudit.log({
       actorUserId,
       action: 'VENDOR_APPROVE',
@@ -448,9 +485,9 @@ export class VendorOnboardingService {
       throw new ForbiddenException('Vendor account required');
     }
 
-    const membershipCount =
-      await this.vendorOnboardingRepository.countActiveTeamMemberships(userId);
-    if (membershipCount > 0) {
+    const hasMembership =
+      await this.vendorOnboardingRepository.hasTeamMembership(userId);
+    if (hasMembership) {
       throw new ForbiddenException(
         'Only store owners can complete vendor onboarding',
       );
@@ -550,6 +587,28 @@ export class VendorOnboardingService {
     };
   }
 
+  private async withChecklist<T extends VendorForValidation>(vendor: T) {
+    const requiredDocuments = await this.getRequiredKycDocuments();
+    return {
+      ...vendor,
+      checklist: this.buildChecklist(vendor, requiredDocuments),
+    };
+  }
+
+  private buildChecklist(
+    vendor: VendorForValidation,
+    requiredDocuments: KycDocumentType[],
+  ): OnboardingChecklistDto {
+    const gaps = this.collectOnboardingGaps(vendor, requiredDocuments);
+    return {
+      requiredDocuments,
+      missingProfileFields: gaps.missingProfileFields,
+      missingDocuments: gaps.missingDocuments,
+      rejectedDocuments: gaps.rejectedDocuments,
+      canSubmit: gaps.canSubmit,
+    };
+  }
+
   private ensureVendorCanEdit(status: VendorOnboardingStatus) {
     if (status === VendorOnboardingStatus.SUBMITTED) {
       throw new BadRequestException(
@@ -566,7 +625,46 @@ export class VendorOnboardingService {
     vendor: VendorForValidation,
     requiredDocs: KycDocumentType[],
   ) {
-    const missingFields = this.collectMissingProfileFields(vendor);
+    const gaps = this.collectOnboardingGaps(vendor, requiredDocs);
+    const details = [
+      ...gaps.missingProfileFields.map((field) => ({
+        field,
+        message:
+          field === 'gstNumber' && this.hasText(vendor.gstNumber)
+            ? 'gstNumber must be a valid 15-character GSTIN'
+            : `${field} is required`,
+      })),
+      ...gaps.missingDocuments.map((documentType) => ({
+        field: `kyc.${documentType}`,
+        message: `${documentType} document URL is required`,
+      })),
+      ...gaps.rejectedDocuments.map((document) => ({
+        field: `kyc.${document.documentType}`,
+        message: `${document.documentType} document was rejected and must be re-uploaded`,
+      })),
+      ...(gaps.gstMismatch
+        ? [
+            {
+              field: 'gstNumber',
+              message: 'gstNumber must match GST KYC document number',
+            },
+          ]
+        : []),
+    ];
+
+    if (details.length > 0) {
+      throw new BadRequestException({
+        message: 'Vendor onboarding is incomplete',
+        details,
+      });
+    }
+  }
+
+  private collectOnboardingGaps(
+    vendor: VendorForValidation,
+    requiredDocs: KycDocumentType[],
+  ) {
+    const missingProfileFields = this.collectMissingProfileFields(vendor);
     const documentsByType = new Map(
       vendor.user.kycDocuments.map((document) => [
         document.documentType,
@@ -577,34 +675,83 @@ export class VendorOnboardingService {
       const document = documentsByType.get(documentType);
       return !document || !this.hasText(document.fileUrl);
     });
+    const rejectedDocuments = requiredDocs.flatMap((documentType) => {
+      const document = documentsByType.get(documentType);
+      if (
+        !document ||
+        !this.hasText(document.fileUrl) ||
+        document.status !== KycStatus.REJECTED
+      ) {
+        return [];
+      }
 
-    if (missingFields.length > 0 || missingDocuments.length > 0) {
-      throw new BadRequestException({
-        message: 'Vendor onboarding is incomplete',
-        details: [
-          ...missingFields.map((field) => ({
-            field,
-            message: `${field} is required`,
-          })),
-          ...missingDocuments.map((documentType) => ({
-            field: `kyc.${documentType}`,
-            message: `${documentType} document URL is required`,
-          })),
-        ],
-      });
+      return [
+        {
+          documentType,
+          rejectionNote: document.rejectionNote,
+        },
+      ];
+    });
+
+    if (
+      this.hasText(vendor.gstNumber) &&
+      !this.isValidGstin(vendor.gstNumber) &&
+      !missingProfileFields.includes('gstNumber')
+    ) {
+      missingProfileFields.push('gstNumber');
     }
+
+    const gstKycNo = documentsByType.get(KycDocumentType.GST)?.documentNo;
+    const gstMismatch =
+      this.hasText(vendor.gstNumber) &&
+      this.hasText(gstKycNo) &&
+      this.normalizeGstin(vendor.gstNumber) !== this.normalizeGstin(gstKycNo);
+
+    return {
+      missingProfileFields,
+      missingDocuments,
+      rejectedDocuments,
+      gstMismatch,
+      canSubmit:
+        missingProfileFields.length === 0 &&
+        missingDocuments.length === 0 &&
+        rejectedDocuments.length === 0 &&
+        !gstMismatch,
+    };
   }
 
-  private validateReadyForApprove(
+  private validateReadyForAdminApprove(
     vendor: VendorForValidation,
     requiredDocs: KycDocumentType[],
   ) {
-    this.validateReadyForSubmit(vendor, requiredDocs);
+    const gaps = this.collectOnboardingGaps(vendor, requiredDocs);
+    const details = [
+      ...gaps.missingProfileFields.map((field) => ({
+        field,
+        message:
+          field === 'gstNumber' && this.hasText(vendor.gstNumber)
+            ? 'gstNumber must be a valid 15-character GSTIN'
+            : `${field} is required`,
+      })),
+      ...gaps.missingDocuments.map((documentType) => ({
+        field: `kyc.${documentType}`,
+        message: `${documentType} document URL is required`,
+      })),
+      ...(gaps.gstMismatch
+        ? [
+            {
+              field: 'gstNumber',
+              message: 'gstNumber must match GST KYC document number',
+            },
+          ]
+        : []),
+    ];
 
-    if (!this.areRequiredDocsVerified(vendor, requiredDocs)) {
-      throw new BadRequestException(
-        'All required KYC documents must be verified before approval',
-      );
+    if (details.length > 0) {
+      throw new BadRequestException({
+        message: 'Vendor onboarding is incomplete',
+        details,
+      });
     }
   }
 
@@ -653,7 +800,91 @@ export class VendorOnboardingService {
     return missingFields;
   }
 
-  private hasText(value: string | null | undefined) {
+  private hasText(value: string | null | undefined): value is string {
     return typeof value === 'string' && value.trim().length > 0;
+  }
+
+  private normalizeGstin(value: string) {
+    return value.trim().toUpperCase();
+  }
+
+  private isValidGstin(value: string) {
+    return GSTIN_PATTERN.test(this.normalizeGstin(value));
+  }
+
+  private async ensureGstNumberAvailable(gstNumber: string, vendorId: string) {
+    const existing = await this.vendorOnboardingRepository.findByGstNumber(
+      this.normalizeGstin(gstNumber),
+      vendorId,
+    );
+    if (existing) {
+      throw new ConflictException('GST number is already registered');
+    }
+  }
+
+  private async resetGstKycIfNumberChanged(
+    vendor: VendorForValidation & { userId: string },
+    nextGst: string,
+  ) {
+    const gstDocument = vendor.user.kycDocuments.find(
+      (document) => document.documentType === KycDocumentType.GST,
+    );
+    if (!gstDocument || !this.hasText(gstDocument.documentNo)) {
+      return;
+    }
+
+    if (this.normalizeGstin(gstDocument.documentNo) === nextGst) {
+      return;
+    }
+
+    await this.vendorOnboardingRepository.updateKycDocumentStatus(
+      vendor.userId,
+      KycDocumentType.GST,
+      { status: KycStatus.SUBMITTED, rejectionNote: null },
+    );
+  }
+
+  private resolveGstDocumentNo(
+    documentType: KycDocumentType,
+    documentNo: string | undefined,
+    gstNumber: string | null,
+  ) {
+    if (documentType !== KycDocumentType.GST) {
+      return documentNo;
+    }
+
+    if (this.hasText(documentNo)) {
+      return this.normalizeGstin(documentNo);
+    }
+
+    if (this.hasText(gstNumber)) {
+      return this.normalizeGstin(gstNumber);
+    }
+
+    return documentNo;
+  }
+
+  private ensureGstKycMatchesProfile(
+    documentType: KycDocumentType,
+    documentNo: string | undefined,
+    vendor: { gstNumber: string | null },
+  ) {
+    if (documentType !== KycDocumentType.GST || !this.hasText(documentNo)) {
+      return;
+    }
+
+    if (!this.hasText(vendor.gstNumber)) {
+      throw new BadRequestException(
+        'Save gstNumber on the store profile before uploading the GST document',
+      );
+    }
+
+    if (
+      this.normalizeGstin(documentNo) !== this.normalizeGstin(vendor.gstNumber)
+    ) {
+      throw new BadRequestException(
+        'GST document number must match the gstNumber saved on the store profile',
+      );
+    }
   }
 }

@@ -3,11 +3,31 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import {
+  MediaContext,
+  MediaEntityType,
+} from '../../../generated/prisma/client.js';
 import { paginate, paginationMeta } from '../../common/utils/pagination.util';
 import { MediaService } from '../media/media.service';
 import { BannersRepository } from './banners.repository';
 import { CreateBannerDto } from './dto/create-banner.dto';
+import { ReorderBannersDto } from './dto/reorder-banners.dto';
 import { UpdateBannerDto } from './dto/update-banner.dto';
+
+type BannerBase = {
+  id: string;
+  title: string;
+  subtitle: string | null;
+  targetUrl: string | null;
+  sortOrder: number;
+  isActive: boolean;
+  startsAt: Date | null;
+  endsAt: Date | null;
+  createdByUserId: string | null;
+  updatedByUserId: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+};
 
 @Injectable()
 export class BannersService {
@@ -18,9 +38,7 @@ export class BannersService {
 
   async findPublic() {
     const banners = await this.bannersRepository.findPublicActive(new Date());
-    const data = await Promise.all(
-      banners.map((banner) => this.withMediaUrls(banner)),
-    );
+    const data = await this.withBannerMedia(banners);
     return { message: 'Banners fetched successfully', data };
   }
 
@@ -31,9 +49,7 @@ export class BannersService {
       this.bannersRepository.countAllAdmin(),
     ]);
 
-    const data = await Promise.all(
-      banners.map((banner) => this.withMediaUrls(banner)),
-    );
+    const data = await this.withBannerMedia(banners);
 
     return {
       message: 'Banners fetched successfully',
@@ -48,20 +64,30 @@ export class BannersService {
       throw new NotFoundException('Banner not found');
     }
 
+    const [enriched] = await this.withBannerMedia([banner]);
     return {
       message: 'Banner fetched successfully',
-      data: await this.withMediaUrls(banner),
+      data: enriched,
     };
   }
 
-  async create(dto: CreateBannerDto, userId: string) {
+  async create(
+    dto: CreateBannerDto,
+    userId: string,
+    webImage?: Express.Multer.File,
+    appImage?: Express.Multer.File,
+  ) {
+    if (!webImage && !appImage) {
+      throw new BadRequestException(
+        'At least one of webImage or appImage must be provided',
+      );
+    }
+
     this.assertValidSchedule(dto.startsAt, dto.endsAt);
-    await this.assertReadyMedia(dto.mediaId);
 
     const banner = await this.bannersRepository.create({
       title: dto.title,
       ...(dto.subtitle !== undefined && { subtitle: dto.subtitle }),
-      ...(dto.mediaId && { media: { connect: { id: dto.mediaId } } }),
       ...(dto.targetUrl !== undefined && { targetUrl: dto.targetUrl }),
       sortOrder: dto.sortOrder ?? 0,
       isActive: dto.isActive ?? true,
@@ -71,13 +97,43 @@ export class BannersService {
       updatedBy: { connect: { id: userId } },
     });
 
+    await Promise.all([
+      webImage
+        ? this.mediaService.uploadAdminEntityMedia(
+            userId,
+            webImage,
+            MediaEntityType.HOMEPAGE_BANNER,
+            banner!.id,
+            MediaContext.BANNER_WEB,
+            `admin/banners/${banner!.id}/web`,
+          )
+        : Promise.resolve(),
+      appImage
+        ? this.mediaService.uploadAdminEntityMedia(
+            userId,
+            appImage,
+            MediaEntityType.HOMEPAGE_BANNER,
+            banner!.id,
+            MediaContext.BANNER_APP,
+            `admin/banners/${banner!.id}/app`,
+          )
+        : Promise.resolve(),
+    ]);
+
+    const [enriched] = await this.withBannerMedia([banner!]);
     return {
       message: 'Banner created successfully',
-      data: await this.withMediaUrls(banner),
+      data: enriched,
     };
   }
 
-  async update(id: string, dto: UpdateBannerDto, userId: string) {
+  async update(
+    id: string,
+    dto: UpdateBannerDto,
+    userId: string,
+    webImage?: Express.Multer.File,
+    appImage?: Express.Multer.File,
+  ) {
     const existing = await this.bannersRepository.findById(id);
     if (!existing) {
       throw new NotFoundException('Banner not found');
@@ -90,16 +146,10 @@ export class BannersService {
     const endsAt =
       dto.endsAt !== undefined ? dto.endsAt : existing.endsAt?.toISOString();
     this.assertValidSchedule(startsAt, endsAt);
-    await this.assertReadyMedia(dto.mediaId);
 
     const banner = await this.bannersRepository.update(id, {
       ...(dto.title !== undefined && { title: dto.title }),
       ...(dto.subtitle !== undefined && { subtitle: dto.subtitle }),
-      ...(dto.mediaId !== undefined && {
-        media: dto.mediaId
-          ? { connect: { id: dto.mediaId } }
-          : { disconnect: true },
-      }),
       ...(dto.targetUrl !== undefined && { targetUrl: dto.targetUrl }),
       ...(dto.sortOrder !== undefined && { sortOrder: dto.sortOrder }),
       ...(dto.isActive !== undefined && { isActive: dto.isActive }),
@@ -112,9 +162,33 @@ export class BannersService {
       updatedBy: { connect: { id: userId } },
     });
 
+    await Promise.all([
+      webImage
+        ? this.mediaService.uploadAdminEntityMedia(
+            userId,
+            webImage,
+            MediaEntityType.HOMEPAGE_BANNER,
+            id,
+            MediaContext.BANNER_WEB,
+            `admin/banners/${id}/web`,
+          )
+        : Promise.resolve(),
+      appImage
+        ? this.mediaService.uploadAdminEntityMedia(
+            userId,
+            appImage,
+            MediaEntityType.HOMEPAGE_BANNER,
+            id,
+            MediaContext.BANNER_APP,
+            `admin/banners/${id}/app`,
+          )
+        : Promise.resolve(),
+    ]);
+
+    const [enriched] = await this.withBannerMedia([banner!]);
     return {
       message: 'Banner updated successfully',
-      data: await this.withMediaUrls(banner),
+      data: enriched,
     };
   }
 
@@ -129,9 +203,10 @@ export class BannersService {
       updatedBy: { connect: { id: userId } },
     });
 
+    const [enriched] = await this.withBannerMedia([banner!]);
     return {
       message: 'Banner activated successfully',
-      data: await this.withMediaUrls(banner),
+      data: enriched,
     };
   }
 
@@ -146,10 +221,30 @@ export class BannersService {
       updatedBy: { connect: { id: userId } },
     });
 
+    const [enriched] = await this.withBannerMedia([banner!]);
     return {
       message: 'Banner deactivated successfully',
-      data: await this.withMediaUrls(banner),
+      data: enriched,
     };
+  }
+
+  async reorder(dto: ReorderBannersDto) {
+    const existing = await this.bannersRepository.findAllIds();
+    const existingIds = new Set(existing.map((b) => b.id));
+    const orderedIds = new Set(dto.orderedIds);
+
+    if (
+      existingIds.size !== orderedIds.size ||
+      [...existingIds].some((id) => !orderedIds.has(id))
+    ) {
+      throw new BadRequestException(
+        'orderedIds must include every non-deleted banner exactly once',
+      );
+    }
+
+    const banners = await this.bannersRepository.reorder(dto.orderedIds);
+    const data = await this.withBannerMedia(banners!);
+    return { message: 'Banners reordered successfully', data };
   }
 
   async remove(id: string) {
@@ -173,31 +268,27 @@ export class BannersService {
     }
   }
 
-  private async assertReadyMedia(mediaId?: string) {
-    if (!mediaId) {
-      return;
-    }
+  private async withBannerMedia<T extends BannerBase>(banners: T[]) {
+    if (banners.length === 0) return [];
 
-    const media = await this.bannersRepository.findReadyMediaById(mediaId);
-    if (!media) {
-      throw new BadRequestException(
-        'Media not found, deleted, or not ready for use',
-      );
-    }
-  }
+    const ids = banners.map((b) => b.id);
+    const [webMap, appMap] = await Promise.all([
+      this.mediaService.getContextMediaForEntities(
+        MediaEntityType.HOMEPAGE_BANNER,
+        ids,
+        MediaContext.BANNER_WEB,
+      ),
+      this.mediaService.getContextMediaForEntities(
+        MediaEntityType.HOMEPAGE_BANNER,
+        ids,
+        MediaContext.BANNER_APP,
+      ),
+    ]);
 
-  private async withMediaUrls<
-    T extends {
-      media: Parameters<MediaService['withUrls']>[0] | null;
-    },
-  >(banner: T) {
-    if (!banner.media) {
-      return banner;
-    }
-
-    return {
+    return banners.map((banner) => ({
       ...banner,
-      media: await this.mediaService.withUrls(banner.media),
-    };
+      webMedia: webMap.get(banner.id) ?? null,
+      appMedia: appMap.get(banner.id) ?? null,
+    }));
   }
 }

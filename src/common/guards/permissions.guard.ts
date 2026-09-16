@@ -81,11 +81,29 @@ export class PermissionsGuard implements CanActivate {
       );
     }
 
+    if (user.activeContext?.isSuspended) {
+      throw new ForbiddenException(
+        'Your team access is suspended. Contact an administrator.',
+      );
+    }
+
     if (user.platformRole === PlatformRole.SUPER_ADMIN) {
       return true;
     }
 
+    // Owners hold every permission in their own scope, but nothing outside it.
     if (user.activeContext?.isOwner) {
+      const inScope = await this.rbacService.scopeDefinesAllPermissions(
+        user.activeContext.type,
+        required,
+      );
+
+      if (!inScope) {
+        throw new ForbiddenException(
+          'You do not have permission to access this resource',
+        );
+      }
+
       return true;
     }
 

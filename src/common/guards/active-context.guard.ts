@@ -51,6 +51,12 @@ export class ActiveContextGuard implements CanActivate {
       );
     }
 
+    if (user.activeContext.isSuspended) {
+      throw new ForbiddenException(
+        'Your team access is suspended. Contact an administrator.',
+      );
+    }
+
     return true;
   }
 }

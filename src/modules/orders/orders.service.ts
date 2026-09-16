@@ -49,6 +49,7 @@ import {
   isAdminTransitionAllowed,
   isVendorTransitionAllowed,
 } from './order-status.util';
+import { CategoriesService } from '../categories/categories.service';
 import { OrdersRepository } from './orders.repository';
 import {
   ShippingQuoteService,
@@ -72,6 +73,7 @@ export class OrdersService {
     @Inject(forwardRef(() => CancelRefundService))
     private readonly cancelRefundService: CancelRefundService,
     private readonly couponsService: CouponsService,
+    private readonly categoriesService: CategoriesService,
   ) {}
 
   async checkout(userId: string, dto: CheckoutDto) {
@@ -126,7 +128,10 @@ export class OrdersService {
     if (!cart) {
       throw domainBadRequest(DOMAIN_ERROR_CODES.CART_EMPTY, 'Cart is empty');
     }
-    this.ordersRepository.assertCheckoutCartValid(cart);
+    const visibleCategoryIds = new Set(
+      await this.categoriesService.getVisibleCategoryIds(),
+    );
+    this.ordersRepository.assertCheckoutCartValid(cart, visibleCategoryIds);
 
     const productIds = cart.items.map((i) => i.variant.product.id);
     const variantIds = cart.items.map((i) => i.variant.id);

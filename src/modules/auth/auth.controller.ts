@@ -59,7 +59,7 @@ export class AuthController {
   @HttpCode(200)
   @ApiOperation({
     summary:
-      'Dashboard login with email + password (VENDOR, PROFESSIONAL, ADMIN, SUPPORT, SUPER_ADMIN)',
+      'Dashboard login with email + password (VENDOR, PROFESSIONAL, ADMIN, SUPER_ADMIN)',
   })
   @ApiResponse({ status: 200, description: 'Login successful' })
   @ApiResponse({ status: 400, description: 'Bad request' })

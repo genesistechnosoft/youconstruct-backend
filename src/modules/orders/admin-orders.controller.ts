@@ -28,7 +28,7 @@ import { OrdersService } from './orders.service';
 
 @ApiTags('Admin - Orders')
 @Controller('admin/orders')
-@Roles(PlatformRole.ADMIN, PlatformRole.SUPPORT)
+@Roles(PlatformRole.ADMIN)
 @RequireActiveContext(PermissionScope.ADMIN)
 @ApiBearerAuth()
 export class AdminOrdersController {
@@ -79,7 +79,7 @@ export class AdminOrdersController {
 
 @ApiTags('Admin - Sub-Orders')
 @Controller('admin/sub-orders')
-@Roles(PlatformRole.ADMIN, PlatformRole.SUPPORT)
+@Roles(PlatformRole.ADMIN)
 @RequireActiveContext(PermissionScope.ADMIN)
 @ApiBearerAuth()
 export class AdminSubOrdersController {

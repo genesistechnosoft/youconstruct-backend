@@ -20,7 +20,7 @@ import { VendorFinanceService } from './vendor-finance.service';
 
 @ApiTags('Admin - Vendor Finance')
 @Controller('admin/vendors')
-@Roles(PlatformRole.ADMIN, PlatformRole.SUPPORT)
+@Roles(PlatformRole.ADMIN)
 @RequireActiveContext(PermissionScope.ADMIN)
 @Permissions(PERMISSIONS.ADMIN.VENDORS_WALLET)
 @ApiBearerAuth()

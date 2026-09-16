@@ -77,6 +77,12 @@ const BRAND_SELECT = {
   slug: true,
 } as const;
 
+const VENDOR_SUMMARY_SELECT = {
+  id: true,
+  businessName: true,
+  slug: true,
+} as const;
+
 const UNIT_SELECT = {
   id: true,
   name: true,
@@ -195,6 +201,9 @@ const productListSelect = {
   brand: {
     select: BRAND_SELECT,
   },
+  vendor: {
+    select: VENDOR_SUMMARY_SELECT,
+  },
   _count: {
     select: {
       variants: {
@@ -254,6 +263,9 @@ const productDetailSelect = {
   brand: {
     select: BRAND_SELECT,
   },
+  vendor: {
+    select: VENDOR_SUMMARY_SELECT,
+  },
   variants: {
     where: { deletedAt: null },
     orderBy: variantOrderBy,
@@ -264,6 +276,7 @@ const productDetailSelect = {
 export interface ProductFilters {
   status?: ProductStatus;
   pendingContentReview?: boolean;
+  vendorId?: string;
   page?: number;
   limit?: number;
 }
@@ -279,6 +292,7 @@ export interface BrowseProductFilters {
   sortOrder?: 'asc' | 'desc';
   page?: number;
   limit?: number;
+  visibleCategoryIds: string[];
 }
 
 export interface VariantAttributeInput {
@@ -359,7 +373,7 @@ export class ProductsRepository {
       status: ProductStatus.ACTIVE,
       deletedAt: null,
       vendor: { isApproved: true, deletedAt: null },
-      category: { isActive: true, deletedAt: null },
+      categoryId: { in: filters.visibleCategoryIds },
       OR: [{ brandId: null }, { brand: { isActive: true, deletedAt: null } }],
       ...(filters.vendorId && { vendorId: filters.vendorId }),
       ...(filters.categoryId && { categoryId: filters.categoryId }),
@@ -371,7 +385,7 @@ export class ProductsRepository {
     };
 
     const sortOrder = filters.sortOrder ?? 'desc';
-    let orderBy: Prisma.ProductOrderByWithRelationInput[] = [
+    const orderBy: Prisma.ProductOrderByWithRelationInput[] = [
       { createdAt: sortOrder },
     ];
 
@@ -437,27 +451,30 @@ export class ProductsRepository {
     return { items, total };
   }
 
-  private publicProductWhere(extra: Prisma.ProductWhereInput = {}) {
+  private publicProductWhere(
+    visibleCategoryIds: string[],
+    extra: Prisma.ProductWhereInput = {},
+  ) {
     return {
       status: ProductStatus.ACTIVE,
       deletedAt: null,
       vendor: { isApproved: true, deletedAt: null },
-      category: { isActive: true, deletedAt: null },
+      categoryId: { in: visibleCategoryIds },
       OR: [{ brandId: null }, { brand: { isActive: true, deletedAt: null } }],
       ...extra,
     } satisfies Prisma.ProductWhereInput;
   }
 
-  findPublicById(id: string) {
+  findPublicById(id: string, visibleCategoryIds: string[]) {
     return this.prisma.product.findFirst({
-      where: this.publicProductWhere({ id }),
+      where: this.publicProductWhere(visibleCategoryIds, { id }),
       select: publicProductDetailSelect,
     });
   }
 
-  findPublicBySlug(slug: string) {
+  findPublicBySlug(slug: string, visibleCategoryIds: string[]) {
     return this.prisma.product.findFirst({
-      where: this.publicProductWhere({ slug }),
+      where: this.publicProductWhere(visibleCategoryIds, { slug }),
       select: publicProductDetailSelect,
     });
   }
@@ -470,6 +487,7 @@ export class ProductsRepository {
       ...(filters.pendingContentReview !== undefined && {
         pendingContentReview: filters.pendingContentReview,
       }),
+      ...(filters.vendorId && { vendorId: filters.vendorId }),
     };
 
     const [items, total] = await this.prisma.$transaction([
@@ -537,6 +555,39 @@ export class ProductsRepository {
       where: { id: { in: ids } },
       select: { id: true },
     });
+  }
+
+  async searchActiveTags(q: string | undefined, limit: number) {
+    const needle = q?.trim().toLowerCase() ?? '';
+    const take = Math.min(Math.max(Math.trunc(limit) || 20, 1), 50);
+
+    const products = await this.prisma.product.findMany({
+      where: { deletedAt: null, status: ProductStatus.ACTIVE },
+      select: { tags: true },
+    });
+
+    const counts = new Map<string, number>();
+    for (const product of products) {
+      const seenOnProduct = new Set<string>();
+      for (const raw of product.tags) {
+        const tag = raw.trim().replace(/\s+/g, ' ').toLowerCase();
+        if (!tag || seenOnProduct.has(tag)) {
+          continue;
+        }
+        if (needle && !tag.includes(needle)) {
+          continue;
+        }
+        seenOnProduct.add(tag);
+        counts.set(tag, (counts.get(tag) ?? 0) + 1);
+      }
+    }
+
+    return [...counts.entries()]
+      .sort(
+        (left, right) => right[1] - left[1] || left[0].localeCompare(right[0]),
+      )
+      .slice(0, take)
+      .map(([tag, count]) => ({ tag, count }));
   }
 
   async create(data: Prisma.ProductUncheckedCreateInput) {
@@ -610,7 +661,10 @@ export class ProductsRepository {
     try {
       return await this.prisma.product.update({
         where: { id },
-        data: { status: ProductStatus.PENDING_APPROVAL },
+        data: {
+          status: ProductStatus.PENDING_APPROVAL,
+          rejectionNote: null,
+        },
         select: PRODUCT_REVIEW_SELECT,
       });
     } catch (error) {
@@ -754,16 +808,27 @@ export class ProductsRepository {
   ) {
     try {
       return await this.prisma.$transaction(async (tx) => {
-        await tx.variantAttribute.deleteMany({ where: { variantId } });
-
-        if (attributes.length > 0) {
-          await tx.variantAttribute.createMany({
-            data: attributes.map((attribute) => ({
-              variantId,
-              attributeId: attribute.attributeId,
-              value: attribute.value,
-            })),
-          });
+        if (attributes.length === 0) {
+          await tx.variantAttribute.deleteMany({ where: { variantId } });
+        } else {
+          await Promise.all(
+            attributes.map((attribute) =>
+              tx.variantAttribute.upsert({
+                where: {
+                  variantId_attributeId: {
+                    variantId,
+                    attributeId: attribute.attributeId,
+                  },
+                },
+                create: {
+                  variantId,
+                  attributeId: attribute.attributeId,
+                  value: attribute.value,
+                },
+                update: { value: attribute.value },
+              }),
+            ),
+          );
         }
 
         return tx.variantAttribute.findMany({
@@ -771,6 +836,19 @@ export class ProductsRepository {
           select: VARIANT_ATTRIBUTE_SELECT,
         });
       });
+    } catch (error) {
+      this.handlePrismaError(error);
+    }
+  }
+
+  async deleteVariantAttribute(variantId: string, attributeId: string) {
+    try {
+      const result = await this.prisma.variantAttribute.deleteMany({
+        where: { variantId, attributeId },
+      });
+      if (result.count === 0) {
+        throw new NotFoundException('Variant attribute not found');
+      }
     } catch (error) {
       this.handlePrismaError(error);
     }

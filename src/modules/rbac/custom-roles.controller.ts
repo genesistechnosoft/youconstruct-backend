@@ -153,7 +153,6 @@ export class PermissionsCatalogController {
     PlatformRole.VENDOR,
     PlatformRole.PROFESSIONAL,
     PlatformRole.ADMIN,
-    PlatformRole.SUPPORT,
     PlatformRole.SUPER_ADMIN,
   )
   @ApiOperation({

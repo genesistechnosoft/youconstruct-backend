@@ -3,6 +3,7 @@ import { MediaEntityType, Prisma } from '../../../generated/prisma/client.js';
 import { DOMAIN_ERROR_CODES } from '../../common/errors/domain-error-code';
 import { domainBadRequest } from '../../common/errors/domain-exception';
 import { formatMoney } from '../../common/utils/money.util';
+import { CategoriesService } from '../categories/categories.service';
 import { CouponsService } from '../coupons/coupons.service';
 import { MediaService } from '../media/media.service';
 import { ShippingQuoteService } from '../orders/shipping-quote.service';
@@ -18,6 +19,7 @@ export class CartService {
     private readonly shippingQuoteService: ShippingQuoteService,
     private readonly mediaService: MediaService,
     private readonly couponsService: CouponsService,
+    private readonly categoriesService: CategoriesService,
   ) {}
 
   async getCart(userId: string) {
@@ -31,7 +33,12 @@ export class CartService {
 
   async addItem(userId: string, dto: AddCartItemDto) {
     const cart = await this.cartRepository.ensureCart(userId);
-    const variant = await this.cartRepository.findVariantForCart(dto.variantId);
+    const visibleCategoryIds =
+      await this.categoriesService.getVisibleCategoryIds();
+    const variant = await this.cartRepository.findVariantForCart(
+      dto.variantId,
+      visibleCategoryIds,
+    );
     if (!variant) {
       throw domainBadRequest(
         DOMAIN_ERROR_CODES.INSUFFICIENT_STOCK,
@@ -66,7 +73,12 @@ export class CartService {
       throw new NotFoundException('Cart item not found');
     }
 
-    const variant = await this.cartRepository.findVariantForCart(variantId);
+    const visibleCategoryIds =
+      await this.categoriesService.getVisibleCategoryIds();
+    const variant = await this.cartRepository.findVariantForCart(
+      variantId,
+      visibleCategoryIds,
+    );
     if (!variant) {
       throw domainBadRequest(
         DOMAIN_ERROR_CODES.INSUFFICIENT_STOCK,

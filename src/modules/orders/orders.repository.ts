@@ -7,7 +7,6 @@ import {
 import {
   MediaContext,
   MediaEntityType,
-  MediaProcessingStatus,
   OrderRefundStatus,
   OrderStatus,
   PaymentMethod,
@@ -271,6 +270,9 @@ export class OrdersRepository {
                     name: true,
                     status: true,
                     deletedAt: true,
+                    categoryId: true,
+                    brandId: true,
+                    brand: { select: { isActive: true } },
                     shippingOverride: { select: OVERRIDE_SELECT },
                     vendor: {
                       select: {
@@ -491,6 +493,11 @@ export class OrdersRepository {
         deletedAt: null,
         OR: [
           {
+            entityType: MediaEntityType.PRODUCT,
+            entityId: { in: productIds },
+            context: MediaContext.THUMBNAIL,
+          },
+          {
             entityType: MediaEntityType.PRODUCT_VARIANT,
             entityId: { in: variantIds },
             context: { in: [MediaContext.PRIMARY, MediaContext.GALLERY] },
@@ -503,13 +510,13 @@ export class OrdersRepository {
         ],
         media: {
           deletedAt: null,
-          processingStatus: MediaProcessingStatus.READY,
         },
       },
       orderBy: [{ isPrimary: 'desc' }, { sortOrder: 'asc' }],
       select: {
         entityType: true,
         entityId: true,
+        context: true,
         isPrimary: true,
         sortOrder: true,
         media: {
@@ -523,9 +530,9 @@ export class OrdersRepository {
       },
     });
 
-    for (const link of links) {
+    const applyLink = (link: (typeof links)[number]) => {
       if (result.has(link.entityId)) {
-        continue;
+        return;
       }
       const key =
         link.media.optimizedKey ??
@@ -535,6 +542,17 @@ export class OrdersRepository {
         imageStorageKeySnapshot: key,
         imageUrlSnapshot: null,
       });
+    };
+
+    for (const link of links) {
+      if (link.context === MediaContext.THUMBNAIL) {
+        applyLink(link);
+      }
+    }
+    for (const link of links) {
+      if (link.context !== MediaContext.THUMBNAIL) {
+        applyLink(link);
+      }
     }
 
     return result;
@@ -903,10 +921,7 @@ export class OrdersRepository {
     note: string | undefined,
     changedByUserId: string,
   ) {
-    if (
-      status === OrderStatus.CANCELLED ||
-      status === OrderStatus.REFUNDED
-    ) {
+    if (status === OrderStatus.CANCELLED || status === OrderStatus.REFUNDED) {
       throw new BadRequestException(
         'Use cancel/refund endpoints for CANCELLED or REFUNDED status',
       );
@@ -1457,6 +1472,7 @@ export class OrdersRepository {
     cart: NonNullable<
       Awaited<ReturnType<OrdersRepository['findCartWithShippingData']>>
     >,
+    visibleCategoryIds: Set<string>,
   ) {
     if (cart.items.length === 0) {
       throw new BadRequestException('Cart is empty');
@@ -1470,7 +1486,9 @@ export class OrdersRepository {
         v.product.deletedAt ||
         v.product.status !== ProductStatus.ACTIVE ||
         !v.product.vendor.isApproved ||
-        v.product.vendor.deletedAt
+        v.product.vendor.deletedAt ||
+        !visibleCategoryIds.has(v.product.categoryId) ||
+        (v.product.brandId !== null && !v.product.brand?.isActive)
       ) {
         throw new ConflictException(`Variant ${v.sku} is no longer available`);
       }

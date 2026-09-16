@@ -23,7 +23,7 @@ import { VendorFinanceService } from './vendor-finance.service';
 
 @ApiTags('Admin - Payouts')
 @Controller('admin/payouts')
-@Roles(PlatformRole.ADMIN, PlatformRole.SUPPORT)
+@Roles(PlatformRole.ADMIN)
 @RequireActiveContext(PermissionScope.ADMIN)
 @Permissions(PERMISSIONS.ADMIN.PAYOUTS_MANAGE)
 @ApiBearerAuth()

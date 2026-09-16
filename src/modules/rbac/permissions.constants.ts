@@ -12,6 +12,7 @@ export const PERMISSIONS = {
     ORDERS_VIEW: 'orders:view',
     ORDERS_MANAGE: 'orders:manage',
     USERS_IMPERSONATE: 'users:impersonate',
+    TEAM_MANAGE: 'team:manage',
     ROLES_MANAGE: 'roles:manage',
   },
   VENDOR: {
@@ -135,6 +136,14 @@ export const PERMISSION_CATALOG: PermissionCatalogEntry[] = [
     scope: PermissionScope.ADMIN,
     description: 'Act as another user for support (short-lived session)',
     isElevated: true,
+  },
+  {
+    key: PERMISSIONS.ADMIN.TEAM_MANAGE,
+    name: 'Manage Team',
+    group: 'Team',
+    scope: PermissionScope.ADMIN,
+    description: 'Invite platform staff and manage admin team memberships',
+    isElevated: false,
   },
   {
     key: PERMISSIONS.ADMIN.ROLES_MANAGE,
@@ -304,4 +313,5 @@ export const PERMISSION_CATALOG: PermissionCatalogEntry[] = [
 ];
 
 export const PLATFORM_ADMIN_ROLE_NAME = 'Platform Admin';
+export const SUPPORT_AGENT_ROLE_NAME = 'Support Agent';
 export const OWNER_ROLE_NAME = 'Owner';

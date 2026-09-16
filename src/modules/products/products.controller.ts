@@ -33,10 +33,13 @@ import { requireVendorEntityId } from '../../common/utils/active-context.util';
 import { PERMISSIONS } from '../rbac/permissions.constants';
 import { LinkMediaDto } from '../media/dto/link-media.dto';
 import { ReorderMediaLinksDto } from '../media/dto/reorder-media-links.dto';
+import { AdminProductFiltersDto } from './dto/admin-product-filters.dto';
 import { BrowseProductsDto } from './dto/browse-products.dto';
 import { CreateProductDto } from './dto/create-product.dto';
 import { CreateVariantDto } from './dto/create-variant.dto';
+import { LinkThumbnailDto } from './dto/link-thumbnail.dto';
 import { ProductFiltersDto } from './dto/product-filters.dto';
+import { SearchTagsQueryDto } from './dto/search-tags-query.dto';
 import { RejectProductDto } from './dto/reject-product.dto';
 import { SetAttributesDto } from './dto/set-attributes.dto';
 import { UpdateInventoryDto } from './dto/update-inventory.dto';
@@ -93,6 +96,14 @@ export class VendorProductsController {
       requireVendorEntityId(user),
       filters,
     );
+  }
+
+  @Get('tags')
+  @HttpCode(200)
+  @Permissions(PERMISSIONS.VENDOR.PRODUCTS_VIEW)
+  @ApiOperation({ summary: 'Search product tags for typeahead' })
+  searchTags(@Query() query: SearchTagsQueryDto) {
+    return this.productsService.searchTags(query);
   }
 
   @Post()
@@ -167,6 +178,67 @@ export class VendorProductsController {
     @Param('id', ParseUUIDPipe) id: string,
   ) {
     return this.productsService.unpublishProduct(
+      requireVendorEntityId(user),
+      id,
+    );
+  }
+
+  @Post(':id/thumbnail/upload')
+  @HttpCode(200)
+  @Permissions(
+    PERMISSIONS.VENDOR.PRODUCTS_EDIT,
+    PERMISSIONS.VENDOR.MEDIA_UPLOAD,
+  )
+  @UseInterceptors(FileInterceptor('file', { storage: memoryStorage() }))
+  @ApiConsumes('multipart/form-data')
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: { file: { type: 'string', format: 'binary' } },
+    },
+  })
+  @ApiOperation({ summary: 'Upload or replace product thumbnail' })
+  uploadProductThumbnail(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @UploadedFile() file: Express.Multer.File | undefined,
+  ) {
+    return this.productsService.uploadProductThumbnail(
+      requireVendorEntityId(user),
+      user.userId,
+      id,
+      file,
+    );
+  }
+
+  @Post(':id/thumbnail')
+  @HttpCode(200)
+  @Permissions(
+    PERMISSIONS.VENDOR.PRODUCTS_EDIT,
+    PERMISSIONS.VENDOR.MEDIA_UPLOAD,
+  )
+  @ApiOperation({ summary: 'Link existing media as product thumbnail' })
+  linkProductThumbnail(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: LinkThumbnailDto,
+  ) {
+    return this.productsService.linkProductThumbnail(
+      requireVendorEntityId(user),
+      id,
+      dto,
+    );
+  }
+
+  @Delete(':id/thumbnail')
+  @HttpCode(200)
+  @Permissions(PERMISSIONS.VENDOR.PRODUCTS_EDIT)
+  @ApiOperation({ summary: 'Remove product thumbnail' })
+  deleteProductThumbnail(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.productsService.deleteProductThumbnail(
       requireVendorEntityId(user),
       id,
     );
@@ -337,6 +409,24 @@ export class VendorProductsController {
     );
   }
 
+  @Delete(':id/variants/:variantId/attributes/:attributeId')
+  @HttpCode(200)
+  @Permissions(PERMISSIONS.VENDOR.PRODUCTS_EDIT)
+  @ApiOperation({ summary: 'Remove one product variant attribute' })
+  deleteVariantAttribute(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('variantId', ParseUUIDPipe) variantId: string,
+    @Param('attributeId', ParseUUIDPipe) attributeId: string,
+  ) {
+    return this.productsService.deleteVariantAttribute(
+      requireVendorEntityId(user),
+      id,
+      variantId,
+      attributeId,
+    );
+  }
+
   @Post(':id/variants/:variantId/gallery/upload')
   @HttpCode(200)
   @Permissions(
@@ -427,7 +517,7 @@ export class VendorProductsController {
 
 @ApiTags('Admin - Products')
 @Controller('admin/products')
-@Roles(PlatformRole.ADMIN, PlatformRole.SUPPORT)
+@Roles(PlatformRole.ADMIN)
 @RequireActiveContext(PermissionScope.ADMIN)
 @Permissions(PERMISSIONS.ADMIN.CATALOG_MANAGE)
 @ApiBearerAuth()
@@ -437,7 +527,7 @@ export class AdminProductsController {
   @Get()
   @HttpCode(200)
   @ApiOperation({ summary: 'List all products' })
-  getAllProducts(@Query() filters: ProductFiltersDto) {
+  getAllProducts(@Query() filters: AdminProductFiltersDto) {
     return this.productsService.getAllProducts(filters);
   }
 

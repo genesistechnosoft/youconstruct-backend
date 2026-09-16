@@ -1,6 +1,5 @@
 import { Type } from 'class-transformer';
 import {
-  ArrayNotEmpty,
   IsArray,
   IsNotEmpty,
   IsString,
@@ -21,9 +20,11 @@ export class VariantAttributeDto {
 }
 
 export class SetAttributesDto {
-  @ApiProperty({ type: [VariantAttributeDto] })
+  @ApiProperty({
+    type: [VariantAttributeDto],
+    description: 'Upsert these attributes. Empty array clears all.',
+  })
   @IsArray()
-  @ArrayNotEmpty()
   @ValidateNested({ each: true })
   @Type(() => VariantAttributeDto)
   attributes!: VariantAttributeDto[];

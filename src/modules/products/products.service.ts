@@ -6,6 +6,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import {
+  MediaContext,
   MediaEntityType,
   MediaOwnerType,
   NotificationEventType,
@@ -24,13 +25,18 @@ import { VendorStoreService } from '../vendor-store/vendor-store.service';
 import { BrowseProductsDto } from './dto/browse-products.dto';
 import { CreateProductDto } from './dto/create-product.dto';
 import { CreateVariantDto } from './dto/create-variant.dto';
+import { LinkThumbnailDto } from './dto/link-thumbnail.dto';
+import { AdminProductFiltersDto } from './dto/admin-product-filters.dto';
 import { ProductFiltersDto } from './dto/product-filters.dto';
 import { RejectProductDto } from './dto/reject-product.dto';
+import { SearchTagsQueryDto } from './dto/search-tags-query.dto';
 import { SetAttributesDto } from './dto/set-attributes.dto';
 import { UpdateInventoryDto } from './dto/update-inventory.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
 import { UpdateVariantDto } from './dto/update-variant.dto';
+import { normalizeProductTags } from './product-tags.util';
 import { ProductsRepository } from './products.repository';
+import { CategoriesService } from '../categories/categories.service';
 
 type PendingProductContent = {
   name?: string;
@@ -53,6 +59,7 @@ export class ProductsService {
     private readonly vendorStoreService: VendorStoreService,
     private readonly securityAudit: SecurityAuditService,
     private readonly notifications: NotificationEmitterService,
+    private readonly categoriesService: CategoriesService,
   ) {}
 
   async getMyProducts(userId: string, filters: ProductFiltersDto) {
@@ -77,6 +84,18 @@ export class ProductsService {
     };
   }
 
+  async searchTags(query: SearchTagsQueryDto) {
+    const data = await this.productsRepository.searchActiveTags(
+      query.q,
+      query.limit ?? 20,
+    );
+
+    return {
+      message: 'Product tags fetched successfully',
+      data,
+    };
+  }
+
   async createProduct(userId: string, dto: CreateProductDto) {
     const vendorId = await this.getVendorId(userId);
     await this.vendorStoreService.assertCanCreateProduct(vendorId);
@@ -93,7 +112,7 @@ export class ProductsService {
       throw new ConflictException('Product slug already exists');
     }
 
-    const product = await this.productsRepository.create({
+    const created = await this.productsRepository.create({
       vendorId,
       categoryId: dto.categoryId,
       brandId: dto.brandId,
@@ -104,12 +123,15 @@ export class ProductsService {
       status: ProductStatus.DRAFT,
       isReturnable: dto.isReturnable ?? false,
       returnWindowDays: dto.returnWindowDays,
-      tags: dto.tags ?? [],
+      tags: normalizeProductTags(dto.tags ?? []),
       metaTitle: dto.metaTitle,
       metaDescription: dto.metaDescription,
     });
 
-    return { message: 'Product created successfully', data: product };
+    return {
+      message: 'Product created successfully',
+      data: await this.toVendorProductResponse(userId, created.id),
+    };
   }
 
   async updateProduct(
@@ -136,28 +158,46 @@ export class ProductsService {
     this.validateReturnInvariant(isReturnable, returnWindowDays ?? undefined);
 
     if (existing.status === ProductStatus.ACTIVE) {
-      const pendingContent = this.mergePendingContent(
-        existing.pendingContent as PendingProductContent | null,
-        dto,
-      );
+      const pendingContent = this.mergePendingContent(existing, dto);
 
       if (Object.keys(pendingContent).length === 0) {
+        await this.productsRepository.update(productId, {
+          pendingContent: Prisma.DbNull,
+          pendingContentReview: false,
+        });
+
         return {
           message: 'Product updated successfully',
-          data: existing,
+          data: await this.toVendorProductResponse(userId, productId),
         };
       }
 
-      const product = await this.productsRepository.update(productId, {
+      await this.productsRepository.update(productId, {
         pendingContent,
         pendingContentReview: true,
       });
 
-      return { message: 'Product content staged for review', data: product };
+      return {
+        message: 'Product content staged for review',
+        data: await this.toVendorProductResponse(userId, productId),
+      };
     }
 
-    const product = await this.productsRepository.update(productId, {
+    let nextSlug: string | undefined;
+    if (dto.name !== undefined && dto.name !== existing.name) {
+      nextSlug = generateSlug(dto.name);
+      const existingSlug = await this.productsRepository.findBySlug(
+        nextSlug,
+        productId,
+      );
+      if (existingSlug) {
+        throw new ConflictException('Product slug already exists');
+      }
+    }
+
+    await this.productsRepository.update(productId, {
       ...(dto.name !== undefined && { name: dto.name }),
+      ...(nextSlug !== undefined && { slug: nextSlug }),
       ...(dto.categoryId !== undefined && { categoryId: dto.categoryId }),
       ...(dto.brandId !== undefined && { brandId: dto.brandId }),
       ...(dto.description !== undefined && { description: dto.description }),
@@ -169,32 +209,48 @@ export class ProductsService {
       ...(dto.returnWindowDays !== undefined && {
         returnWindowDays: dto.returnWindowDays,
       }),
-      ...(dto.tags !== undefined && { tags: dto.tags }),
+      ...(dto.tags !== undefined && {
+        tags: normalizeProductTags(dto.tags),
+      }),
       ...(dto.metaTitle !== undefined && { metaTitle: dto.metaTitle }),
       ...(dto.metaDescription !== undefined && {
         metaDescription: dto.metaDescription,
       }),
     });
 
-    return { message: 'Product updated successfully', data: product };
+    return {
+      message: 'Product updated successfully',
+      data: await this.toVendorProductResponse(userId, productId),
+    };
   }
 
   async submitForApproval(userId: string, productId: string) {
     const product = await this.verifyProductOwnership(userId, productId);
+    if (product.status === ProductStatus.ACTIVE) {
+      throw new BadRequestException(
+        product.pendingContentReview
+          ? 'Live product content is already awaiting admin review; do not submit again'
+          : 'Live products are not submitted; catalog edits go to content review automatically',
+      );
+    }
+
     if (
       product.status !== ProductStatus.DRAFT &&
-      product.status !== ProductStatus.INACTIVE
+      product.status !== ProductStatus.INACTIVE &&
+      product.status !== ProductStatus.REJECTED
     ) {
       throw new BadRequestException(
-        'Only draft or inactive products can be submitted for approval',
+        'Only draft, inactive, or rejected products can be submitted for approval',
       );
     }
 
     await this.validateProductCanGoLive(productId);
 
-    const submitted =
-      await this.productsRepository.submitForApproval(productId);
-    return { message: 'Product submitted for approval', data: submitted };
+    await this.productsRepository.submitForApproval(productId);
+    return {
+      message: 'Product submitted for approval',
+      data: await this.toVendorProductResponse(userId, productId),
+    };
   }
 
   async unpublishProduct(userId: string, productId: string) {
@@ -203,11 +259,14 @@ export class ProductsService {
       throw new BadRequestException('Only active products can be unpublished');
     }
 
-    const unpublished = await this.productsRepository.update(productId, {
+    await this.productsRepository.update(productId, {
       status: ProductStatus.INACTIVE,
     });
 
-    return { message: 'Product unpublished successfully', data: unpublished };
+    return {
+      message: 'Product unpublished successfully',
+      data: await this.toVendorProductResponse(userId, productId),
+    };
   }
 
   async deleteProduct(userId: string, productId: string) {
@@ -233,7 +292,7 @@ export class ProductsService {
       await this.productsRepository.countActiveVariants(productId);
     const isDefault = dto.isDefault ?? activeVariants === 0;
 
-    const variant = await this.productsRepository.createVariant({
+    await this.productsRepository.createVariant({
       productId,
       sku: dto.sku,
       name: dto.name,
@@ -254,7 +313,10 @@ export class ProductsService {
       await this.markPendingContentReview(productId);
     }
 
-    return { message: 'Variant added successfully', data: variant };
+    return {
+      message: 'Variant added successfully',
+      data: await this.toVendorProductResponse(userId, productId),
+    };
   }
 
   async updateVariant(
@@ -321,38 +383,37 @@ export class ProductsService {
       product.status === ProductStatus.ACTIVE &&
       this.isPriceOnlyVariantUpdate(dto);
 
-    const updatedVariant = await this.productsRepository.updateVariant(
-      variantId,
-      productId,
-      {
-        ...(dto.sku !== undefined && { sku: dto.sku }),
-        ...(dto.name !== undefined && { name: dto.name }),
-        ...(dto.price !== undefined && {
-          price: new Prisma.Decimal(dto.price),
-        }),
-        ...(dto.sellingPrice !== undefined && {
-          sellingPrice: new Prisma.Decimal(dto.sellingPrice),
-        }),
-        ...(dto.costPrice !== undefined && {
-          costPrice: new Prisma.Decimal(dto.costPrice),
-        }),
-        ...(dto.primaryUnitId !== undefined && {
-          primaryUnitId: dto.primaryUnitId,
-        }),
-        ...(dto.coverageArea !== undefined && {
-          coverageArea: dto.coverageArea,
-        }),
-        ...(dto.baseUnitId !== undefined && { baseUnitId: dto.baseUnitId }),
-        ...(dto.weightKg !== undefined && { weightKg: dto.weightKg }),
-        ...(dto.isDefault !== undefined && { isDefault: dto.isDefault }),
-      },
-    );
+    await this.productsRepository.updateVariant(variantId, productId, {
+      ...(dto.sku !== undefined && { sku: dto.sku }),
+      ...(dto.name !== undefined && { name: dto.name }),
+      ...(dto.price !== undefined && {
+        price: new Prisma.Decimal(dto.price),
+      }),
+      ...(dto.sellingPrice !== undefined && {
+        sellingPrice: new Prisma.Decimal(dto.sellingPrice),
+      }),
+      ...(dto.costPrice !== undefined && {
+        costPrice: new Prisma.Decimal(dto.costPrice),
+      }),
+      ...(dto.primaryUnitId !== undefined && {
+        primaryUnitId: dto.primaryUnitId,
+      }),
+      ...(dto.coverageArea !== undefined && {
+        coverageArea: dto.coverageArea,
+      }),
+      ...(dto.baseUnitId !== undefined && { baseUnitId: dto.baseUnitId }),
+      ...(dto.weightKg !== undefined && { weightKg: dto.weightKg }),
+      ...(dto.isDefault !== undefined && { isDefault: dto.isDefault }),
+    });
 
     if (product.status === ProductStatus.ACTIVE && !priceOnlyUpdate) {
       await this.markPendingContentReview(productId);
     }
 
-    return { message: 'Variant updated successfully', data: updatedVariant };
+    return {
+      message: 'Variant updated successfully',
+      data: await this.toVendorProductResponse(userId, productId),
+    };
   }
 
   async deleteVariant(userId: string, productId: string, variantId: string) {
@@ -376,7 +437,10 @@ export class ProductsService {
     }
 
     await this.productsRepository.softDeleteVariant(variantId);
-    return { message: 'Variant deleted successfully', data: null };
+    return {
+      message: 'Variant deleted successfully',
+      data: await this.toVendorProductResponse(userId, productId),
+    };
   }
 
   async updateInventory(
@@ -385,19 +449,11 @@ export class ProductsService {
     variantId: string,
     dto: UpdateInventoryDto,
   ) {
-    await this.verifyProductOwnership(userId, productId);
-    const product = await this.productsRepository.findById(productId);
-    if (!product) {
-      throw new NotFoundException('Product not found');
-    }
-    if (product.status === ProductStatus.PENDING_APPROVAL) {
-      throw new BadRequestException(
-        'Pending products cannot be changed until reviewed',
-      );
-    }
+    const product = await this.verifyProductOwnership(userId, productId);
+    this.ensureVendorCanMutateProduct(product.status);
     await this.verifyVariantOwnership(userId, productId, variantId);
 
-    const inventory = await this.productsRepository.updateInventory(variantId, {
+    await this.productsRepository.updateInventory(variantId, {
       quantity: dto.quantity,
       ...(dto.lowStockThreshold !== undefined && {
         lowStockThreshold: dto.lowStockThreshold,
@@ -407,7 +463,10 @@ export class ProductsService {
       }),
     });
 
-    return { message: 'Inventory updated successfully', data: inventory };
+    return {
+      message: 'Inventory updated successfully',
+      data: await this.toVendorProductResponse(userId, productId),
+    };
   }
 
   async setVariantAttributes(
@@ -419,9 +478,11 @@ export class ProductsService {
     const product = await this.verifyProductOwnership(userId, productId);
     this.ensureVendorCanMutateProduct(product.status);
     await this.verifyVariantOwnership(userId, productId, variantId);
-    await this.validateAttributePayload(dto.attributes);
+    if (dto.attributes.length > 0) {
+      await this.validateAttributePayload(dto.attributes);
+    }
 
-    const attributes = await this.productsRepository.setVariantAttributes(
+    await this.productsRepository.setVariantAttributes(
       variantId,
       dto.attributes,
     );
@@ -432,7 +493,31 @@ export class ProductsService {
 
     return {
       message: 'Variant attributes updated successfully',
-      data: attributes,
+      data: await this.toVendorProductResponse(userId, productId),
+    };
+  }
+
+  async deleteVariantAttribute(
+    userId: string,
+    productId: string,
+    variantId: string,
+    attributeId: string,
+  ) {
+    const product = await this.verifyProductOwnership(userId, productId);
+    this.ensureVendorCanMutateProduct(product.status);
+    await this.verifyVariantOwnership(userId, productId, variantId);
+    await this.productsRepository.deleteVariantAttribute(
+      variantId,
+      attributeId,
+    );
+
+    if (product.status === ProductStatus.ACTIVE) {
+      await this.markPendingContentReview(productId);
+    }
+
+    return {
+      message: 'Variant attribute removed successfully',
+      data: await this.toVendorProductResponse(userId, productId),
     };
   }
 
@@ -448,7 +533,7 @@ export class ProductsService {
     );
     this.ensureVendorCanMutateProduct(product.status);
 
-    const result = await this.mediaService.uploadVendorMediaForEntity(
+    await this.mediaService.uploadVendorMediaForEntity(
       actorUserId,
       product.vendorId,
       file,
@@ -460,7 +545,10 @@ export class ProductsService {
       await this.markPendingContentReview(productId);
     }
 
-    return result;
+    return {
+      message: 'Media uploaded and linked successfully',
+      data: await this.toVendorProductResponse(vendorProfileId, productId),
+    };
   }
 
   async linkProductGalleryMedia(
@@ -471,7 +559,7 @@ export class ProductsService {
     const product = await this.verifyProductOwnership(userId, productId);
     this.ensureVendorCanMutateProduct(product.status);
 
-    const result = await this.mediaService.linkMediaToEntity(
+    await this.mediaService.linkMediaToEntity(
       { ownerType: MediaOwnerType.VENDOR, ownerId: product.vendorId },
       MediaEntityType.PRODUCT,
       productId,
@@ -482,7 +570,10 @@ export class ProductsService {
       await this.markPendingContentReview(productId);
     }
 
-    return result;
+    return {
+      message: 'Media linked successfully',
+      data: await this.toVendorProductResponse(userId, productId),
+    };
   }
 
   async reorderProductGalleryMedia(
@@ -493,7 +584,7 @@ export class ProductsService {
     const product = await this.verifyProductOwnership(userId, productId);
     this.ensureVendorCanMutateProduct(product.status);
 
-    const result = await this.mediaService.reorderEntityMedia(
+    await this.mediaService.reorderEntityMedia(
       MediaEntityType.PRODUCT,
       productId,
       dto,
@@ -503,7 +594,10 @@ export class ProductsService {
       await this.markPendingContentReview(productId);
     }
 
-    return result;
+    return {
+      message: 'Media links reordered successfully',
+      data: await this.toVendorProductResponse(userId, productId),
+    };
   }
 
   async unlinkProductGalleryMedia(
@@ -514,7 +608,7 @@ export class ProductsService {
     const product = await this.verifyProductOwnership(userId, productId);
     this.ensureVendorCanMutateProduct(product.status);
 
-    const result = await this.mediaService.unlinkMediaFromEntity(
+    await this.mediaService.unlinkMediaFromEntity(
       MediaEntityType.PRODUCT,
       productId,
       mediaId,
@@ -524,7 +618,96 @@ export class ProductsService {
       await this.markPendingContentReview(productId);
     }
 
-    return result;
+    return {
+      message: 'Media unlinked successfully',
+      data: await this.toVendorProductResponse(userId, productId),
+    };
+  }
+
+  async uploadProductThumbnail(
+    vendorProfileId: string,
+    actorUserId: string,
+    productId: string,
+    file: Express.Multer.File | undefined,
+  ) {
+    const product = await this.verifyProductOwnership(
+      vendorProfileId,
+      productId,
+    );
+    this.ensureVendorCanMutateProduct(product.status);
+
+    await this.mediaService.uploadVendorMediaForEntityContext(
+      actorUserId,
+      product.vendorId,
+      file,
+      MediaEntityType.PRODUCT,
+      productId,
+      MediaContext.THUMBNAIL,
+    );
+
+    if (product.status === ProductStatus.ACTIVE) {
+      await this.markPendingContentReview(productId);
+    }
+
+    return {
+      message: 'Product thumbnail uploaded successfully',
+      data: await this.toVendorProductResponse(vendorProfileId, productId),
+    };
+  }
+
+  async linkProductThumbnail(
+    userId: string,
+    productId: string,
+    dto: LinkThumbnailDto,
+  ) {
+    const product = await this.verifyProductOwnership(userId, productId);
+    this.ensureVendorCanMutateProduct(product.status);
+
+    await this.mediaService.setEntityMediaContext(
+      { ownerType: MediaOwnerType.VENDOR, ownerId: product.vendorId },
+      MediaEntityType.PRODUCT,
+      productId,
+      MediaContext.THUMBNAIL,
+      dto.mediaId,
+    );
+
+    if (product.status === ProductStatus.ACTIVE) {
+      await this.markPendingContentReview(productId);
+    }
+
+    return {
+      message: 'Product thumbnail linked successfully',
+      data: await this.toVendorProductResponse(userId, productId),
+    };
+  }
+
+  async deleteProductThumbnail(userId: string, productId: string) {
+    const product = await this.verifyProductOwnership(userId, productId);
+    this.ensureVendorCanMutateProduct(product.status);
+
+    const thumbnailCount = await this.mediaService.countContextLinks(
+      MediaEntityType.PRODUCT,
+      productId,
+      MediaContext.THUMBNAIL,
+    );
+    if (thumbnailCount === 0) {
+      throw new NotFoundException('Product thumbnail not found');
+    }
+
+    await this.mediaService.clearEntityMediaContext(
+      MediaEntityType.PRODUCT,
+      productId,
+      MediaContext.THUMBNAIL,
+    );
+
+    if (product.status === ProductStatus.ACTIVE) {
+      await this.markPendingContentReview(productId);
+    }
+
+    return {
+      message: 'Product thumbnail removed successfully',
+      data: await this.toVendorProductResponse(userId, productId),
+    };
   }
 
   async uploadVariantGalleryMedia(
@@ -541,7 +724,7 @@ export class ProductsService {
     this.ensureVendorCanMutateProduct(product.status);
     await this.verifyVariantOwnership(vendorProfileId, productId, variantId);
 
-    const result = await this.mediaService.uploadVendorMediaForEntity(
+    await this.mediaService.uploadVendorMediaForEntity(
       actorUserId,
       product.vendorId,
       file,
@@ -553,7 +736,10 @@ export class ProductsService {
       await this.markPendingContentReview(productId);
     }
 
-    return result;
+    return {
+      message: 'Media uploaded and linked successfully',
+      data: await this.toVendorProductResponse(vendorProfileId, productId),
+    };
   }
 
   async linkVariantGalleryMedia(
@@ -566,7 +752,7 @@ export class ProductsService {
     this.ensureVendorCanMutateProduct(product.status);
     await this.verifyVariantOwnership(userId, productId, variantId);
 
-    const result = await this.mediaService.linkMediaToEntity(
+    await this.mediaService.linkMediaToEntity(
       { ownerType: MediaOwnerType.VENDOR, ownerId: product.vendorId },
       MediaEntityType.PRODUCT_VARIANT,
       variantId,
@@ -577,7 +763,10 @@ export class ProductsService {
       await this.markPendingContentReview(productId);
     }
 
-    return result;
+    return {
+      message: 'Media linked successfully',
+      data: await this.toVendorProductResponse(userId, productId),
+    };
   }
 
   async reorderVariantGalleryMedia(
@@ -590,7 +779,7 @@ export class ProductsService {
     this.ensureVendorCanMutateProduct(product.status);
     await this.verifyVariantOwnership(userId, productId, variantId);
 
-    const result = await this.mediaService.reorderEntityMedia(
+    await this.mediaService.reorderEntityMedia(
       MediaEntityType.PRODUCT_VARIANT,
       variantId,
       dto,
@@ -600,7 +789,10 @@ export class ProductsService {
       await this.markPendingContentReview(productId);
     }
 
-    return result;
+    return {
+      message: 'Media links reordered successfully',
+      data: await this.toVendorProductResponse(userId, productId),
+    };
   }
 
   async unlinkVariantGalleryMedia(
@@ -613,7 +805,7 @@ export class ProductsService {
     this.ensureVendorCanMutateProduct(product.status);
     await this.verifyVariantOwnership(userId, productId, variantId);
 
-    const result = await this.mediaService.unlinkMediaFromEntity(
+    await this.mediaService.unlinkMediaFromEntity(
       MediaEntityType.PRODUCT_VARIANT,
       variantId,
       mediaId,
@@ -623,11 +815,19 @@ export class ProductsService {
       await this.markPendingContentReview(productId);
     }
 
-    return result;
+    return {
+      message: 'Media unlinked successfully',
+      data: await this.toVendorProductResponse(userId, productId),
+    };
   }
 
   async browseProducts(filters: BrowseProductsDto) {
-    const { items, total } = await this.productsRepository.findPublic(filters);
+    const visibleCategoryIds =
+      await this.categoriesService.getVisibleCategoryIds();
+    const { items, total } = await this.productsRepository.findPublic({
+      ...filters,
+      visibleCategoryIds,
+    });
     const cards = await this.toBrowseCards(items);
 
     return {
@@ -638,10 +838,13 @@ export class ProductsService {
   }
 
   async browseVendorProducts(vendorId: string, page = 1, limit = 20) {
+    const visibleCategoryIds =
+      await this.categoriesService.getVisibleCategoryIds();
     const { items, total } = await this.productsRepository.findPublic({
       vendorId,
       page,
       limit,
+      visibleCategoryIds,
     });
     const cards = await this.toBrowseCards(items);
 
@@ -653,7 +856,12 @@ export class ProductsService {
   }
 
   async getProductDetail(id: string) {
-    const product = await this.productsRepository.findPublicById(id);
+    const visibleCategoryIds =
+      await this.categoriesService.getVisibleCategoryIds();
+    const product = await this.productsRepository.findPublicById(
+      id,
+      visibleCategoryIds,
+    );
     if (!product) {
       throw new NotFoundException('Product not found');
     }
@@ -665,7 +873,12 @@ export class ProductsService {
   }
 
   async getProductBySlug(slug: string) {
-    const product = await this.productsRepository.findPublicBySlug(slug);
+    const visibleCategoryIds =
+      await this.categoriesService.getVisibleCategoryIds();
+    const product = await this.productsRepository.findPublicBySlug(
+      slug,
+      visibleCategoryIds,
+    );
     if (!product) {
       throw new NotFoundException('Product not found');
     }
@@ -676,7 +889,7 @@ export class ProductsService {
     };
   }
 
-  async getAllProducts(filters: ProductFiltersDto) {
+  async getAllProducts(filters: AdminProductFiltersDto) {
     const { items, total } =
       await this.productsRepository.findAllAdmin(filters);
 
@@ -688,14 +901,9 @@ export class ProductsService {
   }
 
   async getAdminProduct(id: string) {
-    const product = await this.productsRepository.findById(id);
-    if (!product) {
-      throw new NotFoundException('Product not found');
-    }
-
     return {
       message: 'Product fetched successfully',
-      data: await this.withProductMedia(product),
+      data: await this.toAdminProductResponse(id),
     };
   }
 
@@ -714,7 +922,7 @@ export class ProductsService {
     await this.validateActiveBrand(existing.brandId ?? undefined);
     await this.validateApprovedVendor(existing.vendorId);
 
-    const product = await this.productsRepository.update(id, {
+    await this.productsRepository.update(id, {
       status: ProductStatus.ACTIVE,
       rejectionNote: null,
     });
@@ -739,7 +947,10 @@ export class ProductsService {
       });
     }
 
-    return { message: 'Product approved successfully', data: product };
+    return {
+      message: 'Product approved successfully',
+      data: await this.toAdminProductResponse(id),
+    };
   }
 
   async rejectProduct(id: string, actorUserId: string, dto: RejectProductDto) {
@@ -752,8 +963,8 @@ export class ProductsService {
       throw new BadRequestException('Only pending products can be rejected');
     }
 
-    const product = await this.productsRepository.update(id, {
-      status: ProductStatus.DRAFT,
+    await this.productsRepository.update(id, {
+      status: ProductStatus.REJECTED,
       rejectionNote: dto.rejectionNote,
     });
     this.securityAudit.log({
@@ -778,7 +989,10 @@ export class ProductsService {
       });
     }
 
-    return { message: 'Product rejected successfully', data: product };
+    return {
+      message: 'Product rejected successfully',
+      data: await this.toAdminProductResponse(id),
+    };
   }
 
   async approveContentReview(id: string, actorUserId: string) {
@@ -848,7 +1062,7 @@ export class ProductsService {
       updateData.returnWindowDays = pending.returnWindowDays;
     }
 
-    const product = await this.productsRepository.update(id, updateData);
+    await this.productsRepository.update(id, updateData);
 
     this.securityAudit.log({
       actorUserId,
@@ -858,7 +1072,10 @@ export class ProductsService {
       targetId: id,
     });
 
-    return { message: 'Product content approved successfully', data: product };
+    return {
+      message: 'Product content approved successfully',
+      data: await this.toAdminProductResponse(id),
+    };
   }
 
   async rejectContentReview(
@@ -881,7 +1098,7 @@ export class ProductsService {
       throw new BadRequestException('Product has no pending content review');
     }
 
-    const product = await this.productsRepository.update(id, {
+    await this.productsRepository.update(id, {
       pendingContent: Prisma.DbNull,
       pendingContentReview: false,
       rejectionNote: dto.rejectionNote,
@@ -896,7 +1113,10 @@ export class ProductsService {
       metadata: { reason: dto.rejectionNote },
     });
 
-    return { message: 'Product content rejected successfully', data: product };
+    return {
+      message: 'Product content rejected successfully',
+      data: await this.toAdminProductResponse(id),
+    };
   }
 
   private async getVendorId(vendorProfileId: string) {
@@ -971,14 +1191,17 @@ export class ProductsService {
   }
 
   private async validateProductCanGoLive(productId: string) {
-    const [activeVariants, defaultVariants, galleryImages] = await Promise.all([
-      this.productsRepository.countActiveVariants(productId),
-      this.productsRepository.countActiveDefaultVariants(productId),
-      this.mediaService.countReadyGalleryLinks(
-        MediaEntityType.PRODUCT,
-        productId,
-      ),
-    ]);
+    const [activeVariants, defaultVariants, thumbnailCount] = await Promise.all(
+      [
+        this.productsRepository.countActiveVariants(productId),
+        this.productsRepository.countActiveDefaultVariants(productId),
+        this.mediaService.countContextLinks(
+          MediaEntityType.PRODUCT,
+          productId,
+          MediaContext.THUMBNAIL,
+        ),
+      ],
+    );
 
     if (activeVariants === 0) {
       throw new BadRequestException(
@@ -992,10 +1215,8 @@ export class ProductsService {
       );
     }
 
-    if (galleryImages === 0) {
-      throw new BadRequestException(
-        'Product must have at least one ready gallery image',
-      );
+    if (thumbnailCount === 0) {
+      throw new BadRequestException('Product must have a thumbnail image');
     }
   }
 
@@ -1024,30 +1245,99 @@ export class ProductsService {
   }
 
   private mergePendingContent(
-    existing: PendingProductContent | null,
+    existing: {
+      name: string;
+      description: string;
+      shortDescription: string;
+      categoryId: string;
+      brandId: string | null;
+      tags: string[];
+      metaTitle: string;
+      metaDescription: string;
+      isReturnable: boolean;
+      returnWindowDays: number | null;
+      pendingContent: unknown;
+    },
     dto: UpdateProductDto,
   ): PendingProductContent {
-    const pending: PendingProductContent = { ...(existing ?? {}) };
+    const pending: PendingProductContent = {
+      ...((existing.pendingContent as PendingProductContent | null) ?? {}),
+    };
 
-    if (dto.name !== undefined) pending.name = dto.name;
-    if (dto.description !== undefined) pending.description = dto.description;
+    const setOrClear = <K extends keyof PendingProductContent>(
+      key: K,
+      next: PendingProductContent[K],
+      live: PendingProductContent[K],
+    ) => {
+      if (this.pendingValuesEqual(next, live)) {
+        delete pending[key];
+      } else {
+        pending[key] = next;
+      }
+    };
+
+    if (dto.name !== undefined) {
+      setOrClear('name', dto.name, existing.name);
+    }
+    if (dto.description !== undefined) {
+      setOrClear('description', dto.description, existing.description);
+    }
     if (dto.shortDescription !== undefined) {
-      pending.shortDescription = dto.shortDescription;
+      setOrClear(
+        'shortDescription',
+        dto.shortDescription,
+        existing.shortDescription,
+      );
     }
-    if (dto.categoryId !== undefined) pending.categoryId = dto.categoryId;
-    if (dto.brandId !== undefined) pending.brandId = dto.brandId;
-    if (dto.tags !== undefined) pending.tags = dto.tags;
-    if (dto.metaTitle !== undefined) pending.metaTitle = dto.metaTitle;
+    if (dto.categoryId !== undefined) {
+      setOrClear('categoryId', dto.categoryId, existing.categoryId);
+    }
+    if (dto.brandId !== undefined) {
+      setOrClear('brandId', dto.brandId, existing.brandId);
+    }
+    if (dto.tags !== undefined) {
+      setOrClear('tags', normalizeProductTags(dto.tags), existing.tags);
+    }
+    if (dto.metaTitle !== undefined) {
+      setOrClear('metaTitle', dto.metaTitle, existing.metaTitle);
+    }
     if (dto.metaDescription !== undefined) {
-      pending.metaDescription = dto.metaDescription;
+      setOrClear(
+        'metaDescription',
+        dto.metaDescription,
+        existing.metaDescription,
+      );
     }
-    if (dto.isReturnable !== undefined) pending.isReturnable = dto.isReturnable;
-    if (dto.isReturnable === false) pending.returnWindowDays = null;
-    if (dto.returnWindowDays !== undefined) {
-      pending.returnWindowDays = dto.returnWindowDays;
+    if (dto.isReturnable !== undefined) {
+      setOrClear('isReturnable', dto.isReturnable, existing.isReturnable);
+    }
+    if (dto.isReturnable === false) {
+      setOrClear('returnWindowDays', null, existing.returnWindowDays);
+    } else if (dto.returnWindowDays !== undefined) {
+      setOrClear(
+        'returnWindowDays',
+        dto.returnWindowDays,
+        existing.returnWindowDays,
+      );
     }
 
     return pending;
+  }
+
+  private pendingValuesEqual(
+    left: PendingProductContent[keyof PendingProductContent],
+    right: PendingProductContent[keyof PendingProductContent],
+  ) {
+    if (Array.isArray(left) || Array.isArray(right)) {
+      const leftTags = Array.isArray(left) ? [...left].sort() : [];
+      const rightTags = Array.isArray(right) ? [...right].sort() : [];
+      return (
+        leftTags.length === rightTags.length &&
+        leftTags.every((value, index) => value === rightTags[index])
+      );
+    }
+
+    return left === right;
   }
 
   private isPriceOnlyVariantUpdate(dto: UpdateVariantDto) {
@@ -1199,32 +1489,61 @@ export class ProductsService {
     });
   }
 
-  private async withProductsMedia<T extends { id: string }>(products: T[]) {
-    if (products.length === 0) {
-      return products.map((product) => ({ ...product, media: [] }));
+  private async toVendorProductResponse(
+    vendorProfileId: string,
+    productId: string,
+  ) {
+    const product = await this.verifyProductOwnership(
+      vendorProfileId,
+      productId,
+    );
+    return this.withProductMedia(product);
+  }
+
+  private async toAdminProductResponse(productId: string) {
+    const product = await this.productsRepository.findById(productId);
+    if (!product) {
+      throw new NotFoundException('Product not found');
     }
 
-    const galleries = await this.mediaService.getGalleriesForEntities(
-      MediaEntityType.PRODUCT,
-      products.map((product) => product.id),
-    );
+    return this.withProductMedia(product);
+  }
+
+  private async withProductsMedia<T extends { id: string }>(products: T[]) {
+    if (products.length === 0) {
+      return products.map((product) => ({
+        ...product,
+        media: [],
+        thumbnail: null,
+      }));
+    }
+
+    const productIds = products.map((product) => product.id);
+    const [galleries, thumbnails] = await Promise.all([
+      this.mediaService.getGalleriesForEntities(
+        MediaEntityType.PRODUCT,
+        productIds,
+      ),
+      this.mediaService.getThumbnailsForEntities(productIds),
+    ]);
 
     return products.map((product) => ({
       ...product,
       media: galleries.get(product.id) ?? [],
+      thumbnail: thumbnails.get(product.id) ?? null,
     }));
   }
 
   private async withProductMedia<
     T extends { id: string; variants?: { id: string }[] },
   >(product: T) {
-    const media = await this.mediaService.getEntityGallery(
-      MediaEntityType.PRODUCT,
-      product.id,
-    );
+    const [media, thumbnail] = await Promise.all([
+      this.mediaService.getEntityGallery(MediaEntityType.PRODUCT, product.id),
+      this.mediaService.getEntityThumbnail(MediaEntityType.PRODUCT, product.id),
+    ]);
 
     if (!product.variants) {
-      return { ...product, media };
+      return { ...product, media, thumbnail };
     }
 
     const variantGalleries = await this.mediaService.getGalleriesForEntities(
@@ -1237,6 +1556,6 @@ export class ProductsService {
       media: variantGalleries.get(variant.id) ?? [],
     }));
 
-    return { ...product, media, variants };
+    return { ...product, media, thumbnail, variants };
   }
 }

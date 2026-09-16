@@ -124,6 +124,19 @@ export class CategoriesRepository {
     });
   }
 
+  countAnyChildren(id: string) {
+    return this.prisma.category.count({
+      where: { parentId: id, deletedAt: null },
+    });
+  }
+
+  findAllForVisibility() {
+    return this.prisma.category.findMany({
+      where: { deletedAt: null },
+      select: { id: true, parentId: true, isActive: true },
+    });
+  }
+
   countActiveProducts(id: string) {
     return this.prisma.product.count({
       where: {
@@ -147,21 +160,65 @@ export class CategoriesRepository {
 
   findAllAdmin(skip?: number, take?: number) {
     return this.prisma.category.findMany({
-      where: nonDeletedWhere,
+      where: { parentId: null, ...nonDeletedWhere },
       orderBy: { sortOrder: 'asc' },
       skip,
       take,
       select: {
         ...CATEGORY_SELECT,
-        children: adminChildrenOneLevel,
+        children: adminChildrenTwoLevels,
       },
     });
   }
 
   countAllAdmin() {
     return this.prisma.category.count({
-      where: nonDeletedWhere,
+      where: { parentId: null, ...nonDeletedWhere },
     });
+  }
+
+  findSiblingIds(parentId: string | null) {
+    return this.prisma.category.findMany({
+      where: { parentId, deletedAt: null },
+      select: { id: true },
+    });
+  }
+
+  async findNextSortOrder(parentId: string | null, excludeId?: string) {
+    const result = await this.prisma.category.aggregate({
+      where: {
+        parentId,
+        deletedAt: null,
+        ...(excludeId && { NOT: { id: excludeId } }),
+      },
+      _max: { sortOrder: true },
+    });
+
+    return (result._max.sortOrder ?? -1) + 1;
+  }
+
+  async reorderSiblings(parentId: string | null, orderedIds: string[]) {
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+        await Promise.all(
+          orderedIds.map((id, index) =>
+            tx.category.update({
+              where: { id },
+              data: { sortOrder: index },
+              select: { id: true },
+            }),
+          ),
+        );
+
+        return tx.category.findMany({
+          where: { parentId, deletedAt: null },
+          orderBy: { sortOrder: 'asc' },
+          select: CATEGORY_SELECT,
+        });
+      });
+    } catch (error) {
+      this.handlePrismaError(error);
+    }
   }
 
   findRootsAdmin() {

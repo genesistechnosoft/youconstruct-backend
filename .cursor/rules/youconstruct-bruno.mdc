@@ -1,0 +1,67 @@
+---
+description: Every created or updated HTTP endpoint must be documented in the Bruno collection for the frontend team
+alwaysApply: true
+---
+
+# Bruno is the frontend API contract
+
+Collection: `C:\work\bruno\youconstruct-backend-bruno` (sibling repo, not this workspace).
+
+**Do not ship an endpoint create or change without the matching Bruno request.** Query params, body fields, permissions, response shape, and error cases belong in the `.bru` `docs` block — that is what frontend reads.
+
+## When this applies
+
+- New controller route
+- Changed path, method, DTO, query, response `data`/`meta`, auth, or permission
+- Removed or replaced route — delete or rewrite the `.bru`; do not leave stale docs
+
+Updating only Swagger/`@ApiOperation` is not enough.
+
+## File layout
+
+`{module}/{audience}/{name}.bru` — e.g. `media/vendor/folders/get-folder.bru`
+
+Audience folders: `public`, `customer`, `vendor`, `professional`, `admin`.
+
+Tokens: `{{vendorToken}}`, `{{superAdminToken}}`, `{{customerToken}}`, etc. Capture IDs with `bru.setVar()` (never `bru.setEnvVar()`).
+
+New surface: add a one-line note in `COVERAGE.md`. Do not renumber `full-lifecycle` unless the flow itself changed.
+
+## Required `docs { }` (write for frontend)
+
+Must include:
+
+1. **What it does** — one or two sentences
+2. **Auth** — public vs Bearer; `@Roles`; `@Permissions` keys; active-context if required
+3. **Input** — every query/path/body field: type, required vs optional, enums, defaults, constraints
+4. **Response** — `data` shape (and `meta` if paginated). Name fields; note `null` vs omit
+5. **Errors** — status + when (400/403/404/409)
+6. **How to call** — example query or JSON; which prior request sets path vars
+
+Match existing request style (url, auth, `params:query` / `body:json`, tests). Docs must stay in sync when the API changes — a one-line summary is not enough.
+
+```
+docs {
+  GET /vendor/media/folders/:id — files in this folder + immediate child folders.
+
+  Auth: Bearer vendorToken. Roles: VENDOR. Permission: media:upload. Active vendor context.
+
+  Path: id (UUID) — 404 if missing, deleted, or not owned.
+  Query (optional):
+    page (int, default 1), limit (int, default 20, max 100)
+    search (string) — case-insensitive on fileName + originalName; media only
+    fileType — IMAGE | VIDEO | DOCUMENT
+    sortBy — createdAt | fileName | sizeBytes (default createdAt)
+    sortOrder — asc | desc (default desc)
+  Pagination applies to media only. Child folders are not paginated (name asc).
+
+  data.folder: { id, name, parentId }
+  data.folders: [{ id, name, parentId, mediaCount, childCount, createdAt }]
+  data.media: library item + originalUrl/optimizedUrl/thumbnailUrl + uploader {id,name} + folder {id,name}|null
+  meta: { page, limit, total, totalPages } — total is media in this folder.
+
+  Errors: 404 folder not found; 403 not an approved vendor context.
+
+  UI sort presets: Recently added = createdAt desc; Name = fileName asc; Largest first = sizeBytes desc.
+}
+```

@@ -37,7 +37,13 @@ async function bootstrap() {
   const swaggerEnabled = config.get<string>('SWAGGER_ENABLED') === 'true';
   const corsOrigins = config.get<string>('CORS_ORIGINS');
 
-  app.use(helmet());
+  app.use(
+    helmet({
+      crossOriginResourcePolicy: {
+        policy: 'cross-origin',
+      },
+    }),
+  );
   app.use('/uploads', express.static(join(process.cwd(), 'uploads')));
   app.setGlobalPrefix(apiPrefix);
   app.enableCors({

@@ -35,7 +35,10 @@ export class CreateCategoryDto {
   @IsBoolean()
   isActive?: boolean;
 
-  @ApiPropertyOptional({ example: 0, default: 0 })
+  @ApiPropertyOptional({
+    example: 3,
+    description: 'Omit to append after existing siblings',
+  })
   @IsOptional()
   @IsInt()
   @Min(0)

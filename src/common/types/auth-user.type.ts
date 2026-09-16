@@ -9,6 +9,7 @@ export type ActiveContext = {
   customRoleId: string;
   roleName?: string;
   isOwner?: boolean;
+  isSuspended?: boolean;
 };
 
 export type AuthSessionContext = {
@@ -17,6 +18,7 @@ export type AuthSessionContext = {
   customRoleId: string;
   roleName: string;
   isOwner: boolean;
+  isSuspended: boolean;
 };
 
 export type AuthSession = {
@@ -32,6 +34,7 @@ export type AuthSession = {
   flags: {
     needsOnboarding: boolean;
     isImpersonating: boolean;
+    accessRevoked: boolean;
   };
 };
 
@@ -39,6 +42,8 @@ export type AuthenticatedUser = {
   userId: string;
   platformRole: PlatformRole;
   activeContext?: ActiveContext;
+  /** Held a team membership that has since been removed. */
+  accessRevoked?: boolean;
   impersonatedBy?: string;
   isImpersonation?: boolean;
 };

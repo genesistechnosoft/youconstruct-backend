@@ -6,6 +6,7 @@ import {
 import {
   PreferredPaymentMethod,
   Prisma,
+  ProductStatus,
   ShippingMethodType,
   ShippingUnitType,
   VendorPlan,
@@ -214,7 +215,13 @@ export class VendorStoreRepository {
 
   countVendorProducts(vendorId: string) {
     return this.prisma.product.count({
-      where: { vendorId, deletedAt: null },
+      where: {
+        vendorId,
+        deletedAt: null,
+        status: {
+          in: [ProductStatus.ACTIVE, ProductStatus.PENDING_APPROVAL],
+        },
+      },
     });
   }
 

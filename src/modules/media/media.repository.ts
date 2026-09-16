@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
   NotFoundException,
@@ -14,8 +15,12 @@ import {
 } from '../../../generated/prisma/client.js';
 import { paginate } from '../../common/utils/pagination.util';
 import { PrismaService } from '../../prisma/prisma.service';
+import {
+  FolderContentsQueryDto,
+  MediaSortBy,
+  MediaSortOrder,
+} from './dto/folder-contents-query.dto';
 import { MediaFiltersDto } from './dto/media-filters.dto';
-import { ReorderMediaLinkItemDto } from './dto/reorder-media-links.dto';
 
 export const MEDIA_SELECT = {
   id: true,
@@ -63,6 +68,16 @@ export const MEDIA_FOLDER_SELECT = {
   parentId: true,
   createdAt: true,
   updatedAt: true,
+} as const;
+
+export const FOLDER_BROWSE_MEDIA_SELECT = {
+  ...MEDIA_SELECT,
+  uploader: {
+    select: { id: true, name: true },
+  },
+  folder: {
+    select: { id: true, name: true },
+  },
 } as const;
 
 @Injectable()
@@ -116,6 +131,82 @@ export class MediaRepository {
         take,
         orderBy: { createdAt: Prisma.SortOrder.desc },
         select: MEDIA_SELECT,
+      }),
+      this.prisma.media.count({ where }),
+    ]);
+
+    return { items, total };
+  }
+
+  async getLibraryStats(ownerType: MediaOwnerType, ownerId: string) {
+    const libraryWhere: Prisma.MediaWhereInput = {
+      ownerType,
+      ownerId,
+      deletedAt: null,
+      accessLevel: {
+        in: [MediaAccessLevel.PUBLIC, MediaAccessLevel.SIGNED],
+      },
+      kycDocuments: { none: {} },
+    };
+
+    const [byType, folders] = await Promise.all([
+      this.prisma.media.groupBy({
+        by: ['fileType'],
+        where: libraryWhere,
+        _count: { _all: true },
+        _sum: { sizeBytes: true },
+      }),
+      this.prisma.mediaFolder.count({
+        where: { ownerType, ownerId, deletedAt: null },
+      }),
+    ]);
+
+    return { byType, folders };
+  }
+
+  async findFolderMedia(
+    ownerType: MediaOwnerType,
+    ownerId: string,
+    folderId: string | null,
+    query: FolderContentsQueryDto,
+  ) {
+    const { skip, take } = paginate(query.page, query.limit);
+    const search = query.search?.trim();
+    const sortOrder =
+      query.sortOrder === MediaSortOrder.ASC
+        ? Prisma.SortOrder.asc
+        : Prisma.SortOrder.desc;
+    const sortField =
+      query.sortBy === MediaSortBy.FILE_NAME
+        ? 'fileName'
+        : query.sortBy === MediaSortBy.SIZE_BYTES
+          ? 'sizeBytes'
+          : 'createdAt';
+    const where: Prisma.MediaWhereInput = {
+      ownerType,
+      ownerId,
+      deletedAt: null,
+      folderId,
+      accessLevel: {
+        in: [MediaAccessLevel.PUBLIC, MediaAccessLevel.SIGNED],
+      },
+      kycDocuments: { none: {} },
+      ...(query.fileType && { fileType: query.fileType }),
+      ...(search && {
+        OR: [
+          { fileName: { contains: search, mode: 'insensitive' } },
+          { originalName: { contains: search, mode: 'insensitive' } },
+        ],
+      }),
+    };
+
+    const [items, total] = await this.prisma.$transaction([
+      this.prisma.media.findMany({
+        where,
+        skip,
+        take,
+        orderBy: { [sortField]: sortOrder },
+        select: FOLDER_BROWSE_MEDIA_SELECT,
       }),
       this.prisma.media.count({ where }),
     ]);
@@ -217,6 +308,35 @@ export class MediaRepository {
       ],
       select: MEDIA_FOLDER_SELECT,
     });
+  }
+
+  async listChildFolders(
+    ownerType: MediaOwnerType,
+    ownerId: string,
+    parentId: string | null,
+  ) {
+    const folders = await this.prisma.mediaFolder.findMany({
+      where: { ownerType, ownerId, parentId, deletedAt: null },
+      orderBy: { name: Prisma.SortOrder.asc },
+      select: {
+        ...MEDIA_FOLDER_SELECT,
+        _count: {
+          select: {
+            media: { where: { deletedAt: null } },
+            children: { where: { deletedAt: null } },
+          },
+        },
+      },
+    });
+
+    return folders.map((folder) => ({
+      id: folder.id,
+      name: folder.name,
+      parentId: folder.parentId,
+      mediaCount: folder._count.media,
+      childCount: folder._count.children,
+      createdAt: folder.createdAt,
+    }));
   }
 
   findFolderByOwner(id: string, ownerType: MediaOwnerType, ownerId: string) {
@@ -415,6 +535,7 @@ export class MediaRepository {
     entityType: MediaEntityType,
     entityIds: string[],
     context?: MediaContext,
+    readyOnly = true,
   ) {
     if (entityIds.length === 0) {
       return Promise.resolve([]);
@@ -428,7 +549,9 @@ export class MediaRepository {
         ...(context && { context }),
         media: {
           deletedAt: null,
-          processingStatus: MediaProcessingStatus.READY,
+          ...(readyOnly && {
+            processingStatus: MediaProcessingStatus.READY,
+          }),
         },
       },
       orderBy: [
@@ -439,17 +562,18 @@ export class MediaRepository {
     });
   }
 
-  countReadyLinks(entityType: MediaEntityType, entityId: string) {
+  countContextLinks(
+    entityType: MediaEntityType,
+    entityId: string,
+    context: MediaContext,
+  ) {
     return this.prisma.mediaLink.count({
       where: {
         entityType,
         entityId,
-        context: MediaContext.GALLERY,
+        context,
         deletedAt: null,
-        media: {
-          deletedAt: null,
-          processingStatus: MediaProcessingStatus.READY,
-        },
+        media: { deletedAt: null },
       },
     });
   }
@@ -460,10 +584,16 @@ export class MediaRepository {
     entityId: string,
     context: MediaContext,
   ) {
-    return this.prisma.mediaLink.updateMany({
+    const result = await this.prisma.mediaLink.updateMany({
       where: { mediaId, entityType, entityId, context, deletedAt: null },
       data: { deletedAt: new Date(), isPrimary: false },
     });
+
+    if (result.count === 0) {
+      throw new NotFoundException('Media link not found');
+    }
+
+    return result;
   }
 
   async softDeleteLinksByContext(
@@ -516,37 +646,63 @@ export class MediaRepository {
   async reorderLinks(
     entityType: MediaEntityType,
     entityId: string,
-    items: ReorderMediaLinkItemDto[],
+    mediaIds: string[],
+    context: MediaContext,
   ) {
     try {
       return await this.prisma.$transaction(async (tx) => {
-        const linkIds = items.map((item) => item.mediaLinkId);
+        const uniqueIds = [...new Set(mediaIds)];
+        if (uniqueIds.length !== mediaIds.length) {
+          throw new BadRequestException('Duplicate media IDs are not allowed');
+        }
+
+        const galleryCount = await tx.mediaLink.count({
+          where: { entityType, entityId, context, deletedAt: null },
+        });
+        if (galleryCount !== mediaIds.length) {
+          throw new BadRequestException(
+            'Reorder must include every gallery media ID exactly once',
+          );
+        }
+
         const existing = await tx.mediaLink.findMany({
           where: {
-            id: { in: linkIds },
+            mediaId: { in: mediaIds },
             entityType,
             entityId,
+            context,
             deletedAt: null,
           },
-          select: { id: true },
+          select: { id: true, mediaId: true },
         });
 
-        if (existing.length !== linkIds.length) {
+        if (existing.length !== mediaIds.length) {
           throw new NotFoundException('One or more media links were not found');
         }
 
+        const linkByMediaId = new Map(
+          existing.map((link) => [link.mediaId, link.id]),
+        );
+
         await Promise.all(
-          items.map((item) =>
-            tx.mediaLink.update({
-              where: { id: item.mediaLinkId },
-              data: { sortOrder: item.sortOrder },
+          mediaIds.map((mediaId, index) => {
+            const linkId = linkByMediaId.get(mediaId);
+            if (!linkId) {
+              throw new NotFoundException(
+                'One or more media links were not found',
+              );
+            }
+
+            return tx.mediaLink.update({
+              where: { id: linkId },
+              data: { sortOrder: index, isPrimary: index === 0 },
               select: { id: true },
-            }),
-          ),
+            });
+          }),
         );
 
         return tx.mediaLink.findMany({
-          where: { entityType, entityId, deletedAt: null },
+          where: { entityType, entityId, context, deletedAt: null },
           orderBy: { sortOrder: Prisma.SortOrder.asc },
           select: MEDIA_LINK_SELECT,
         });

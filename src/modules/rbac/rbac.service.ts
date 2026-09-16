@@ -3,15 +3,18 @@ import {
   ConflictException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import * as bcrypt from 'bcrypt';
 import { createHash, randomBytes } from 'node:crypto';
 import {
   InvitationStatus,
   PermissionScope,
   PlatformRole,
+  RoleKind,
   TeamMemberStatus,
 } from '../../../generated/prisma/client.js';
 import type {
@@ -19,15 +22,29 @@ import type {
   AuthSession,
   AuthenticatedUser,
 } from '../../common/types/auth-user.type';
-import { OWNER_ROLE_NAME } from './permissions.constants';
+import { paginate, paginationMeta } from '../../common/utils/pagination.util';
+import {
+  ListInvitationsDto,
+  ListTeamMembersDto,
+  TeamMemberSortBy,
+} from './dto/list-team-query.dto';
+import { OWNER_ROLE_NAME, PERMISSIONS } from './permissions.constants';
 import { RbacRepository } from './rbac.repository';
 import { SecurityAuditService } from './security-audit.service';
 
+export type StaffPlatformRole =
+  | typeof PlatformRole.ADMIN
+  | typeof PlatformRole.VENDOR
+  | typeof PlatformRole.PROFESSIONAL;
+
 @Injectable()
 export class RbacService {
+  private readonly logger = new Logger(RbacService.name);
+
   constructor(
     private readonly rbacRepository: RbacRepository,
     private readonly securityAudit: SecurityAuditService,
+    private readonly config: ConfigService,
   ) {}
 
   async buildAuthSession(
@@ -39,10 +56,8 @@ export class RbacService {
       throw new UnauthorizedException('Invalid token');
     }
 
-    const activeContext = await this.resolveRequestContext(
-      user.id,
-      user.platformRole,
-    );
+    const { context: activeContext, accessRevoked } =
+      await this.resolveMembershipState(user.id, user.platformRole);
 
     const sessionContext = activeContext
       ? {
@@ -51,18 +66,21 @@ export class RbacService {
           customRoleId: activeContext.customRoleId,
           roleName: activeContext.roleName ?? '',
           isOwner: activeContext.isOwner ?? false,
+          isSuspended: activeContext.isSuspended ?? false,
         }
       : null;
 
-    const permissions = await this.resolveSessionPermissions(
-      user.platformRole,
-      sessionContext,
-    );
+    const permissions = sessionContext?.isSuspended
+      ? []
+      : await this.resolveSessionPermissions(user.platformRole, sessionContext);
 
+    // Ex-staff keep their platformRole, so history is what separates them from
+    // an owner who has not onboarded yet.
     const needsOnboarding =
       (user.platformRole === PlatformRole.VENDOR ||
         user.platformRole === PlatformRole.PROFESSIONAL) &&
-      sessionContext === null;
+      sessionContext === null &&
+      !accessRevoked;
 
     return {
       user: {
@@ -77,6 +95,7 @@ export class RbacService {
       flags: {
         needsOnboarding,
         isImpersonating: opts?.isImpersonating ?? false,
+        accessRevoked,
       },
     };
   }
@@ -124,32 +143,47 @@ export class RbacService {
     userId: string,
     platformRole: PlatformRole,
   ): Promise<ActiveContext | undefined> {
+    const { context } = await this.resolveMembershipState(userId, platformRole);
+    return context;
+  }
+
+  async resolveMembershipState(
+    userId: string,
+    platformRole: PlatformRole,
+  ): Promise<{ context?: ActiveContext; accessRevoked: boolean }> {
     if (
       platformRole === PlatformRole.SUPER_ADMIN ||
       platformRole === PlatformRole.CUSTOMER
     ) {
-      return undefined;
+      return { accessRevoked: false };
     }
 
-    const memberships = await this.rbacRepository.findActiveMemberships(userId);
+    const memberships =
+      await this.rbacRepository.findMembershipsForContext(userId);
+
     if (memberships.length > 1) {
-      throw new UnauthorizedException('Invalid account membership state');
+      // team_members_user_one_active_unique should make this impossible.
+      this.logger.error(
+        `User ${userId} has ${memberships.length} live memberships; using the oldest`,
+      );
     }
 
     const membership = memberships[0];
     if (!membership) {
-      return undefined;
+      const history = await this.rbacRepository.countMembershipHistory(userId);
+      return { accessRevoked: history > 0 };
     }
 
     return {
-      type: membership.scope,
-      entityId: membership.scopeEntityId,
-      customRoleId: membership.customRoleId,
-      roleName: membership.customRole.name,
-      isOwner:
-        membership.customRole.isSystem &&
-        membership.customRole.name === OWNER_ROLE_NAME &&
-        membership.scope !== PermissionScope.ADMIN,
+      context: {
+        type: membership.scope,
+        entityId: membership.scopeEntityId,
+        customRoleId: membership.customRoleId,
+        roleName: membership.customRole.name,
+        isOwner: membership.customRole.kind === RoleKind.OWNER,
+        isSuspended: membership.status === TeamMemberStatus.SUSPENDED,
+      },
+      accessRevoked: false,
     };
   }
 
@@ -167,6 +201,24 @@ export class RbacService {
     return Boolean(membership);
   }
 
+  /** Guards the owner bypass: every required key must exist in the owner's scope. */
+  async scopeDefinesAllPermissions(
+    scope: PermissionScope,
+    requiredKeys: string[],
+  ): Promise<boolean> {
+    if (requiredKeys.length === 0) {
+      return true;
+    }
+
+    const uniqueKeys = [...new Set(requiredKeys)];
+    const rows = await this.rbacRepository.findPermissionsByKeys(
+      scope,
+      uniqueKeys,
+    );
+
+    return rows.length === uniqueKeys.length;
+  }
+
   async hasPermissions(
     customRoleId: string,
     requiredKeys: string[],
@@ -180,11 +232,7 @@ export class RbacService {
       return false;
     }
 
-    if (
-      role.isSystem &&
-      role.name === OWNER_ROLE_NAME &&
-      role.scope !== PermissionScope.ADMIN
-    ) {
+    if (role.kind === RoleKind.OWNER) {
       return true;
     }
 
@@ -196,14 +244,16 @@ export class RbacService {
   }
 
   toContextResponse(
-    memberships: Awaited<ReturnType<RbacRepository['findActiveMemberships']>>,
+    memberships: Awaited<
+      ReturnType<RbacRepository['findMembershipsForContext']>
+    >,
   ) {
     return memberships.map((m) => ({
       type: m.scope,
       entityId: m.scopeEntityId,
       customRoleId: m.customRoleId,
       roleName: m.customRole.name,
-      isSystem: m.customRole.isSystem,
+      kind: m.customRole.kind,
     }));
   }
 
@@ -253,8 +303,7 @@ export class RbacService {
     }
 
     if (
-      (user.platformRole === PlatformRole.ADMIN ||
-        user.platformRole === PlatformRole.SUPPORT) &&
+      user.platformRole === PlatformRole.ADMIN &&
       scope !== PermissionScope.ADMIN
     ) {
       throw new ForbiddenException(
@@ -262,40 +311,25 @@ export class RbacService {
       );
     }
 
-    if (
-      user.platformRole === PlatformRole.VENDOR ||
-      user.platformRole === PlatformRole.PROFESSIONAL
-    ) {
-      if (!user.activeContext?.customRoleId) {
-        throw new ForbiddenException('Active context required');
-      }
-      const allowed = await this.hasPermissions(
-        user.activeContext.customRoleId,
-        [
-          user.platformRole === PlatformRole.VENDOR
-            ? 'roles:manage'
-            : 'roles:manage',
-        ],
-      );
-      if (!allowed && !user.activeContext.isOwner) {
-        throw new ForbiddenException('roles:manage permission required');
-      }
+    if (!user.activeContext?.customRoleId) {
+      throw new ForbiddenException(`Active ${scope} context required`);
     }
 
-    if (
-      user.platformRole === PlatformRole.ADMIN ||
-      user.platformRole === PlatformRole.SUPPORT
-    ) {
-      if (!user.activeContext?.customRoleId) {
-        throw new ForbiddenException('Active ADMIN context required');
-      }
-      const allowed = await this.hasPermissions(
-        user.activeContext.customRoleId,
-        ['roles:manage'],
-      );
-      if (!allowed) {
-        throw new ForbiddenException('roles:manage permission required');
-      }
+    const rolesManage =
+      scope === PermissionScope.ADMIN
+        ? PERMISSIONS.ADMIN.ROLES_MANAGE
+        : scope === PermissionScope.VENDOR
+          ? PERMISSIONS.VENDOR.ROLES_MANAGE
+          : PERMISSIONS.PROFESSIONAL.ROLES_MANAGE;
+
+    const allowed =
+      user.activeContext.isOwner ||
+      (await this.hasPermissions(user.activeContext.customRoleId, [
+        rolesManage,
+      ]));
+
+    if (!allowed) {
+      throw new ForbiddenException(`${rolesManage} permission required`);
     }
 
     const result = await this.listPermissions(scope);
@@ -341,6 +375,11 @@ export class RbacService {
     scope: PermissionScope,
     dto: { name: string; permissionKeys: string[] },
   ) {
+    if (dto.name.trim().toLowerCase() === OWNER_ROLE_NAME.toLowerCase()) {
+      throw new BadRequestException(
+        `Role name "${OWNER_ROLE_NAME}" is reserved`,
+      );
+    }
     const scopeEntityId = this.requireScopeEntity(user, scope);
     const permissionIds = await this.resolveAssignablePermissionIds(
       user,
@@ -348,19 +387,15 @@ export class RbacService {
       dto.permissionKeys,
     );
 
-    try {
-      const role = await this.rbacRepository.createCustomRole({
-        name: dto.name,
-        scope,
-        scopeEntityId,
-        createdById: user.userId,
-        permissionIds,
-      });
+    const role = await this.rbacRepository.createCustomRole({
+      name: dto.name,
+      scope,
+      scopeEntityId,
+      createdById: user.userId,
+      permissionIds,
+    });
 
-      return { message: 'Role created successfully', data: role };
-    } catch {
-      throw new ConflictException('A role with this name already exists');
-    }
+    return { message: 'Role created successfully', data: role };
   }
 
   async updateRole(
@@ -375,8 +410,17 @@ export class RbacService {
       throw new NotFoundException('Role not found');
     }
 
-    if (role.isSystem) {
-      throw new ForbiddenException('System roles cannot be edited');
+    if (role.kind === RoleKind.OWNER) {
+      throw new ForbiddenException('The Owner role cannot be edited');
+    }
+
+    if (
+      dto.name &&
+      dto.name.trim().toLowerCase() === OWNER_ROLE_NAME.toLowerCase()
+    ) {
+      throw new BadRequestException(
+        `Role name "${OWNER_ROLE_NAME}" is reserved`,
+      );
     }
 
     if (dto.permissionKeys) {
@@ -406,15 +450,12 @@ export class RbacService {
       throw new NotFoundException('Role not found');
     }
 
-    if (role.isSystem) {
-      throw new ForbiddenException('System roles cannot be deleted');
+    if (role.kind === RoleKind.OWNER) {
+      throw new ForbiddenException('The Owner role cannot be deleted');
     }
 
-    const members = await this.rbacRepository.findTeamMembers(
-      scope,
-      scopeEntityId,
-    );
-    if (members.some((m) => m.customRoleId === roleId)) {
+    const memberCount = await this.rbacRepository.countMembersForRole(roleId);
+    if (memberCount > 0) {
       throw new BadRequestException(
         'Remove or reassign team members before deleting this role',
       );
@@ -424,13 +465,42 @@ export class RbacService {
     return { message: 'Role deleted successfully', data: null };
   }
 
-  async listMembers(user: AuthenticatedUser, scope: PermissionScope) {
+  async listMembers(
+    user: AuthenticatedUser,
+    scope: PermissionScope,
+    query: ListTeamMembersDto,
+  ) {
     const scopeEntityId = this.requireScopeEntity(user, scope);
-    const data = await this.rbacRepository.findTeamMembers(
-      scope,
-      scopeEntityId,
-    );
-    return { message: 'Team members fetched successfully', data };
+    const page = query.page ?? 1;
+    const limit = query.limit ?? 20;
+    const { skip, take } = paginate(page, limit);
+
+    const orderBy =
+      query.sortBy === TeamMemberSortBy.NAME
+        ? { user: { name: query.sortOrder } }
+        : { createdAt: query.sortOrder };
+
+    const [data, total] = await Promise.all([
+      this.rbacRepository.findTeamMembers({
+        scope,
+        scopeEntityId,
+        status: query.status,
+        orderBy,
+        skip,
+        take,
+      }),
+      this.rbacRepository.countTeamMembers({
+        scope,
+        scopeEntityId,
+        status: query.status,
+      }),
+    ]);
+
+    return {
+      message: 'Team members fetched successfully',
+      data,
+      meta: paginationMeta(page, limit, total),
+    };
   }
 
   async updateMember(
@@ -449,7 +519,7 @@ export class RbacService {
       throw new NotFoundException('Team member not found');
     }
 
-    if (member.customRole.isSystem) {
+    if (member.customRole.kind === RoleKind.OWNER) {
       if (dto.customRoleId) {
         throw new ForbiddenException('Cannot change the Owner membership role');
       }
@@ -459,6 +529,18 @@ export class RbacService {
       }
     }
 
+    if (member.userId === user.userId) {
+      throw new ForbiddenException('You cannot manage your own membership');
+    }
+
+    const currentRole = await this.rbacRepository.findCustomRoleById(
+      member.customRoleId,
+    );
+    if (!currentRole) {
+      throw new ForbiddenException('Current member role not found');
+    }
+    await this.assertRoleAssignable(user, currentRole);
+
     if (dto.customRoleId) {
       const role = await this.rbacRepository.findCustomRoleById(
         dto.customRoleId,
@@ -467,21 +549,19 @@ export class RbacService {
         !role ||
         role.scope !== scope ||
         role.scopeEntityId !== scopeEntityId ||
-        role.isSystem
+        role.kind === RoleKind.OWNER
       ) {
         throw new BadRequestException('Invalid custom role for this context');
       }
-      await this.rbacRepository.updateTeamMemberRole(
-        memberId,
-        dto.customRoleId,
-      );
+
+      await this.assertRoleAssignable(user, role);
     }
 
-    if (dto.status) {
-      await this.rbacRepository.updateTeamMemberStatus(memberId, dto.status);
-    }
+    const updated = await this.rbacRepository.updateTeamMember(memberId, {
+      customRoleId: dto.customRoleId,
+      status: dto.status,
+    });
 
-    const updated = await this.rbacRepository.findTeamMemberById(memberId);
     return { message: 'Team member updated successfully', data: updated };
   }
 
@@ -500,9 +580,21 @@ export class RbacService {
       throw new NotFoundException('Team member not found');
     }
 
-    if (member.customRole.isSystem) {
+    if (member.customRole.kind === RoleKind.OWNER) {
       throw new ForbiddenException('Cannot remove the Owner from the team');
     }
+
+    if (member.userId === user.userId) {
+      throw new ForbiddenException('You cannot manage your own membership');
+    }
+
+    const currentRole = await this.rbacRepository.findCustomRoleById(
+      member.customRoleId,
+    );
+    if (!currentRole) {
+      throw new ForbiddenException('Current member role not found');
+    }
+    await this.assertRoleAssignable(user, currentRole);
 
     await this.rbacRepository.softDeleteTeamMember(memberId);
     return { message: 'Team member removed successfully', data: null };
@@ -511,50 +603,69 @@ export class RbacService {
   async createInvitation(
     user: AuthenticatedUser,
     scope: PermissionScope,
-    dto: { email: string; customRoleId: string },
+    dto: {
+      email: string;
+      customRoleId: string;
+    },
   ) {
     const scopeEntityId = this.requireScopeEntity(user, scope);
+    const platformRole = this.resolveInvitationLane(scope);
+
     const role = await this.rbacRepository.findCustomRoleById(dto.customRoleId);
     if (
       !role ||
       role.scope !== scope ||
       role.scopeEntityId !== scopeEntityId ||
-      role.isSystem
+      role.kind === RoleKind.OWNER
     ) {
       throw new BadRequestException('Invalid custom role for invitation');
     }
 
-    const email = dto.email.toLowerCase();
-    const existingUser = await this.rbacRepository.findUserByEmail(email);
-    const platformRole = this.platformRoleForScope(scope);
-    if (existingUser && existingUser.platformRole !== platformRole) {
-      throw new ConflictException(
-        'Email already belongs to a different account lane.',
-      );
-    }
+    await this.assertRoleAssignable(user, role);
 
+    const email = dto.email.trim().toLowerCase();
+    const existingUser = await this.rbacRepository.findUserByEmail(email);
     if (existingUser) {
-      const membershipCount = await this.rbacRepository.countActiveMemberships(
-        existingUser.id,
-      );
-      if (membershipCount > 0) {
+      if (
+        existingUser.platformRole === PlatformRole.CUSTOMER ||
+        existingUser.platformRole === PlatformRole.SUPER_ADMIN
+      ) {
         throw new ConflictException(
-          'Email already has an active team membership.',
+          'This email belongs to a customer or super-admin account and cannot be invited as staff.',
         );
       }
+      if (!existingUser.isActive) {
+        throw new ConflictException('This account is deactivated.');
+      }
+      // Block if they already hold a live membership (active or suspended).
+      // A different-lane staff user with no live membership is allowed — they switch lane on accept.
+      await this.assertMembershipSlotFree(existingUser.id);
+    }
+
+    const now = new Date();
+    const pending = await this.rbacRepository.findPendingInvitationForEmail(
+      email,
+      scope,
+      scopeEntityId,
+      now,
+    );
+    if (pending) {
+      throw new ConflictException(
+        'A pending invitation already exists for this email.',
+      );
     }
 
     const token = randomBytes(32).toString('hex');
-    const tokenHash = this.hashToken(token);
     const invitation = await this.rbacRepository.createInvitation({
       email,
-      tokenHash,
+      tokenHash: this.hashToken(token),
       customRoleId: dto.customRoleId,
       scope,
       scopeEntityId,
       invitedById: user.userId,
       platformRole,
-      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+      expiresAt: this.invitationExpiry(now),
+      now,
     });
 
     this.securityAudit.log({
@@ -564,23 +675,57 @@ export class RbacService {
       targetId: invitation.id,
       action: 'INVITATION_CREATED',
       result: 'SUCCESS',
-      metadata: { email, scope, scopeEntityId },
+      metadata: { email, scope, scopeEntityId, platformRole },
     });
 
-    // TODO: send invitation email with token
     return {
       message: 'Invitation created successfully',
       data: { ...invitation, token },
     };
   }
 
-  async listInvitations(user: AuthenticatedUser, scope: PermissionScope) {
+  async listInvitations(
+    user: AuthenticatedUser,
+    scope: PermissionScope,
+    query: ListInvitationsDto,
+  ) {
     const scopeEntityId = this.requireScopeEntity(user, scope);
-    const data = await this.rbacRepository.findInvitations(
-      scope,
-      scopeEntityId,
-    );
-    return { message: 'Invitations fetched successfully', data };
+    const page = query.page ?? 1;
+    const limit = query.limit ?? 20;
+    const { skip, take } = paginate(page, limit);
+    const now = new Date();
+
+    const [rows, total] = await Promise.all([
+      this.rbacRepository.findInvitations({
+        scope,
+        scopeEntityId,
+        status: query.status,
+        now,
+        orderBy: { [query.sortBy]: query.sortOrder },
+        skip,
+        take,
+      }),
+      this.rbacRepository.countInvitations({
+        scope,
+        scopeEntityId,
+        status: query.status,
+        now,
+      }),
+    ]);
+
+    const data = rows.map((row) => ({
+      ...row,
+      status:
+        row.status === InvitationStatus.PENDING && row.expiresAt <= now
+          ? InvitationStatus.EXPIRED
+          : row.status,
+    }));
+
+    return {
+      message: 'Invitations fetched successfully',
+      data,
+      meta: paginationMeta(page, limit, total),
+    };
   }
 
   async revokeInvitation(
@@ -589,11 +734,11 @@ export class RbacService {
     invitationId: string,
   ) {
     const scopeEntityId = this.requireScopeEntity(user, scope);
-    const invitations = await this.rbacRepository.findInvitations(
+    const invitation = await this.rbacRepository.findInvitationById(
+      invitationId,
       scope,
       scopeEntityId,
     );
-    const invitation = invitations.find((i) => i.id === invitationId);
     if (!invitation) {
       throw new NotFoundException('Invitation not found');
     }
@@ -602,21 +747,157 @@ export class RbacService {
       throw new BadRequestException('Only pending invitations can be revoked');
     }
 
-    await this.rbacRepository.updateInvitationStatus(
+    const now = new Date();
+    if (invitation.expiresAt <= now) {
+      const expired = await this.rbacRepository.expirePendingInvitation(
+        invitationId,
+        scope,
+        scopeEntityId,
+        now,
+      );
+      if (expired.count !== 1) {
+        throw new ConflictException('Invitation is no longer pending');
+      }
+      throw new BadRequestException('Invitation has expired');
+    }
+
+    const revoked = await this.rbacRepository.revokePendingInvitation(
       invitationId,
-      InvitationStatus.REVOKED,
+      scope,
+      scopeEntityId,
+      now,
+      invitation.updatedAt,
     );
+    if (revoked.count !== 1) {
+      throw new ConflictException('Invitation is no longer pending');
+    }
+
+    this.securityAudit.log({
+      actorUserId: user.userId,
+      actorRole: user.platformRole,
+      targetType: 'INVITATION',
+      targetId: invitationId,
+      action: 'INVITATION_REVOKED',
+      result: 'SUCCESS',
+      metadata: { email: invitation.email, scope, scopeEntityId },
+    });
+
     return { message: 'Invitation revoked successfully', data: null };
   }
 
+  async resendInvitation(
+    user: AuthenticatedUser,
+    scope: PermissionScope,
+    invitationId: string,
+  ) {
+    const scopeEntityId = this.requireScopeEntity(user, scope);
+    const invitation = await this.rbacRepository.findInvitationById(
+      invitationId,
+      scope,
+      scopeEntityId,
+    );
+    if (!invitation) {
+      throw new NotFoundException('Invitation not found');
+    }
+
+    if (invitation.status !== InvitationStatus.PENDING) {
+      throw new BadRequestException('Only pending invitations can be resent');
+    }
+
+    const now = new Date();
+    if (invitation.expiresAt <= now) {
+      const expired = await this.rbacRepository.expirePendingInvitation(
+        invitationId,
+        scope,
+        scopeEntityId,
+        now,
+      );
+      if (expired.count !== 1) {
+        throw new ConflictException('Invitation is no longer pending');
+      }
+      throw new BadRequestException('Invitation has expired');
+    }
+
+    const token = randomBytes(32).toString('hex');
+    const updated = await this.rbacRepository.rotatePendingInvitationToken({
+      id: invitationId,
+      scope,
+      scopeEntityId,
+      tokenHash: this.hashToken(token),
+      expiresAt: this.invitationExpiry(now),
+      now,
+      expectedUpdatedAt: invitation.updatedAt,
+    });
+    if (!updated) {
+      throw new ConflictException('Invitation is no longer pending');
+    }
+
+    this.securityAudit.log({
+      actorUserId: user.userId,
+      actorRole: user.platformRole,
+      targetType: 'INVITATION',
+      targetId: invitationId,
+      action: 'INVITATION_RESENT',
+      result: 'SUCCESS',
+      metadata: { email: invitation.email, scope, scopeEntityId },
+    });
+
+    return {
+      message: 'Invitation resent successfully',
+      data: { ...updated, token },
+    };
+  }
+
+  async previewInvitation(token: string, callerUserId?: string) {
+    const tokenHash = this.hashToken(token);
+    const invitation =
+      await this.rbacRepository.findPendingInvitationByTokenHash(tokenHash);
+
+    if (!invitation || invitation.customRole?.deletedAt) {
+      throw new NotFoundException('Invitation not found or has expired');
+    }
+
+    const now = new Date();
+    if (invitation.expiresAt <= now) {
+      throw new BadRequestException('Invitation has expired');
+    }
+
+    const email = invitation.email.toLowerCase();
+    const existingUser = await this.rbacRepository.findUserByEmail(email);
+
+    const hasAccount = !!existingUser;
+    // Existing users always receive ACCEPT — the invite token is enough to join.
+    // CREATE_ACCOUNT only when no account exists yet.
+    const nextAction: 'CREATE_ACCOUNT' | 'ACCEPT' = hasAccount
+      ? 'ACCEPT'
+      : 'CREATE_ACCOUNT';
+
+    // sessionOnAccept tells the client whether POST /accept will return tokens.
+    // Tokens are issued when: (a) new user, or (b) caller JWT matches the invited email.
+    const sessionOnAccept =
+      !hasAccount || (!!callerUserId && callerUserId === existingUser?.id);
+
+    return {
+      message: 'Invitation preview fetched successfully',
+      data: {
+        email,
+        scope: invitation.scope,
+        roleName: invitation.customRole?.name ?? null,
+        expiresAt: invitation.expiresAt,
+        nextAction,
+        hasAccount,
+        /** Only name and email — enough for a "Welcome back, X" UI without exposing ids. */
+        user: existingUser
+          ? { name: existingUser.name, email: existingUser.email }
+          : null,
+        sessionOnAccept,
+      },
+    };
+  }
+
   async acceptInvitation(
-    dto: {
-      token: string;
-      name?: string;
-      password?: string;
-      existingAccount?: boolean;
-    },
-    actor?: AuthenticatedUser,
+    dto: { token: string; name?: string; password?: string },
+    callerUserId?: string,
   ) {
     const tokenHash = this.hashToken(dto.token);
     const invitation =
@@ -626,42 +907,30 @@ export class RbacService {
       throw new NotFoundException('Invitation not found');
     }
 
-    if (invitation.expiresAt < new Date()) {
-      await this.rbacRepository.updateInvitationStatus(
+    const now = new Date();
+    if (invitation.expiresAt <= now) {
+      const expired = await this.rbacRepository.expirePendingInvitation(
         invitation.id,
-        InvitationStatus.EXPIRED,
+        invitation.scope,
+        invitation.scopeEntityId,
+        now,
       );
+      if (expired.count !== 1) {
+        throw new ConflictException('Invitation is no longer pending');
+      }
       throw new BadRequestException('Invitation has expired');
     }
 
     const email = invitation.email.toLowerCase();
     const existingUser = await this.rbacRepository.findUserByEmail(email);
-    const platformRole = this.staffPlatformRoleForInvitation(
-      invitation.scope,
-      invitation.platformRole,
-    );
+    const platformRole = this.assertStaffLane(invitation.platformRole);
 
     if (existingUser) {
-      if (!actor || actor.userId !== existingUser.id) {
-        throw new ForbiddenException(
-          'Login as the invited account before accepting this invitation',
-        );
+      if (!existingUser.isActive) {
+        throw new ForbiddenException('Your account is deactivated.');
       }
 
-      if (existingUser.platformRole !== platformRole) {
-        throw new ConflictException(
-          'Invitation belongs to a different account lane',
-        );
-      }
-
-      const membershipCount = await this.rbacRepository.countActiveMemberships(
-        existingUser.id,
-      );
-      if (membershipCount > 0) {
-        throw new ConflictException(
-          'Account already has an active team membership',
-        );
-      }
+      await this.assertMembershipSlotFree(existingUser.id);
     } else {
       if (!dto.name || !dto.password) {
         throw new BadRequestException(
@@ -671,27 +940,36 @@ export class RbacService {
       this.assertStrongStaffPassword(dto.password);
     }
 
-    const user =
-      existingUser ??
-      (await this.rbacRepository.createStaffUser({
-        name: dto.name!,
-        email,
-        passwordHash: await bcrypt.hash(dto.password!, 10),
-        platformRole,
-      }));
+    const needsLaneSwitch =
+      !!existingUser && existingUser.platformRole !== platformRole;
 
-    await this.rbacRepository.createTeamMember({
-      userId: user.id,
+    const user = await this.rbacRepository.acceptInvitationTx({
+      invitationId: invitation.id,
+      invitationTokenHash: tokenHash,
       customRoleId: invitation.customRoleId,
       scope: invitation.scope,
       scopeEntityId: invitation.scopeEntityId,
+      now,
+      existingUserId: existingUser?.id,
+      switchLane: needsLaneSwitch ? platformRole : undefined,
+      newUser: existingUser
+        ? undefined
+        : {
+            name: dto.name!,
+            email,
+            passwordHash: await bcrypt.hash(dto.password!, 10),
+            platformRole,
+          },
     });
 
-    await this.rbacRepository.updateInvitationStatus(
+    if (!user) {
+      throw new BadRequestException('Invitation has expired');
+    }
+
+    // Revoke all other pending invitations for this email so dead links are cleaned up.
+    await this.rbacRepository.revokePendingInvitesForEmailExcluding(
+      email,
       invitation.id,
-      InvitationStatus.ACCEPTED,
-      new Date(),
-      user.id,
     );
 
     this.securityAudit.log({
@@ -704,65 +982,26 @@ export class RbacService {
       metadata: {
         scope: invitation.scope,
         scopeEntityId: invitation.scopeEntityId,
+        laneSwitch: needsLaneSwitch
+          ? { from: existingUser?.platformRole, to: platformRole }
+          : null,
       },
     });
 
+    const issueTokens =
+      !existingUser || (!!callerUserId && callerUserId === existingUser.id);
+
     return {
       message: 'Invitation accepted successfully',
+      isNewUser: !existingUser,
+      userId: user.id,
+      platformRole: user.platformRole,
+      issueTokens,
       data: {
         scope: invitation.scope,
         entityId: invitation.scopeEntityId,
         customRoleId: invitation.customRoleId,
       },
-    };
-  }
-
-  async assignStaff(
-    actor: AuthenticatedUser,
-    dto: {
-      email: string;
-      platformRole: 'ADMIN' | 'SUPPORT';
-      customRoleId: string;
-    },
-  ) {
-    if (actor.platformRole !== PlatformRole.SUPER_ADMIN) {
-      throw new ForbiddenException(
-        'Only Super Admin can invite platform staff',
-      );
-    }
-
-    const role = await this.rbacRepository.findCustomRoleById(dto.customRoleId);
-    if (
-      !role ||
-      role.scope !== PermissionScope.ADMIN ||
-      role.scopeEntityId !== null
-    ) {
-      throw new BadRequestException('Invalid admin custom role');
-    }
-
-    const email = dto.email.toLowerCase();
-    const existingUser = await this.rbacRepository.findUserByEmail(email);
-    if (existingUser) {
-      throw new ConflictException(
-        'Email already registered. Use a different email for this role.',
-      );
-    }
-
-    const token = randomBytes(32).toString('hex');
-    const invitation = await this.rbacRepository.createInvitation({
-      email,
-      tokenHash: this.hashToken(token),
-      customRoleId: dto.customRoleId,
-      scope: PermissionScope.ADMIN,
-      scopeEntityId: null,
-      invitedById: actor.userId,
-      platformRole: dto.platformRole,
-      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-    });
-
-    return {
-      message: 'Platform staff invitation created successfully',
-      data: { ...invitation, token, platformRole: dto.platformRole },
     };
   }
 
@@ -824,13 +1063,7 @@ export class RbacService {
         throw new ForbiddenException('Active role not found');
       }
 
-      if (
-        !(
-          actorRole.isSystem &&
-          actorRole.name === OWNER_ROLE_NAME &&
-          actorRole.scope !== PermissionScope.ADMIN
-        )
-      ) {
+      if (actorRole.kind !== RoleKind.OWNER) {
         const actorKeys = new Set(
           actorRole.rolePermissions.map((rp) => rp.permission.key),
         );
@@ -847,25 +1080,62 @@ export class RbacService {
     return permissions.map((p) => p.id);
   }
 
-  private platformRoleForScope(scope: PermissionScope) {
+  private async assertRoleAssignable(
+    user: AuthenticatedUser,
+    role: NonNullable<
+      Awaited<ReturnType<RbacRepository['findCustomRoleById']>>
+    >,
+  ) {
+    if (user.platformRole === PlatformRole.SUPER_ADMIN) {
+      return;
+    }
+
+    const targetPermissions = role.rolePermissions.map(
+      ({ permission }) => permission,
+    );
+    if (targetPermissions.some((permission) => permission.isElevated)) {
+      throw new ForbiddenException(
+        'Only Super Admin can assign roles with elevated permissions',
+      );
+    }
+
+    if (user.activeContext?.isOwner) {
+      return;
+    }
+
+    const actorRoleId = user.activeContext?.customRoleId;
+    if (!actorRoleId) {
+      throw new ForbiddenException('Active role required');
+    }
+
+    const actorPermissions =
+      await this.rbacRepository.findPermissionKeysForRole(actorRoleId);
+    const actorKeys = new Set(
+      actorPermissions.map(({ permission }) => permission.key),
+    );
+    const missing = targetPermissions.find(
+      (permission) => !actorKeys.has(permission.key),
+    );
+    if (missing) {
+      throw new ForbiddenException(
+        `Cannot assign a role with permission you do not have: ${missing.key}`,
+      );
+    }
+  }
+
+  private resolveInvitationLane(scope: PermissionScope): StaffPlatformRole {
     if (scope === PermissionScope.VENDOR) {
       return PlatformRole.VENDOR;
     }
+
     if (scope === PermissionScope.PROFESSIONAL) {
       return PlatformRole.PROFESSIONAL;
     }
-    return PlatformRole.SUPPORT;
+
+    return PlatformRole.ADMIN;
   }
 
-  private staffPlatformRoleForInvitation(
-    scope: PermissionScope,
-    storedRole?: PlatformRole | null,
-  ):
-    | typeof PlatformRole.ADMIN
-    | typeof PlatformRole.SUPPORT
-    | typeof PlatformRole.VENDOR
-    | typeof PlatformRole.PROFESSIONAL {
-    const platformRole = storedRole ?? this.platformRoleForScope(scope);
+  private assertStaffLane(platformRole: PlatformRole): StaffPlatformRole {
     if (
       platformRole === PlatformRole.SUPER_ADMIN ||
       platformRole === PlatformRole.CUSTOMER
@@ -874,6 +1144,28 @@ export class RbacService {
     }
 
     return platformRole;
+  }
+
+  private invitationExpiry(now = new Date()) {
+    const days = Number(
+      this.config.get<string>('INVITATION_EXPIRES_IN_DAYS') ?? 7,
+    );
+    const validDays = Number.isFinite(days) && days > 0 ? days : 7;
+    return new Date(now.getTime() + validDays * 24 * 60 * 60 * 1000);
+  }
+
+  /** One non-deleted TeamMember per user, enforced by team_members_user_one_active_unique. */
+  private async assertMembershipSlotFree(userId: string) {
+    const slot = await this.rbacRepository.findMembershipSlot(userId);
+    if (!slot) {
+      return;
+    }
+
+    throw new ConflictException(
+      slot.status === TeamMemberStatus.SUSPENDED
+        ? 'This account is suspended in another team. That membership must be removed first.'
+        : 'This account already has an active team membership.',
+    );
   }
 
   private assertStrongStaffPassword(password: string) {

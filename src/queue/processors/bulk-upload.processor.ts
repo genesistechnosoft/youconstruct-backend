@@ -9,6 +9,7 @@ import {
 import { NotificationEmitterService } from '../../modules/notifications/notification-emitter.service';
 import { BulkUploadRepository } from '../../modules/bulk-upload/bulk-upload.repository';
 import { generateSlug } from '../../common/utils/slug.util';
+import { normalizeProductTags } from '../../modules/products/product-tags.util';
 import { BULK_PRODUCT_UPLOAD_QUEUE } from '../queue.constants';
 
 type BulkUploadJobPayload = {
@@ -65,9 +66,11 @@ export class BulkUploadProcessor extends WorkerHost {
           const primaryUnitCode = rawData['primaryUnitCode']?.trim() ?? '';
           const quantity = parseInt(rawData['quantity'] ?? '0', 10);
           const tagsStr = rawData['tags']?.trim() ?? '';
-          const tags = tagsStr
-            ? tagsStr.split('|').map((t) => t.trim()).filter(Boolean)
-            : [];
+          const tags = normalizeProductTags(
+            tagsStr
+              ? tagsStr.split('|').map((t) => t.trim()).filter(Boolean)
+              : [],
+          );
           const metaTitle = rawData['metaTitle']?.trim() ?? '';
           const metaDescription = rawData['metaDescription']?.trim() ?? '';
 

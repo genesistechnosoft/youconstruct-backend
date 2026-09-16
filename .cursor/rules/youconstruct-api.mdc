@@ -69,3 +69,7 @@ export function paginate(page = 1, limit = 20) {
 ```
 
 Always return `meta` with `page`, `limit`, `total`, `totalPages`.
+
+## Bruno
+
+Every created or updated HTTP endpoint must be added or updated in `C:\work\bruno\youconstruct-backend-bruno` with a full `docs` block (auth, input, response, errors). See `.cursor/rules/youconstruct-bruno.mdc`.

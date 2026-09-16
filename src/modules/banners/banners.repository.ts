@@ -3,18 +3,13 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import {
-  MediaProcessingStatus,
-  Prisma,
-} from '../../../generated/prisma/client.js';
+import { Prisma } from '../../../generated/prisma/client.js';
 import { PrismaService } from '../../prisma/prisma.service';
-import { MEDIA_SELECT } from '../media/media.repository';
 
 export const BANNER_SELECT = {
   id: true,
   title: true,
   subtitle: true,
-  mediaId: true,
   targetUrl: true,
   sortOrder: true,
   isActive: true,
@@ -24,9 +19,6 @@ export const BANNER_SELECT = {
   updatedByUserId: true,
   createdAt: true,
   updatedAt: true,
-  media: {
-    select: MEDIA_SELECT,
-  },
 } as const;
 
 @Injectable()
@@ -71,17 +63,6 @@ export class BannersRepository {
     });
   }
 
-  findReadyMediaById(mediaId: string) {
-    return this.prisma.media.findFirst({
-      where: {
-        id: mediaId,
-        deletedAt: null,
-        processingStatus: MediaProcessingStatus.READY,
-      },
-      select: { id: true },
-    });
-  }
-
   async create(data: Prisma.HomepageBannerCreateInput) {
     try {
       return await this.prisma.homepageBanner.create({
@@ -99,6 +80,37 @@ export class BannersRepository {
         where: { id },
         data,
         select: BANNER_SELECT,
+      });
+    } catch (error) {
+      this.handlePrismaError(error);
+    }
+  }
+
+  findAllIds() {
+    return this.prisma.homepageBanner.findMany({
+      where: { deletedAt: null },
+      select: { id: true },
+    });
+  }
+
+  async reorder(orderedIds: string[]) {
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+        await Promise.all(
+          orderedIds.map((id, index) =>
+            tx.homepageBanner.update({
+              where: { id },
+              data: { sortOrder: index },
+              select: { id: true },
+            }),
+          ),
+        );
+
+        return tx.homepageBanner.findMany({
+          where: { deletedAt: null },
+          orderBy: { sortOrder: 'asc' },
+          select: BANNER_SELECT,
+        });
       });
     } catch (error) {
       this.handlePrismaError(error);

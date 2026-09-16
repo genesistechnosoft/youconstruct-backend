@@ -9,8 +9,18 @@ import {
   Patch,
   Post,
   Query,
+  UploadedFiles,
+  UseInterceptors,
 } from '@nestjs/common';
-import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { FileFieldsInterceptor } from '@nestjs/platform-express';
+import {
+  ApiBearerAuth,
+  ApiBody,
+  ApiConsumes,
+  ApiOperation,
+  ApiTags,
+} from '@nestjs/swagger';
+import { memoryStorage } from 'multer';
 import { PermissionScope } from '../../../generated/prisma/client.js';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Permissions } from '../../common/decorators/permissions.decorator';
@@ -22,6 +32,7 @@ import type { AuthenticatedUser } from '../../common/types/auth-user.type';
 import { PERMISSIONS } from '../rbac/permissions.constants';
 import { BannersService } from './banners.service';
 import { CreateBannerDto } from './dto/create-banner.dto';
+import { ReorderBannersDto } from './dto/reorder-banners.dto';
 import { UpdateBannerDto } from './dto/update-banner.dto';
 
 @ApiTags('Banners')
@@ -40,7 +51,7 @@ export class BannersController {
 
 @ApiTags('Admin - Banners')
 @Controller('admin/banners')
-@Roles(PlatformRole.ADMIN, PlatformRole.SUPPORT)
+@Roles(PlatformRole.ADMIN)
 @RequireActiveContext(PermissionScope.ADMIN)
 @Permissions(PERMISSIONS.ADMIN.CATALOG_MANAGE)
 @ApiBearerAuth()
@@ -63,9 +74,70 @@ export class AdminBannersController {
 
   @Post()
   @HttpCode(200)
-  @ApiOperation({ summary: 'Create a homepage banner' })
-  create(@Body() dto: CreateBannerDto, @CurrentUser() user: AuthenticatedUser) {
-    return this.bannersService.create(dto, user.userId);
+  @UseInterceptors(
+    FileFieldsInterceptor(
+      [
+        { name: 'webImage', maxCount: 1 },
+        { name: 'appImage', maxCount: 1 },
+      ],
+      { storage: memoryStorage() },
+    ),
+  )
+  @ApiConsumes('multipart/form-data')
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['title'],
+      properties: {
+        title: { type: 'string', example: 'Monsoon Sale' },
+        subtitle: { type: 'string', example: 'Up to 40% off on tiles' },
+        targetUrl: { type: 'string', example: 'https://youconstruct.com/sale' },
+        sortOrder: { type: 'integer', example: 0 },
+        isActive: { type: 'boolean', example: true },
+        startsAt: {
+          type: 'string',
+          format: 'date-time',
+          example: '2026-07-01T00:00:00.000Z',
+        },
+        endsAt: {
+          type: 'string',
+          format: 'date-time',
+          example: '2026-08-01T00:00:00.000Z',
+        },
+        webImage: { type: 'string', format: 'binary' },
+        appImage: { type: 'string', format: 'binary' },
+      },
+    },
+  })
+  @ApiOperation({
+    summary:
+      'Create a homepage banner. At least one of webImage or appImage must be provided.',
+  })
+  create(
+    @Body() dto: CreateBannerDto,
+    @CurrentUser() user: AuthenticatedUser,
+    @UploadedFiles()
+    files: {
+      webImage?: Express.Multer.File[];
+      appImage?: Express.Multer.File[];
+    },
+  ) {
+    return this.bannersService.create(
+      dto,
+      user.userId,
+      files?.webImage?.[0],
+      files?.appImage?.[0],
+    );
+  }
+
+  @Patch('reorder')
+  @HttpCode(200)
+  @ApiOperation({
+    summary:
+      'Reorder homepage banners. orderedIds must include every non-deleted banner exactly once.',
+  })
+  reorder(@Body() dto: ReorderBannersDto) {
+    return this.bannersService.reorder(dto);
   }
 
   @Patch(':id/activate')
@@ -90,13 +162,53 @@ export class AdminBannersController {
 
   @Patch(':id')
   @HttpCode(200)
-  @ApiOperation({ summary: 'Update a homepage banner' })
+  @UseInterceptors(
+    FileFieldsInterceptor(
+      [
+        { name: 'webImage', maxCount: 1 },
+        { name: 'appImage', maxCount: 1 },
+      ],
+      { storage: memoryStorage() },
+    ),
+  )
+  @ApiConsumes('multipart/form-data')
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', example: 'Monsoon Sale' },
+        subtitle: { type: 'string', example: 'Updated promo copy' },
+        targetUrl: { type: 'string', example: 'https://youconstruct.com/sale' },
+        sortOrder: { type: 'integer', example: 0 },
+        isActive: { type: 'boolean', example: true },
+        startsAt: { type: 'string', format: 'date-time' },
+        endsAt: { type: 'string', format: 'date-time' },
+        webImage: { type: 'string', format: 'binary' },
+        appImage: { type: 'string', format: 'binary' },
+      },
+    },
+  })
+  @ApiOperation({
+    summary:
+      'Update a homepage banner. Files are optional; providing a file replaces the existing image for that platform.',
+  })
   update(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UpdateBannerDto,
     @CurrentUser() user: AuthenticatedUser,
+    @UploadedFiles()
+    files: {
+      webImage?: Express.Multer.File[];
+      appImage?: Express.Multer.File[];
+    },
   ) {
-    return this.bannersService.update(id, dto, user.userId);
+    return this.bannersService.update(
+      id,
+      dto,
+      user.userId,
+      files?.webImage?.[0],
+      files?.appImage?.[0],
+    );
   }
 
   @Delete(':id')

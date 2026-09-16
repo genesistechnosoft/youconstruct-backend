@@ -20,7 +20,6 @@ datasource db {
 enum PlatformRole {
   SUPER_ADMIN
   ADMIN
-  SUPPORT
   CUSTOMER
   VENDOR
   PROFESSIONAL
@@ -30,6 +29,11 @@ enum PermissionScope {
   ADMIN
   VENDOR
   PROFESSIONAL
+}
+
+enum RoleKind {
+  OWNER
+  CUSTOM
 }
 
 enum TeamMemberStatus {
@@ -68,6 +72,7 @@ enum ProductStatus {
   PENDING_APPROVAL
   ACTIVE
   INACTIVE
+  REJECTED
 }
 
 enum SuggestionSourceType {
@@ -227,6 +232,8 @@ enum MediaContext {
   PROJECT_PHOTO
   REEL
   OG_IMAGE
+  BANNER_WEB
+  BANNER_APP
 }
 
 enum MediaProcessingJobType {
@@ -369,6 +376,7 @@ model User {
   customRolesCreated      CustomRole[]         @relation("CustomRolesCreated")
   teamMemberships         TeamMember[]
   invitationsSent         Invitation[]         @relation("InvitationsSent")
+  invitationsAccepted     Invitation[]         @relation("InvitationsAccepted")
   impersonationsAsAdmin   ImpersonationLog[]   @relation("ImpersonationAdmin")
   impersonationsAsTarget  ImpersonationLog[]   @relation("ImpersonationTarget")
   auditLogsAsActor        SecurityAuditLog[]   @relation("SecurityAuditActor")
@@ -431,12 +439,16 @@ model Permission {
   @@map("permissions")
 }
 
+/// Partial unique indexes live in SQL only (Prisma cannot express them) —
+/// see 20260718120000_rbac_phase1_platform_role:
+///   custom_roles_scope_entity_name_unique (scope, scopeEntityId, name) WHERE deletedAt IS NULL AND scopeEntityId IS NOT NULL
+///   custom_roles_admin_name_unique        (scope, name)                WHERE deletedAt IS NULL AND scopeEntityId IS NULL
 model CustomRole {
   id            String          @id @default(uuid())
   name          String
   scope         PermissionScope
   scopeEntityId String?
-  isSystem      Boolean         @default(false)
+  kind          RoleKind        @default(CUSTOM)
   createdById   String?
   createdAt     DateTime        @default(now())
   updatedAt     DateTime        @updatedAt
@@ -464,6 +476,10 @@ model RolePermission {
   @@map("role_permissions")
 }
 
+/// Partial unique indexes live in SQL only (Prisma cannot express them):
+///   team_members_user_context_unique  (userId, scope, scopeEntityId) WHERE deletedAt IS NULL AND scopeEntityId IS NOT NULL
+///   team_members_user_admin_unique    (userId, scope)                WHERE deletedAt IS NULL AND scopeEntityId IS NULL
+///   team_members_user_one_active_unique (userId)                     WHERE deletedAt IS NULL  -- one membership per user, any status
 model TeamMember {
   id            String           @id @default(uuid())
   userId        String
@@ -483,6 +499,9 @@ model TeamMember {
   @@map("team_members")
 }
 
+/// Partial unique indexes live in SQL only (Prisma cannot express them):
+///   invitations_pending_email_context_unique (lower(email), scope, scopeEntityId) WHERE status = PENDING AND scopeEntityId IS NOT NULL
+///   invitations_pending_email_admin_unique   (lower(email), scope)                WHERE status = PENDING AND scopeEntityId IS NULL
 model Invitation {
   id            String           @id @default(uuid())
   email         String
@@ -492,7 +511,7 @@ model Invitation {
   scopeEntityId String?
   invitedById   String
   acceptedById  String?
-  platformRole  PlatformRole?
+  platformRole  PlatformRole
   status        InvitationStatus @default(PENDING)
   expiresAt     DateTime
   acceptedAt    DateTime?
@@ -501,6 +520,7 @@ model Invitation {
 
   customRole CustomRole @relation(fields: [customRoleId], references: [id])
   invitedBy  User       @relation("InvitationsSent", fields: [invitedById], references: [id])
+  acceptedBy User?      @relation("InvitationsAccepted", fields: [acceptedById], references: [id])
 
   @@index([email, status])
   @@index([acceptedById])
@@ -921,7 +941,6 @@ model Media {
   links           MediaLink[]
   processingJobs  MediaProcessingJob[]
   kycDocuments    KycDocument[]
-  homepageBanners HomepageBanner[]
 
   @@index([uploadedBy])
   @@index([ownerType, ownerId])
@@ -1505,7 +1524,6 @@ model HomepageBanner {
   id              String    @id @default(uuid())
   title           String
   subtitle        String?
-  mediaId         String?
   targetUrl       String?
   sortOrder       Int       @default(0)
   isActive        Boolean   @default(true)
@@ -1517,13 +1535,11 @@ model HomepageBanner {
   updatedAt       DateTime  @updatedAt
   deletedAt       DateTime?
 
-  media     Media? @relation(fields: [mediaId], references: [id])
-  createdBy User?  @relation("HomepageBannerCreator", fields: [createdByUserId], references: [id])
-  updatedBy User?  @relation("HomepageBannerUpdater", fields: [updatedByUserId], references: [id])
+  createdBy User? @relation("HomepageBannerCreator", fields: [createdByUserId], references: [id])
+  updatedBy User? @relation("HomepageBannerUpdater", fields: [updatedByUserId], references: [id])
 
   @@index([isActive, sortOrder])
   @@index([startsAt, endsAt])
-  @@index([mediaId])
   @@map("homepage_banners")
 }
 

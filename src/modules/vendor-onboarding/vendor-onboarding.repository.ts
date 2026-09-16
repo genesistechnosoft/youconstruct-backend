@@ -51,6 +51,43 @@ const VENDOR_PROFILE_SELECT = {
   updatedAt: true,
 } as const;
 
+const VENDOR_LIST_SELECT = {
+  id: true,
+  userId: true,
+  businessName: true,
+  slug: true,
+  city: true,
+  state: true,
+  gstNumber: true,
+  isApproved: true,
+  onboardingStatus: true,
+  submittedAt: true,
+  reviewedAt: true,
+  rejectionReason: true,
+  createdAt: true,
+  user: {
+    select: {
+      id: true,
+      name: true,
+      email: true,
+      phone: true,
+      kycDocuments: {
+        orderBy: { documentType: Prisma.SortOrder.asc },
+        select: {
+          documentType: true,
+          status: true,
+        },
+      },
+    },
+  },
+  membership: {
+    select: {
+      plan: true,
+      isActive: true,
+    },
+  },
+} as const;
+
 const VENDOR_REVIEW_SELECT = {
   ...VENDOR_PROFILE_SELECT,
   user: {
@@ -127,8 +164,9 @@ export class VendorOnboardingRepository {
     });
   }
 
-  countActiveTeamMemberships(userId: string) {
-    return this.rbacRepository.countActiveMemberships(userId);
+  async hasTeamMembership(userId: string) {
+    const slot = await this.rbacRepository.findMembershipSlot(userId);
+    return slot !== null;
   }
 
   findVendorByUserId(userId: string) {
@@ -163,11 +201,32 @@ export class VendorOnboardingRepository {
     });
   }
 
+  findByGstNumber(gstNumber: string, excludeId?: string) {
+    return this.prisma.vendorProfile.findFirst({
+      where: {
+        gstNumber: { equals: gstNumber, mode: 'insensitive' },
+        deletedAt: null,
+        ...(excludeId ? { id: { not: excludeId } } : {}),
+      },
+      select: { id: true },
+    });
+  }
+
   async findVendors(filters: VendorFiltersDto) {
     const { skip, take } = paginate(filters.page, filters.limit);
+    const search = filters.search?.trim();
     const where: Prisma.VendorProfileWhereInput = {
       deletedAt: null,
       ...(filters.status && { onboardingStatus: filters.status }),
+      ...(search && {
+        OR: [
+          { businessName: { contains: search, mode: 'insensitive' } },
+          { gstNumber: { contains: search, mode: 'insensitive' } },
+          { user: { name: { contains: search, mode: 'insensitive' } } },
+          { user: { email: { contains: search, mode: 'insensitive' } } },
+          { user: { phone: { contains: search, mode: 'insensitive' } } },
+        ],
+      }),
     };
 
     const [items, total] = await Promise.all([
@@ -176,7 +235,7 @@ export class VendorOnboardingRepository {
         orderBy: { createdAt: Prisma.SortOrder.desc },
         skip,
         take,
-        select: VENDOR_REVIEW_SELECT,
+        select: VENDOR_LIST_SELECT,
       }),
       this.prisma.vendorProfile.count({ where }),
     ]);
@@ -282,10 +341,31 @@ export class VendorOnboardingRepository {
     }
   }
 
-  async approveVendor(id: string) {
+  async approveVendor(
+    id: string,
+    userId: string,
+    requiredDocs: KycDocumentType[],
+  ) {
     try {
       return await this.prisma.$transaction(async (tx) => {
         const reviewedAt = new Date();
+        const existing = await tx.vendorProfile.findUniqueOrThrow({
+          where: { id },
+          select: { submittedAt: true },
+        });
+
+        if (requiredDocs.length > 0) {
+          await tx.kycDocument.updateMany({
+            where: {
+              userId,
+              documentType: { in: requiredDocs },
+            },
+            data: {
+              status: KycStatus.VERIFIED,
+              rejectionNote: null,
+            },
+          });
+        }
 
         await tx.vendorProfile.update({
           where: { id },
@@ -295,6 +375,7 @@ export class VendorOnboardingRepository {
             onboardingStatus: VendorOnboardingStatus.APPROVED,
             reviewedAt,
             rejectionReason: null,
+            submittedAt: existing.submittedAt ?? reviewedAt,
           },
           select: { id: true },
         });

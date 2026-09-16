@@ -1,5 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
+  ArrayMaxSize,
   IsArray,
   IsBoolean,
   IsInt,
@@ -7,8 +8,13 @@ import {
   IsOptional,
   IsString,
   IsUUID,
+  MaxLength,
   Min,
 } from 'class-validator';
+import {
+  PRODUCT_TAG_MAX_COUNT,
+  PRODUCT_TAG_MAX_LENGTH,
+} from '../product-tags.util';
 
 export class CreateProductDto {
   @ApiProperty({ example: 'Italian Marble Tile' })
@@ -49,7 +55,9 @@ export class CreateProductDto {
   @ApiPropertyOptional({ example: ['marble', 'flooring'] })
   @IsOptional()
   @IsArray()
+  @ArrayMaxSize(PRODUCT_TAG_MAX_COUNT)
   @IsString({ each: true })
+  @MaxLength(PRODUCT_TAG_MAX_LENGTH, { each: true })
   tags?: string[];
 
   @ApiProperty({ example: 'Italian Marble Tile | YouConstruct' })

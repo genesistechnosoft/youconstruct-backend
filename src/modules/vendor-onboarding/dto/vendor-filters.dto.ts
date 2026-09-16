@@ -1,6 +1,6 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { IsEnum, IsInt, IsOptional, Max, Min } from 'class-validator';
+import { IsEnum, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
 import { VendorOnboardingStatus } from '../../../../generated/prisma/client.js';
 
 export class VendorFiltersDto {
@@ -11,6 +11,11 @@ export class VendorFiltersDto {
   @IsOptional()
   @IsEnum(VendorOnboardingStatus)
   status?: VendorOnboardingStatus;
+
+  @ApiPropertyOptional({ example: 'Lakshmi Tiles' })
+  @IsOptional()
+  @IsString()
+  search?: string;
 
   @ApiPropertyOptional({ example: 1, default: 1 })
   @IsOptional()

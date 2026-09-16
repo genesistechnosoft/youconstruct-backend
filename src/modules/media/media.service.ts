@@ -25,6 +25,7 @@ import { MEDIA_PROCESSING_QUEUE } from '../../queue/queue.constants';
 import { StorageService } from '../../storage/storage.service';
 import { VendorStoreService } from '../vendor-store/vendor-store.service';
 import { CreateMediaFolderDto } from './dto/create-media-folder.dto';
+import { FolderContentsQueryDto } from './dto/folder-contents-query.dto';
 import { LinkMediaDto } from './dto/link-media.dto';
 import { MediaFiltersDto } from './dto/media-filters.dto';
 import { ReorderMediaLinksDto } from './dto/reorder-media-links.dto';
@@ -74,6 +75,42 @@ export class MediaService {
       message: 'Media fetched successfully',
       data: await Promise.all(items.map((media) => this.withUrls(media))),
       meta: paginationMeta(filters.page ?? 1, filters.limit ?? 20, total),
+    };
+  }
+
+  async getVendorMediaStats(vendorProfileId: string) {
+    const owner = await this.getApprovedVendorOwner(vendorProfileId);
+    const { byType, folders } = await this.mediaRepository.getLibraryStats(
+      owner.ownerType,
+      owner.ownerId,
+    );
+
+    const counts: Record<MediaFileType, number> = {
+      [MediaFileType.IMAGE]: 0,
+      [MediaFileType.VIDEO]: 0,
+      [MediaFileType.DOCUMENT]: 0,
+    };
+    let totalSizeBytes = 0;
+
+    for (const row of byType) {
+      counts[row.fileType] = row._count._all;
+      totalSizeBytes += row._sum.sizeBytes ?? 0;
+    }
+
+    const images = counts[MediaFileType.IMAGE];
+    const videos = counts[MediaFileType.VIDEO];
+    const documents = counts[MediaFileType.DOCUMENT];
+
+    return {
+      message: 'Media stats fetched successfully',
+      data: {
+        totalAssets: images + videos + documents,
+        folders,
+        images,
+        videos,
+        documents,
+        totalSizeBytes,
+      },
     };
   }
 
@@ -152,7 +189,7 @@ export class MediaService {
       file,
       accessLevel: MediaAccessLevel.PRIVATE,
       keyPrefix,
-      allowedFileTypes: [MediaFileType.DOCUMENT],
+      allowedFileTypes: [MediaFileType.DOCUMENT, MediaFileType.IMAGE],
     });
   }
 
@@ -181,6 +218,47 @@ export class MediaService {
     );
 
     return { message: 'Media folders fetched successfully', data: folders };
+  }
+
+  async getVendorFolderContents(
+    vendorProfileId: string,
+    folderId: string | null,
+    query: FolderContentsQueryDto,
+  ) {
+    const owner = await this.getApprovedVendorOwner(vendorProfileId);
+    const folder = folderId
+      ? await this.getFolderOrThrow(owner, folderId)
+      : { id: null, name: null, parentId: null };
+
+    const [folders, { items, total }] = await Promise.all([
+      this.mediaRepository.listChildFolders(
+        owner.ownerType,
+        owner.ownerId,
+        folderId,
+      ),
+      this.mediaRepository.findFolderMedia(
+        owner.ownerType,
+        owner.ownerId,
+        folderId,
+        query,
+      ),
+    ]);
+
+    return {
+      message: 'Folder fetched successfully',
+      data: {
+        folder: {
+          id: folder.id,
+          name: folder.name,
+          parentId: folder.parentId,
+        },
+        folders,
+        media: await Promise.all(
+          items.map((item) => this.withFolderBrowseUrls(item)),
+        ),
+      },
+      meta: paginationMeta(query.page ?? 1, query.limit ?? 20, total),
+    };
   }
 
   async createVendorFolder(vendorProfileId: string, dto: CreateMediaFolderDto) {
@@ -393,6 +471,49 @@ export class MediaService {
     };
   }
 
+  async uploadAdminEntityMedia(
+    actorUserId: string,
+    file: Express.Multer.File | undefined,
+    entityType: MediaEntityType,
+    entityId: string,
+    context: MediaContext,
+    keyPrefix: string,
+  ) {
+    const previousLinks = await this.mediaRepository.findLinks(
+      entityType,
+      entityId,
+      context,
+    );
+    const previousMediaIds = previousLinks.map((link) => link.mediaId);
+    const owner: MediaOwner = {
+      ownerType: MediaOwnerType.ADMIN,
+      ownerId: actorUserId,
+    };
+
+    const media = await this.uploadMedia({
+      userId: actorUserId,
+      owner,
+      file,
+      accessLevel: MediaAccessLevel.PUBLIC,
+      keyPrefix,
+      allowedFileTypes: [MediaFileType.IMAGE],
+    });
+
+    await this.setEntityMediaContext(
+      owner,
+      entityType,
+      entityId,
+      context,
+      media.id,
+    );
+    await this.softDeleteUnlinkedMedia(previousMediaIds);
+
+    return {
+      message: 'Media uploaded and linked successfully',
+      data: await this.withUrls(media),
+    };
+  }
+
   async clearEntityMediaContext(
     entityType: MediaEntityType,
     entityId: string,
@@ -403,6 +524,28 @@ export class MediaService {
       entityId,
       context,
     );
+
+    return { message: 'Media unlinked successfully', data: null };
+  }
+
+  async clearEntityMediaContextAndDelete(
+    entityType: MediaEntityType,
+    entityId: string,
+    context: MediaContext,
+  ) {
+    const links = await this.mediaRepository.findLinks(
+      entityType,
+      entityId,
+      context,
+    );
+    const mediaIds = links.map((link) => link.mediaId);
+
+    await this.mediaRepository.softDeleteLinksByContext(
+      entityType,
+      entityId,
+      context,
+    );
+    await this.softDeleteUnlinkedMedia(mediaIds);
 
     return { message: 'Media unlinked successfully', data: null };
   }
@@ -446,7 +589,8 @@ export class MediaService {
     const links = await this.mediaRepository.reorderLinks(
       entityType,
       entityId,
-      dto.items,
+      dto.mediaIds,
+      MediaContext.GALLERY,
     );
 
     return {
@@ -457,8 +601,53 @@ export class MediaService {
     };
   }
 
-  countReadyGalleryLinks(entityType: MediaEntityType, entityId: string) {
-    return this.mediaRepository.countReadyLinks(entityType, entityId);
+  countContextLinks(
+    entityType: MediaEntityType,
+    entityId: string,
+    context: MediaContext,
+  ) {
+    return this.mediaRepository.countContextLinks(
+      entityType,
+      entityId,
+      context,
+    );
+  }
+
+  async getThumbnailsForEntities(entityIds: string[]) {
+    const links = await this.mediaRepository.findLinksByEntityIds(
+      MediaEntityType.PRODUCT,
+      entityIds,
+      MediaContext.THUMBNAIL,
+      false,
+    );
+    const withUrls = await Promise.all(
+      links.map((link) => this.withMediaLinkUrls(link)),
+    );
+
+    const map = new Map<string, (typeof withUrls)[number] | null>();
+    for (const entityId of entityIds) {
+      map.set(entityId, null);
+    }
+    for (const link of withUrls) {
+      if (!map.get(link.entityId)) {
+        map.set(link.entityId, link);
+      }
+    }
+
+    return map;
+  }
+
+  async getEntityThumbnail(entityType: MediaEntityType, entityId: string) {
+    const links = await this.mediaRepository.findLinks(
+      entityType,
+      entityId,
+      MediaContext.THUMBNAIL,
+    );
+    if (links.length === 0) {
+      return null;
+    }
+
+    return this.withMediaLinkUrls(links[0]);
   }
 
   async getEntityGallery(entityType: MediaEntityType, entityId: string) {
@@ -498,14 +687,72 @@ export class MediaService {
     entityType: MediaEntityType,
     entityIds: string[],
   ): Promise<Map<string, { url: string; storageKey: string } | null>> {
-    const links = await this.mediaRepository.findLinksByEntityIds(
-      entityType,
-      entityIds,
-    );
     const result = new Map<
       string,
       { url: string; storageKey: string } | null
     >();
+
+    for (const entityId of entityIds) {
+      result.set(entityId, null);
+    }
+
+    if (entityIds.length === 0) {
+      return result;
+    }
+
+    const applyLinks = async (
+      links: Awaited<ReturnType<MediaRepository['findLinksByEntityIds']>>,
+    ) => {
+      for (const link of links) {
+        if (result.get(link.entityId)) {
+          continue;
+        }
+
+        const storageKey =
+          link.media.optimizedKey ??
+          link.media.thumbnailKey ??
+          link.media.originalKey;
+        const url = await this.storageService.getUrl(
+          storageKey,
+          link.media.accessLevel,
+        );
+        result.set(link.entityId, { url, storageKey });
+      }
+    };
+
+    if (entityType === MediaEntityType.PRODUCT) {
+      const thumbnails = await this.mediaRepository.findLinksByEntityIds(
+        entityType,
+        entityIds,
+        MediaContext.THUMBNAIL,
+        false,
+      );
+      await applyLinks(thumbnails);
+    }
+
+    const missing = entityIds.filter((id) => result.get(id) === null);
+    if (missing.length > 0) {
+      const fallback = await this.mediaRepository.findLinksByEntityIds(
+        entityType,
+        missing,
+      );
+      await applyLinks(fallback);
+    }
+
+    return result;
+  }
+
+  async getContextMediaForEntities(
+    entityType: MediaEntityType,
+    entityIds: string[],
+    context: MediaContext,
+  ): Promise<Map<string, { url: string; mediaId: string } | null>> {
+    const links = await this.mediaRepository.findLinksByEntityIds(
+      entityType,
+      entityIds,
+      context,
+    );
+    const result = new Map<string, { url: string; mediaId: string } | null>();
 
     for (const entityId of entityIds) {
       result.set(entityId, null);
@@ -524,10 +771,28 @@ export class MediaService {
         storageKey,
         link.media.accessLevel,
       );
-      result.set(link.entityId, { url, storageKey });
+      result.set(link.entityId, { url, mediaId: link.mediaId });
     }
 
     return result;
+  }
+
+  private async withFolderBrowseUrls<
+    T extends {
+      originalKey: string;
+      optimizedKey: string | null;
+      thumbnailKey: string | null;
+      accessLevel: MediaAccessLevel;
+      uploader: { id: string; name: string };
+      folder: { id: string; name: string } | null;
+    },
+  >(media: T) {
+    const { uploader, folder, ...rest } = media;
+    return {
+      ...(await this.withUrls(rest)),
+      uploader: { id: uploader.id, name: uploader.name },
+      folder: folder ? { id: folder.id, name: folder.name } : null,
+    };
   }
 
   async withUrls<
@@ -825,6 +1090,25 @@ export class MediaService {
 
   private toDisplayName(originalName: string) {
     return originalName.replace(/\.[^/.]+$/, '');
+  }
+
+  private async softDeleteUnlinkedMedia(mediaIds: string[]) {
+    const uniqueIds = [...new Set(mediaIds)];
+
+    for (const mediaId of uniqueIds) {
+      const activeLinks = await this.mediaRepository.countActiveLinks(mediaId);
+      if (activeLinks > 0) {
+        continue;
+      }
+
+      const media = await this.mediaRepository.findMediaForProcessing(mediaId);
+      if (!media) {
+        continue;
+      }
+
+      await this.mediaRepository.softDeleteMedia(mediaId);
+      await this.deleteStoredObjects(media);
+    }
   }
 
   private async deleteStoredObjects(media: {

@@ -1,11 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import {
-  IsNotEmpty,
-  IsOptional,
-  IsString,
-  MinLength,
-  ValidateIf,
-} from 'class-validator';
+import { IsNotEmpty, IsOptional, IsString, MinLength } from 'class-validator';
 
 export class AcceptInvitationDto {
   @ApiProperty({ description: 'Raw invitation token from email link' })
@@ -14,30 +8,25 @@ export class AcceptInvitationDto {
   token!: string;
 
   @ApiPropertyOptional({
-    description:
-      'Display name for a new staff account (required for new users)',
+    description: 'Display name — required when creating a new staff account',
   })
-  @ValidateIf((o: AcceptInvitationDto) => !o.existingAccount)
+  @IsOptional()
   @IsString()
   @IsNotEmpty()
   name?: string;
 
   @ApiPropertyOptional({
-    description: 'Password for a new staff account (required for new users)',
+    description: 'Password — required when creating a new staff account',
     minLength: 12,
   })
-  @ValidateIf((o: AcceptInvitationDto) => !o.existingAccount)
+  @IsOptional()
   @IsString()
   @MinLength(12)
   password?: string;
-
-  /** Internal flag set by controller for logged-in accept flow */
-  @IsOptional()
-  existingAccount?: boolean;
 }
 
-export class AcceptExistingInvitationDto {
-  @ApiProperty({ description: 'Raw invitation token from email link' })
+export class PreviewInvitationDto {
+  @ApiProperty({ description: 'Raw invitation token from the email link' })
   @IsString()
   @IsNotEmpty()
   token!: string;

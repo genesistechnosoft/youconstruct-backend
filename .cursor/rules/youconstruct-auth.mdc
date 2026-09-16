@@ -10,7 +10,6 @@ alwaysApply: false
 enum PlatformRole {
   SUPER_ADMIN = 'SUPER_ADMIN',
   ADMIN = 'ADMIN',
-  SUPPORT = 'SUPPORT',
   CUSTOMER = 'CUSTOMER',
   VENDOR = 'VENDOR',
   PROFESSIONAL = 'PROFESSIONAL',
@@ -20,16 +19,17 @@ enum PlatformRole {
 ## One identity per email
 
 - One email = one lane: customer **or** store **or** professional **or** admin — never combine.
-- Owners and staff share the same platform role (`VENDOR` / `PROFESSIONAL` / `ADMIN` / `SUPPORT`).
+- Owners and staff share the same platform role (`VENDOR` / `PROFESSIONAL` / `ADMIN`).
+- Ordinary platform staff use `ADMIN`; their ADMIN-scoped custom role defines responsibilities.
 - Owner = has `VendorProfile` / `ProfessionalProfile` + system Owner membership (full access in own entity).
 - Staff = same `platformRole`, **no** profile, one `TeamMember` + custom role.
-- At most one active `TeamMember` per user.
+- At most one non-deleted `TeamMember` per user, regardless of status.
 - Customer APIs are `CUSTOMER`-only with ownership checks (no RBAC permissions).
 
 ## Login endpoints
 
 - `POST /auth/login` — customer app (`CUSTOMER` only)
-- `POST /auth/dashboard/login` — dashboard (`VENDOR`, `PROFESSIONAL`, `ADMIN`, `SUPPORT`, `SUPER_ADMIN`)
+- `POST /auth/dashboard/login` — dashboard (`VENDOR`, `PROFESSIONAL`, `ADMIN`, `SUPER_ADMIN`)
 
 ## Guard chain
 
@@ -41,7 +41,7 @@ Throttler → JwtAuthGuard → RolesGuard → PermissionsGuard → ActiveContext
 - `@Roles(PlatformRole.ADMIN)` — platform role; `SUPER_ADMIN` always passes
 - `@Permissions('products:create')` — required for `/vendor|/admin|/professional` routes (default-deny)
 - `@OwnerOnly()` — business owner only (or Super Admin)
-- `@OnboardingOnly()` — pre-approval owner onboarding routes only
+- `@OnboardingOnly()` — owner onboarding routes (GET allowed after APPROVED; writes 400)
 - `@RequireActiveContext(PermissionScope.VENDOR)` — matching server-derived context
 - Owner system role = full access in own vendor/professional entity (not Platform Admin)
 - `SUPER_ADMIN` = only unrestricted platform principal
@@ -68,9 +68,9 @@ Auth success (login / dashboard login / register / refresh / OTP verify) returns
 ```typescript
 session: {
   user: { id, name, email, platformRole },
-  activeContext: { type, entityId, customRoleId, roleName, isOwner } | null,
+  activeContext: { type, entityId, customRoleId, roleName, isOwner, isSuspended } | null,
   permissions: string[], // concrete keys; Owner = all scope keys; SUPER_ADMIN = all ADMIN keys
-  flags: { needsOnboarding, isImpersonating }
+  flags: { needsOnboarding, isImpersonating, accessRevoked }
 }
 ```
 
@@ -97,9 +97,18 @@ Only in ADMIN scope. Only Super Admin may assign `isElevated` permissions.
 ## Invitations
 
 - Vendor/professional staff: invite-only
-- Platform staff: Super Admin invite only; recipient sets password
-- Existing same-lane users accept while logged in (`POST /invitations/accept-existing`)
+- Platform staff: invite-only; ADMIN managers with `team:manage` may assign non-elevated roles whose permissions are a subset of their own
+- Only Super Admin may assign elevated ADMIN roles
+- ADMIN invitation input is `email` + `customRoleId`; the backend derives `platformRole=ADMIN`
+- Call `GET /invitations/preview?token=` first — returns `nextAction` (CREATE_ACCOUNT | ACCEPT), `hasAccount`, `user {name,email}`, `sessionOnAccept`
+- Single `POST /invitations/accept`: new users send name+password and receive tokens; existing users send invite token only (membership granted, no session unless caller JWT also matches)
+- Invite token alone for an existing account grants membership but never mints a session (prevents passwordless takeover)
+- Sending Bearer for the invited email alongside the invite token grants membership and re-issues tokens with the new activeContext
+- Removed staff regain a free slot; an ex-admin can join vendor/professional after removal (lane switch applies atomically in the same accept transaction)
+- After a successful accept, other PENDING invitations for the same email are revoked automatically
 - Tokens hashed (SHA-256), single-use, expiring
+- Expired invitations are immutable; create a replacement instead of resending
+- One live pending invitation per normalized email and context
 
 ## OTP
 
@@ -116,5 +125,5 @@ New OTP send cannot reset lockout.
 ## Security
 
 Rate limit login, OTP send, OTP verify, register. Never log passwords or tokens.
-`SUPER_ADMIN`, `ADMIN`, `SUPPORT` cannot self-register.
+`SUPER_ADMIN`, `ADMIN` cannot self-register.
 Identical login failure messages (no account-status enumeration).

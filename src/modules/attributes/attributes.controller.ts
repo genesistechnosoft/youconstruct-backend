@@ -38,7 +38,7 @@ export class AttributesController {
 
 @ApiTags('Admin - Attributes')
 @Controller('admin/attributes')
-@Roles(PlatformRole.ADMIN, PlatformRole.SUPPORT)
+@Roles(PlatformRole.ADMIN)
 @RequireActiveContext(PermissionScope.ADMIN)
 @Permissions(PERMISSIONS.ADMIN.CATALOG_MANAGE)
 @ApiBearerAuth()

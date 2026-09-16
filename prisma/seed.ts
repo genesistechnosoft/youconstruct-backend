@@ -7,6 +7,7 @@ import {
   PermissionScope,
   PlatformRole,
   PrismaClient,
+  RoleKind,
   VendorOnboardingStatus,
 } from '../generated/prisma/client.js';
 import {
@@ -14,6 +15,7 @@ import {
   PERMISSION_CATALOG,
   PERMISSIONS,
   PLATFORM_ADMIN_ROLE_NAME,
+  SUPPORT_AGENT_ROLE_NAME,
 } from '../src/modules/rbac/permissions.constants';
 import { PLATFORM_SETTING_DEFINITIONS } from '../src/modules/platform-settings/platform-settings.constants';
 
@@ -461,8 +463,8 @@ async function seedPlatformAdminRole() {
         name: PLATFORM_ADMIN_ROLE_NAME,
         scope: PermissionScope.ADMIN,
         scopeEntityId: null,
-        // Only business Owner is a system role; Platform Admin uses DB grants
-        isSystem: false,
+        // Platform Admin is a normal role driven by DB grants, not the Owner kind
+        kind: RoleKind.CUSTOM,
       },
       select: { id: true },
     }));
@@ -470,7 +472,7 @@ async function seedPlatformAdminRole() {
   if (existing) {
     await prisma.customRole.update({
       where: { id: existing.id },
-      data: { isSystem: false },
+      data: { kind: RoleKind.CUSTOM },
     });
   }
 
@@ -506,6 +508,75 @@ async function seedPlatformAdminRole() {
   }
 
   console.log(`Seeded platform role template: ${PLATFORM_ADMIN_ROLE_NAME}`);
+  return role;
+}
+
+async function seedSupportAgentRole() {
+  const existing = await prisma.customRole.findFirst({
+    where: {
+      name: SUPPORT_AGENT_ROLE_NAME,
+      scope: PermissionScope.ADMIN,
+      scopeEntityId: null,
+      deletedAt: null,
+    },
+    select: { id: true },
+  });
+
+  const role =
+    existing ??
+    (await prisma.customRole.create({
+      data: {
+        name: SUPPORT_AGENT_ROLE_NAME,
+        scope: PermissionScope.ADMIN,
+        scopeEntityId: null,
+        kind: RoleKind.CUSTOM,
+      },
+      select: { id: true },
+    }));
+
+  if (existing) {
+    await prisma.customRole.update({
+      where: { id: existing.id },
+      data: { kind: RoleKind.CUSTOM },
+    });
+  }
+
+  const permissions = await prisma.permission.findMany({
+    where: {
+      scope: PermissionScope.ADMIN,
+      key: {
+        in: [PERMISSIONS.ADMIN.VENDORS_VIEW, PERMISSIONS.ADMIN.ORDERS_VIEW],
+      },
+    },
+    select: { id: true },
+  });
+
+  if (permissions.length !== 2) {
+    throw new Error('Support Agent permissions are missing from the catalog');
+  }
+
+  const permissionIds = permissions.map((permission) => permission.id);
+  await prisma.rolePermission.deleteMany({
+    where: {
+      customRoleId: role.id,
+      permissionId: { notIn: permissionIds },
+    },
+  });
+
+  for (const permissionId of permissionIds) {
+    await prisma.rolePermission.upsert({
+      where: {
+        customRoleId_permissionId: {
+          customRoleId: role.id,
+          permissionId,
+        },
+      },
+      update: {},
+      create: { customRoleId: role.id, permissionId },
+    });
+  }
+
+  console.log(`Seeded platform role template: ${SUPPORT_AGENT_ROLE_NAME}`);
   return role;
 }
 
@@ -648,10 +719,9 @@ async function ensureOwnerRoleSeed(
 ) {
   let role = await prisma.customRole.findFirst({
     where: {
-      name: OWNER_ROLE_NAME,
       scope,
       scopeEntityId,
-      isSystem: true,
+      kind: RoleKind.OWNER,
       deletedAt: null,
     },
     select: { id: true },
@@ -663,7 +733,7 @@ async function ensureOwnerRoleSeed(
         name: OWNER_ROLE_NAME,
         scope,
         scopeEntityId,
-        isSystem: true,
+        kind: RoleKind.OWNER,
       },
       select: { id: true },
     });
@@ -780,7 +850,7 @@ async function seedVendorStaff(passwordHash: string, vendorProfileId: string) {
         name: 'Store Manager',
         scope: PermissionScope.VENDOR,
         scopeEntityId: vendorProfileId,
-        isSystem: false,
+        kind: RoleKind.CUSTOM,
         rolePermissions: {
           create: productPerms.map((permission) => ({
             permissionId: permission.id,
@@ -914,6 +984,7 @@ async function main() {
   await seedPlatformSettings();
   await seedPermissions();
   const platformAdminRole = await seedPlatformAdminRole();
+  await seedSupportAgentRole();
   await seedSuperAdmin(passwordHash);
   await seedPlatformAdminStaff(passwordHash, platformAdminRole.id);
   const { vendorProfile } = await seedApprovedVendor(passwordHash);

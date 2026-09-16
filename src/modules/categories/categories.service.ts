@@ -5,6 +5,10 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
+import {
+  MediaContext,
+  MediaEntityType,
+} from '../../../generated/prisma/client.js';
 import { RedisCacheService } from '../../common/redis/redis-cache.service';
 import {
   CATEGORY_TREE_CACHE_KEY,
@@ -12,12 +16,22 @@ import {
   CATEGORY_TREE_METRIC_HIT,
   CATEGORY_TREE_METRIC_INVALIDATE,
   CATEGORY_TREE_METRIC_MISS,
+  VISIBLE_CATEGORY_IDS_CACHE_KEY,
 } from '../../common/redis/redis.constants';
 import { paginate, paginationMeta } from '../../common/utils/pagination.util';
 import { generateSlug } from '../../common/utils/slug.util';
+import { MediaService } from '../media/media.service';
 import { CreateCategoryDto } from './dto/create-category.dto';
+import { ReorderCategoriesDto } from './dto/reorder-categories.dto';
 import { UpdateCategoryDto } from './dto/update-category.dto';
 import { CategoriesRepository } from './categories.repository';
+
+type CategoryImage = { url: string; mediaId: string } | null;
+
+type CategoryNode = {
+  id: string;
+  children?: CategoryNode[];
+};
 
 @Injectable()
 export class CategoriesService {
@@ -26,11 +40,12 @@ export class CategoriesService {
   constructor(
     private readonly categoriesRepository: CategoriesRepository,
     private readonly redisCacheService: RedisCacheService,
+    private readonly mediaService: MediaService,
   ) {}
 
   async getTree() {
     const cached = await this.redisCacheService.getJson<
-      Awaited<ReturnType<CategoriesRepository['findRoots']>>
+      Awaited<ReturnType<CategoriesService['loadPublicTree']>>
     >(CATEGORY_TREE_CACHE_KEY);
 
     if (cached) {
@@ -46,7 +61,7 @@ export class CategoriesService {
     );
     void this.redisCacheService.incr(CATEGORY_TREE_METRIC_MISS);
 
-    const categories = await this.categoriesRepository.findRoots();
+    const categories = await this.loadPublicTree();
     await this.redisCacheService.setJson(
       CATEGORY_TREE_CACHE_KEY,
       categories,
@@ -61,7 +76,16 @@ export class CategoriesService {
     if (!category) {
       throw new NotFoundException('Category not found');
     }
-    return { message: 'Category fetched successfully', data: category };
+
+    const visibleIds = await this.getVisibleCategoryIds();
+    if (!visibleIds.includes(id)) {
+      throw new NotFoundException('Category not found');
+    }
+
+    return {
+      message: 'Category fetched successfully',
+      data: await this.withImages(category),
+    };
   }
 
   async findAllAdmin(page = 1, limit = 20) {
@@ -73,14 +97,17 @@ export class CategoriesService {
 
     return {
       message: 'Categories fetched successfully',
-      data: categories,
+      data: await this.withImagesList(categories),
       meta: paginationMeta(page, limit, total),
     };
   }
 
   async getTreeAdmin() {
     const categories = await this.categoriesRepository.findRootsAdmin();
-    return { message: 'Categories fetched successfully', data: categories };
+    return {
+      message: 'Categories fetched successfully',
+      data: await this.withImagesList(categories),
+    };
   }
 
   async findByIdAdmin(id: string) {
@@ -88,7 +115,10 @@ export class CategoriesService {
     if (!category) {
       throw new NotFoundException('Category not found');
     }
-    return { message: 'Category fetched successfully', data: category };
+    return {
+      message: 'Category fetched successfully',
+      data: await this.withImages(category),
+    };
   }
 
   async create(dto: CreateCategoryDto) {
@@ -107,17 +137,24 @@ export class CategoriesService {
       throw new ConflictException('Category slug already exists');
     }
 
+    const sortOrder =
+      dto.sortOrder ??
+      (await this.categoriesRepository.findNextSortOrder(dto.parentId ?? null));
+
     const category = await this.categoriesRepository.create({
       name: dto.name,
       slug,
       ...(dto.parentId && { parent: { connect: { id: dto.parentId } } }),
       ...(dto.description !== undefined && { description: dto.description }),
       isActive: dto.isActive ?? true,
-      sortOrder: dto.sortOrder ?? 0,
+      sortOrder,
     });
 
     await this.invalidateTreeCache();
-    return { message: 'Category created successfully', data: category };
+    return {
+      message: 'Category created successfully',
+      data: await this.withImages(category),
+    };
   }
 
   async update(id: string, dto: UpdateCategoryDto) {
@@ -152,6 +189,18 @@ export class CategoriesService {
       }
     }
 
+    const parentChanging =
+      dto.parentId !== undefined && dto.parentId !== existing.parentId;
+    const sortOrder =
+      dto.sortOrder !== undefined
+        ? dto.sortOrder
+        : parentChanging
+          ? await this.categoriesRepository.findNextSortOrder(
+              dto.parentId ?? null,
+              id,
+            )
+          : undefined;
+
     const category = await this.categoriesRepository.update(id, {
       ...(dto.name !== undefined && { name: dto.name }),
       ...(dto.slug !== undefined && { slug: dto.slug }),
@@ -161,11 +210,49 @@ export class CategoriesService {
           : { disconnect: true },
       }),
       ...(dto.description !== undefined && { description: dto.description }),
-      ...(dto.sortOrder !== undefined && { sortOrder: dto.sortOrder }),
+      ...(sortOrder !== undefined && { sortOrder }),
     });
 
     await this.invalidateTreeCache();
-    return { message: 'Category updated successfully', data: category };
+    return {
+      message: 'Category updated successfully',
+      data: await this.withImages(category),
+    };
+  }
+
+  async reorder(dto: ReorderCategoriesDto) {
+    const parentId = dto.parentId ?? null;
+
+    if (parentId) {
+      const parent = await this.categoriesRepository.findById(parentId);
+      if (!parent) {
+        throw new NotFoundException('Parent category not found');
+      }
+    }
+
+    const siblings = await this.categoriesRepository.findSiblingIds(parentId);
+    const siblingIds = new Set(siblings.map((sibling) => sibling.id));
+    const orderedIds = new Set(dto.orderedIds);
+
+    if (
+      siblingIds.size !== orderedIds.size ||
+      [...siblingIds].some((id) => !orderedIds.has(id))
+    ) {
+      throw new BadRequestException(
+        'orderedIds must include every sibling of this parent',
+      );
+    }
+
+    const categories = await this.categoriesRepository.reorderSiblings(
+      parentId,
+      dto.orderedIds,
+    );
+    await this.invalidateTreeCache();
+
+    return {
+      message: 'Categories reordered successfully',
+      data: await this.withImagesList(categories),
+    };
   }
 
   async activate(id: string) {
@@ -179,7 +266,10 @@ export class CategoriesService {
     });
 
     await this.invalidateTreeCache();
-    return { message: 'Category activated successfully', data: category };
+    return {
+      message: 'Category activated successfully',
+      data: await this.withImages(category),
+    };
   }
 
   async deactivate(id: string) {
@@ -187,14 +277,16 @@ export class CategoriesService {
     if (!existing) {
       throw new NotFoundException('Category not found');
     }
-    await this.assertCategoryCanBeDisabled(id);
 
     const category = await this.categoriesRepository.update(id, {
       isActive: false,
     });
 
     await this.invalidateTreeCache();
-    return { message: 'Category deactivated successfully', data: category };
+    return {
+      message: 'Category deactivated successfully',
+      data: await this.withImages(category),
+    };
   }
 
   async remove(id: string) {
@@ -202,15 +294,124 @@ export class CategoriesService {
     if (!existing) {
       throw new NotFoundException('Category not found');
     }
-    await this.assertCategoryCanBeDisabled(id);
+    await this.assertCategoryCanBeDeleted(id);
 
     await this.categoriesRepository.softDelete(id);
     await this.invalidateTreeCache();
     return { message: 'Category deleted successfully', data: null };
   }
 
+  async uploadImage(
+    id: string,
+    actorUserId: string,
+    file: Express.Multer.File | undefined,
+  ) {
+    const existing = await this.categoriesRepository.findById(id);
+    if (!existing) {
+      throw new NotFoundException('Category not found');
+    }
+
+    const result = await this.mediaService.uploadAdminEntityMedia(
+      actorUserId,
+      file,
+      MediaEntityType.CATEGORY,
+      id,
+      MediaContext.CATEGORY_IMAGE,
+      `admin/categories/${id}`,
+    );
+    await this.invalidateTreeCache();
+    return result;
+  }
+
+  async removeImage(id: string) {
+    const existing = await this.categoriesRepository.findById(id);
+    if (!existing) {
+      throw new NotFoundException('Category not found');
+    }
+
+    const result = await this.mediaService.clearEntityMediaContextAndDelete(
+      MediaEntityType.CATEGORY,
+      id,
+      MediaContext.CATEGORY_IMAGE,
+    );
+    await this.invalidateTreeCache();
+    return result;
+  }
+
+  private async loadPublicTree() {
+    const categories = await this.categoriesRepository.findRoots();
+    return this.withImagesList(categories);
+  }
+
+  private async withImages<T extends CategoryNode>(category: T) {
+    const [withImage] = await this.withImagesList([category]);
+    return withImage;
+  }
+
+  private async withImagesList<T extends CategoryNode>(categories: T[]) {
+    const ids: string[] = [];
+    const collectIds = (node: CategoryNode) => {
+      ids.push(node.id);
+      node.children?.forEach(collectIds);
+    };
+    categories.forEach(collectIds);
+
+    const images = await this.mediaService.getContextMediaForEntities(
+      MediaEntityType.CATEGORY,
+      ids,
+      MediaContext.CATEGORY_IMAGE,
+    );
+
+    const attach = <N extends CategoryNode>(
+      node: N,
+    ): N & { image: CategoryImage } => ({
+      ...node,
+      image: images.get(node.id) ?? null,
+      ...(node.children
+        ? { children: node.children.map((child) => attach(child)) }
+        : {}),
+    });
+
+    return categories.map((category) => attach(category));
+  }
+
+  async getVisibleCategoryIds(): Promise<string[]> {
+    const cached = await this.redisCacheService.getJson<string[]>(
+      VISIBLE_CATEGORY_IDS_CACHE_KEY,
+    );
+    if (cached) return cached;
+
+    const nodes = await this.categoriesRepository.findAllForVisibility();
+    const map = new Map(nodes.map((n) => [n.id, n]));
+    const ids: string[] = [];
+
+    for (const node of nodes) {
+      if (!node.isActive) continue;
+      let cur: (typeof nodes)[number] | undefined = node;
+      let visible = true;
+      while (cur) {
+        if (!cur.isActive) {
+          visible = false;
+          break;
+        }
+        cur = cur.parentId ? map.get(cur.parentId) : undefined;
+      }
+      if (visible) ids.push(node.id);
+    }
+
+    await this.redisCacheService.setJson(
+      VISIBLE_CATEGORY_IDS_CACHE_KEY,
+      ids,
+      CATEGORY_TREE_CACHE_TTL_SECONDS,
+    );
+    return ids;
+  }
+
   private async invalidateTreeCache() {
-    await this.redisCacheService.del(CATEGORY_TREE_CACHE_KEY);
+    await Promise.all([
+      this.redisCacheService.del(CATEGORY_TREE_CACHE_KEY),
+      this.redisCacheService.del(VISIBLE_CATEGORY_IDS_CACHE_KEY),
+    ]);
     this.logger.log(
       `category_tree_cache event=invalidate key=${CATEGORY_TREE_CACHE_KEY}`,
     );
@@ -242,21 +443,21 @@ export class CategoriesService {
     }
   }
 
-  private async assertCategoryCanBeDisabled(id: string) {
-    const [activeChildren, activeProducts] = await Promise.all([
-      this.categoriesRepository.countActiveChildren(id),
+  private async assertCategoryCanBeDeleted(id: string) {
+    const [anyChildren, activeProducts] = await Promise.all([
+      this.categoriesRepository.countAnyChildren(id),
       this.categoriesRepository.countActiveProducts(id),
     ]);
 
-    if (activeChildren > 0) {
+    if (anyChildren > 0) {
       throw new BadRequestException(
-        'Category has active child categories and cannot be disabled',
+        'Category has subcategories and cannot be deleted',
       );
     }
 
     if (activeProducts > 0) {
       throw new BadRequestException(
-        'Category has active products and cannot be disabled',
+        'Category has active products and cannot be deleted',
       );
     }
   }

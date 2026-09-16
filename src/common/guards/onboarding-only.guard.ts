@@ -5,22 +5,15 @@ import {
   Injectable,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
-import {
-  PlatformRole,
-  VendorOnboardingStatus,
-} from '../../../generated/prisma/client.js';
-import { RbacRepository } from '../../modules/rbac/rbac.repository';
+import { PlatformRole } from '../../../generated/prisma/client.js';
 import { ONBOARDING_ONLY_KEY } from '../decorators/onboarding-only.decorator';
 import type { AuthenticatedUser } from '../types/auth-user.type';
 
 @Injectable()
 export class OnboardingOnlyGuard implements CanActivate {
-  constructor(
-    private readonly reflector: Reflector,
-    private readonly rbacRepository: RbacRepository,
-  ) {}
+  constructor(private readonly reflector: Reflector) {}
 
-  async canActivate(context: ExecutionContext): Promise<boolean> {
+  canActivate(context: ExecutionContext): boolean {
     const required = this.reflector.getAllAndOverride<boolean>(
       ONBOARDING_ONLY_KEY,
       [context.getHandler(), context.getClass()],
@@ -52,20 +45,11 @@ export class OnboardingOnlyGuard implements CanActivate {
       );
     }
 
-    if (user.platformRole === PlatformRole.VENDOR) {
-      const profile = await this.rbacRepository.findVendorOnboardingByUserId(
-        user.userId,
+    // Removed staff keep platformRole VENDOR/PROFESSIONAL but must not onboard.
+    if (user.accessRevoked) {
+      throw new ForbiddenException(
+        'Your team access was removed. Contact an administrator.',
       );
-
-      if (!profile) {
-        return true;
-      }
-
-      if (profile.onboardingStatus === VendorOnboardingStatus.APPROVED) {
-        throw new ForbiddenException(
-          'Onboarding complete; use the approved vendor dashboard',
-        );
-      }
     }
 
     return true;
