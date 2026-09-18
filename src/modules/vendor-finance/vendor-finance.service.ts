@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import {
   NotificationEventType,
+  PayoutOrigin,
   PayoutStatus,
   Prisma,
 } from '../../../generated/prisma/client.js';
@@ -18,6 +19,7 @@ import { AuthService } from '../auth/auth.service';
 import { NotificationEmitterService } from '../notifications/notification-emitter.service';
 import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
 import { SecurityAuditService } from '../rbac/security-audit.service';
+import { AdminInitiatePayoutDto } from './dto/admin-initiate-payout.dto';
 import { AdminListPayoutsQueryDto } from './dto/admin-list-payouts-query.dto';
 import { CompletePayoutDto } from './dto/complete-payout.dto';
 import { CreateBankAccountDto } from './dto/create-bank-account.dto';
@@ -314,7 +316,10 @@ export class VendorFinanceService {
       'payoutsEnabled',
     );
     if (!payoutsEnabled) {
-      throw new BadRequestException('Payouts are currently disabled');
+      throw domainBadRequest(
+        DOMAIN_ERROR_CODES.PAYOUT_DISABLED,
+        'Payouts are currently disabled',
+      );
     }
 
     const minPayoutAmount = await this.platformSettings.getNumber(
@@ -361,10 +366,91 @@ export class VendorFinanceService {
       walletId: wallet.id,
       bankAccountId: bank.id,
       amount,
+      origin: PayoutOrigin.VENDOR_REQUEST,
+      initiatedByUserId: userId,
     });
 
     return {
       message: 'Payout requested successfully',
+      data: this.serializePayout(payout),
+    };
+  }
+
+  async adminInitiatePayout(actorUserId: string, dto: AdminInitiatePayoutDto) {
+    await this.requireApprovedVendor(dto.vendorId);
+
+    const payoutsEnabled = await this.platformSettings.getBoolean(
+      'finance',
+      'payoutsEnabled',
+    );
+    if (!payoutsEnabled) {
+      throw domainBadRequest(
+        DOMAIN_ERROR_CODES.PAYOUT_DISABLED,
+        'Payouts are currently disabled',
+      );
+    }
+
+    const minPayoutAmount = await this.platformSettings.getNumber(
+      'finance',
+      'minPayoutAmount',
+    );
+    if (dto.amount < minPayoutAmount) {
+      throw new BadRequestException(
+        `Minimum payout amount is ₹${minPayoutAmount}`,
+      );
+    }
+
+    const bank = await this.vendorFinanceRepository.findBankAccount(
+      dto.vendorId,
+    );
+    if (!bank) {
+      throw domainBadRequest(
+        DOMAIN_ERROR_CODES.BANK_ACCOUNT_UNVERIFIED,
+        'Bank account is required before payout',
+      );
+    }
+    if (!bank.isVerified) {
+      throw domainBadRequest(
+        DOMAIN_ERROR_CODES.BANK_ACCOUNT_UNVERIFIED,
+        'Bank account must be verified before requesting a payout',
+      );
+    }
+
+    const wallet = await this.vendorFinanceRepository.ensureWallet(
+      dto.vendorId,
+    );
+    const amount = new Prisma.Decimal(dto.amount);
+    if (wallet.balance.lessThan(amount)) {
+      throw new BadRequestException('Insufficient wallet balance');
+    }
+
+    const active = await this.vendorFinanceRepository.countActivePayouts(
+      dto.vendorId,
+    );
+    if (active > 0) {
+      throw new ConflictException('A payout is already pending or processing');
+    }
+
+    const payout = await this.vendorFinanceRepository.requestPayout({
+      vendorId: dto.vendorId,
+      walletId: wallet.id,
+      bankAccountId: bank.id,
+      amount,
+      origin: PayoutOrigin.ADMIN,
+      initiatedByUserId: actorUserId,
+    });
+
+    this.securityAudit.log({
+      actorUserId,
+      action: 'PAYOUT_INITIATE',
+      result: 'SUCCESS',
+      targetType: 'vendorPayout',
+      targetId: payout.id,
+      metadata: { vendorId: dto.vendorId },
+    });
+
+    return {
+      message: 'Payout initiated successfully',
       data: this.serializePayout(payout),
     };
   }
@@ -420,6 +506,8 @@ export class VendorFinanceService {
       vendorId: payout.vendorId,
       walletId: payout.walletId,
       amount: payout.amount,
+      payoutMethod: dto.payoutMethod,
+      referenceUtr: dto.referenceUtr,
       razorpayPayoutId: dto.razorpayPayoutId,
     });
     this.securityAudit.log({

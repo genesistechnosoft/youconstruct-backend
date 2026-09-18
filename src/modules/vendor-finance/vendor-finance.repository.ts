@@ -4,6 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import {
+  PayoutOrigin,
   PayoutStatus,
   PayoutTriggerType,
   Prisma,
@@ -61,6 +62,10 @@ export const PAYOUT_SELECT = {
   amount: true,
   status: true,
   triggerType: true,
+  origin: true,
+  initiatedByUserId: true,
+  payoutMethod: true,
+  referenceUtr: true,
   scheduledFor: true,
   processedAt: true,
   failureReason: true,
@@ -302,6 +307,8 @@ export class VendorFinanceRepository {
     walletId: string;
     bankAccountId: string;
     amount: Prisma.Decimal;
+    origin?: PayoutOrigin;
+    initiatedByUserId?: string;
   }) {
     try {
       return await this.prisma.$transaction(async (tx) => {
@@ -342,6 +349,8 @@ export class VendorFinanceRepository {
             amount: input.amount,
             status: PayoutStatus.PENDING,
             triggerType: PayoutTriggerType.MANUAL,
+            origin: input.origin ?? PayoutOrigin.VENDOR_REQUEST,
+            initiatedByUserId: input.initiatedByUserId ?? null,
           },
           select: PAYOUT_SELECT,
         });
@@ -382,7 +391,9 @@ export class VendorFinanceRepository {
     vendorId: string;
     walletId: string;
     amount: Prisma.Decimal;
-    razorpayPayoutId: string;
+    payoutMethod: string;
+    referenceUtr: string;
+    razorpayPayoutId?: string;
   }) {
     try {
       return await this.prisma.$transaction(async (tx) => {
@@ -393,7 +404,9 @@ export class VendorFinanceRepository {
           },
           data: {
             status: PayoutStatus.COMPLETED,
-            razorpayPayoutId: input.razorpayPayoutId,
+            payoutMethod: input.payoutMethod,
+            referenceUtr: input.referenceUtr,
+            razorpayPayoutId: input.razorpayPayoutId ?? null,
             processedAt: new Date(),
             failureReason: null,
           },

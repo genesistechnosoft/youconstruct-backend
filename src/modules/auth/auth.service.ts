@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
+  Inject,
   Injectable,
   UnauthorizedException,
 } from '@nestjs/common';
@@ -15,6 +16,7 @@ import type {
   AuthenticatedUser,
   JwtPayload,
 } from '../../common/types/auth-user.type';
+import { SMS_SENDER, type SmsSender } from '../../common/sms/sms-sender.interface';
 import { RbacService } from '../rbac/rbac.service';
 import { SecurityAuditService } from '../rbac/security-audit.service';
 import { AuthRepository } from './auth.repository';
@@ -59,6 +61,7 @@ export class AuthService {
     private readonly securityAudit: SecurityAuditService,
     private readonly jwtService: JwtService,
     private readonly config: ConfigService,
+    @Inject(SMS_SENDER) private readonly smsSender: SmsSender,
   ) {}
 
   async register(dto: {
@@ -211,7 +214,11 @@ export class AuthService {
       userId: existingUser?.id,
     });
 
-    // TODO: inject Twilio client and send OTP without logging secret values.
+    await this.smsSender.send({
+      to: dto.phone,
+      body: `Your YouConstruct OTP is ${otp}. It expires in 5 minutes.`,
+    });
+
     return this.genericOtpResponse(otp);
   }
 
@@ -434,6 +441,11 @@ export class AuthService {
       userId: user.id,
     });
 
+    await this.smsSender.send({
+      to: user.phone,
+      body: `Your YouConstruct verification OTP is ${otp}. It expires in 5 minutes.`,
+    });
+
     return this.genericOtpResponse(otp);
   }
 
@@ -645,9 +657,12 @@ export class AuthService {
   private genericOtpResponse(otp?: string) {
     const exposeOtp = this.config.get<string>('AUTH_EXPOSE_OTP_IN_RESPONSE');
     const nodeEnv = this.config.get<string>('NODE_ENV') ?? 'development';
+    const flag = (exposeOtp ?? 'true').toLowerCase();
     const shouldExpose =
       nodeEnv !== 'production' &&
-      (exposeOtp === 'true' || exposeOtp === '1' || exposeOtp === 'yes');
+      flag !== 'false' &&
+      flag !== '0' &&
+      flag !== 'no';
 
     return {
       message: 'OTP sent successfully',

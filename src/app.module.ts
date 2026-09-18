@@ -31,6 +31,7 @@ import { VendorDashboardModule } from './modules/vendor-dashboard/vendor-dashboa
 import { CartModule } from './modules/cart/cart.module';
 import { CouponsModule } from './modules/coupons/coupons.module';
 import { OrdersModule } from './modules/orders/orders.module';
+import { ReturnsModule } from './modules/returns/returns.module';
 import { PaymentsModule } from './modules/payments/payments.module';
 import { PlatformSettingsModule } from './modules/platform-settings/platform-settings.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
@@ -38,6 +39,8 @@ import { QueueModule } from './queue/queue.module';
 import { StorageModule } from './storage/storage.module';
 import { WishlistModule } from './modules/wishlist/wishlist.module';
 import { BulkUploadModule } from './modules/bulk-upload/bulk-upload.module';
+import { SmsModule } from './common/sms/sms.module';
+import { CommerceOtpModule } from './common/otp/commerce-otp.module';
 
 @Module({
   imports: [
@@ -57,6 +60,8 @@ import { BulkUploadModule } from './modules/bulk-upload/bulk-upload.module';
     }),
     PassportModule,
     PrismaModule,
+    SmsModule,
+    CommerceOtpModule,
     RbacModule,
     StorageModule,
     QueueModule,
@@ -78,6 +83,7 @@ import { BulkUploadModule } from './modules/bulk-upload/bulk-upload.module';
     CartModule,
     CouponsModule,
     OrdersModule,
+    ReturnsModule,
     PaymentsModule,
     PlatformSettingsModule,
     WishlistModule,

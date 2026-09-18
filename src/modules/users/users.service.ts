@@ -13,7 +13,10 @@ export class UsersService {
     return { message: 'Profile fetched successfully', data: user };
   }
 
-  async updateMe(userId: string, dto: { name?: string; fcmToken?: string }) {
+  async updateMe(
+    userId: string,
+    dto: { name?: string; phone?: string; fcmToken?: string },
+  ) {
     const user = await this.usersRepository.findById(userId);
     if (!user) {
       throw new NotFoundException('User not found');
@@ -21,6 +24,7 @@ export class UsersService {
 
     const updatedUser = await this.usersRepository.update(userId, {
       ...(dto.name !== undefined && { name: dto.name }),
+      ...(dto.phone !== undefined && { phone: dto.phone }),
       ...(dto.fcmToken !== undefined && { fcmToken: dto.fcmToken }),
     });
 
@@ -41,6 +45,7 @@ export class UsersService {
       city: string;
       state: string;
       pincode: string;
+      phone?: string;
       latitude?: number;
       longitude?: number;
       isDefault?: boolean;
@@ -60,6 +65,7 @@ export class UsersService {
       city?: string;
       state?: string;
       pincode?: string;
+      phone?: string;
       latitude?: number;
       longitude?: number;
       isDefault?: boolean;

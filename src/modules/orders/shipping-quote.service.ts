@@ -9,6 +9,8 @@ import {
   ShippingUnitType,
 } from '../../../generated/prisma/client.js';
 import { haversineKm } from '../../common/utils/haversine.util';
+import { allocateByShare } from '../../common/utils/money.util';
+import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
 import { OrdersRepository } from './orders.repository';
 
 export type ShippingChargeRule = {
@@ -71,14 +73,23 @@ export type VendorShippingBreakdown = {
   }>;
 };
 
+export type FreightQuoteOptions = {
+  freightSource: 'PLATFORM_FLAT' | 'VENDOR';
+  platformFreightAmount: Prisma.Decimal;
+};
+
 export type ShippingQuoteResult = {
+  freightSource: 'PLATFORM_FLAT' | 'VENDOR';
   vendors: VendorShippingBreakdown[];
   shippingTotal: string;
 };
 
 @Injectable()
 export class ShippingQuoteService {
-  constructor(private readonly ordersRepository: OrdersRepository) {}
+  constructor(
+    private readonly ordersRepository: OrdersRepository,
+    private readonly platformSettings: PlatformSettingsService,
+  ) {}
 
   async quoteForCart(
     userId: string,
@@ -155,28 +166,85 @@ export class ShippingQuoteService {
       });
     }
 
-    return this.computeQuote([...byVendor.values()], {
-      latitude: address.latitude,
-      longitude: address.longitude,
-    });
+    const freight = await this.getFreightOptions();
+    return this.computeQuote(
+      [...byVendor.values()],
+      {
+        latitude: address.latitude,
+        longitude: address.longitude,
+      },
+      freight,
+    );
+  }
+
+  async getFreightOptions(): Promise<FreightQuoteOptions> {
+    const enabled = await this.platformSettings.getBoolean(
+      'commerce',
+      'platformFreightEnabled',
+    );
+    const amount = await this.platformSettings.getDecimal(
+      'commerce',
+      'platformFreightAmount',
+    );
+    return {
+      freightSource: enabled ? 'PLATFORM_FLAT' : 'VENDOR',
+      platformFreightAmount: amount,
+    };
   }
 
   computeQuote(
     vendors: VendorShippingQuoteInput[],
     address: AddressGeo,
+    freight: FreightQuoteOptions,
   ): ShippingQuoteResult {
     const breakdowns: VendorShippingBreakdown[] = [];
     let shippingTotal = new Prisma.Decimal(0);
 
     for (const vendor of vendors) {
-      const breakdown = this.computeVendorShipping(vendor, address);
+      const breakdown =
+        freight.freightSource === 'PLATFORM_FLAT'
+          ? this.computePlatformFlatShipping(
+              vendor,
+              freight.platformFreightAmount,
+            )
+          : this.computeVendorShipping(vendor, address);
       breakdowns.push(breakdown);
       shippingTotal = shippingTotal.add(breakdown.shippingCharge);
     }
 
     return {
+      freightSource: freight.freightSource,
       vendors: breakdowns,
       shippingTotal: shippingTotal.toFixed(2),
+    };
+  }
+
+  private computePlatformFlatShipping(
+    vendor: VendorShippingQuoteInput,
+    amount: Prisma.Decimal,
+  ): VendorShippingBreakdown {
+    const merchandiseSubtotal = vendor.lines.reduce(
+      (sum, line) => sum.add(line.sellingPrice.mul(line.quantity)),
+      new Prisma.Decimal(0),
+    );
+    const shares = allocateByShare(
+      vendor.lines.map((line) => line.sellingPrice.mul(line.quantity)),
+      amount,
+    );
+
+    return {
+      vendorId: vendor.vendorId,
+      vendorName: vendor.vendorName,
+      merchandiseSubtotal: merchandiseSubtotal.toFixed(2),
+      shippingCharge: amount.toFixed(2),
+      methodType: null,
+      distanceKm: null,
+      lineCharges: vendor.lines.map((line, index) => ({
+        variantId: line.variantId,
+        productId: line.productId,
+        shippingCharge: (shares[index] ?? new Prisma.Decimal(0)).toFixed(2),
+        usedOverride: false,
+      })),
     };
   }
 

@@ -6,6 +6,7 @@ import {
   Param,
   ParseUUIDPipe,
   Patch,
+  Post,
   Query,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
@@ -16,6 +17,7 @@ import { RequireActiveContext } from '../../common/decorators/require-active-con
 import { PlatformRole, Roles } from '../../common/decorators/roles.decorator';
 import { PERMISSIONS } from '../rbac/permissions.constants';
 import type { AuthenticatedUser } from '../../common/types/auth-user.type';
+import { AdminInitiatePayoutDto } from './dto/admin-initiate-payout.dto';
 import { AdminListPayoutsQueryDto } from './dto/admin-list-payouts-query.dto';
 import { CompletePayoutDto } from './dto/complete-payout.dto';
 import { FailPayoutDto } from './dto/fail-payout.dto';
@@ -35,6 +37,16 @@ export class AdminPayoutsController {
   @ApiOperation({ summary: 'List all payouts' })
   listPayouts(@Query() query: AdminListPayoutsQueryDto) {
     return this.vendorFinanceService.listAdminPayouts(query);
+  }
+
+  @Post()
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Admin-initiate a vendor payout' })
+  initiatePayout(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: AdminInitiatePayoutDto,
+  ) {
+    return this.vendorFinanceService.adminInitiatePayout(user.userId, dto);
   }
 
   @Patch(':id/process')

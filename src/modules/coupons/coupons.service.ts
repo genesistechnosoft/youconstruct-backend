@@ -13,7 +13,7 @@ import {
 } from '../../../generated/prisma/client.js';
 import { DOMAIN_ERROR_CODES } from '../../common/errors/domain-error-code';
 import { domainBadRequest } from '../../common/errors/domain-exception';
-import { formatMoney } from '../../common/utils/money.util';
+import { allocateByShare, formatMoney } from '../../common/utils/money.util';
 import { paginationMeta } from '../../common/utils/pagination.util';
 import { NotificationEmitterService } from '../notifications/notification-emitter.service';
 import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
@@ -25,6 +25,7 @@ import {
 import { CouponsRepository } from './coupons.repository';
 
 export type CartLineForCoupon = {
+  variantId?: string;
   vendorId: string;
   lineTotal: Prisma.Decimal;
 };
@@ -377,6 +378,35 @@ export class CouponsService {
       eligibleSubtotal,
       discountAmount,
     };
+  }
+
+  allocateDiscountToLines(
+    lines: Array<{
+      variantId: string;
+      vendorId: string;
+      lineTotal: Prisma.Decimal;
+    }>,
+    evaluation: CouponEvaluation,
+  ): Map<string, Prisma.Decimal> {
+    const result = new Map<string, Prisma.Decimal>();
+    for (const line of lines) {
+      result.set(line.variantId, new Prisma.Decimal(0));
+    }
+    if (evaluation.discountAmount.lessThanOrEqualTo(0)) {
+      return result;
+    }
+
+    const eligible = lines.filter((line) =>
+      evaluation.vendorId ? line.vendorId === evaluation.vendorId : true,
+    );
+    const shares = allocateByShare(
+      eligible.map((line) => line.lineTotal),
+      evaluation.discountAmount,
+    );
+    eligible.forEach((line, index) => {
+      result.set(line.variantId, shares[index] ?? new Prisma.Decimal(0));
+    });
+    return result;
   }
 
   async recordUsage(input: {

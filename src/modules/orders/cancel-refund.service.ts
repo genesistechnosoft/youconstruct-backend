@@ -8,7 +8,6 @@ import {
 import {
   NotificationEventType,
   OrderRefundStatus,
-  PaymentMethod,
   PaymentStatus,
   PlatformRole,
   Prisma,
@@ -19,14 +18,21 @@ import {
   domainBadRequest,
   domainConflict,
 } from '../../common/errors/domain-exception';
+import { roundMoney, toPaise } from '../../common/utils/money.util';
 import { RazorpayClient } from '../payments/razorpay.client';
 import { NotificationEmitterService } from '../notifications/notification-emitter.service';
 import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
-import { isCancelAllowedBeforeCutoff } from './order-status.util';
+import {
+  isCustomerCancelAllowed,
+  isDeliveryDispatched,
+} from './order-status.util';
 import { OrdersRepository } from './orders.repository';
 import { OrdersService } from './orders.service';
 
 type CancelAudience = 'customer' | 'vendor' | 'admin' | 'system';
+type CancelSubOrderRow = NonNullable<
+  Awaited<ReturnType<OrdersRepository['findSubOrderForCancelRefund']>>
+>;
 
 @Injectable()
 export class CancelRefundService {
@@ -57,8 +63,6 @@ export class CancelRefundService {
       const result = await this.executeCancelSubOrder(input);
       ok = true;
       return result;
-    } catch (error) {
-      throw error;
     } finally {
       this.logger.log(
         `cancel_refund durationMs=${Date.now() - started} subOrderId=${input.subOrderId} ${ok ? 'ok' : 'fail'}`,
@@ -106,29 +110,40 @@ export class CancelRefundService {
       );
     }
 
-    if (input.audience === 'customer' || input.audience === 'vendor') {
-      const cutoffKey =
-        input.audience === 'customer'
-          ? 'customerCancelUntilStatus'
-          : 'vendorCancelUntilStatus';
-      const cutoff = await this.platformSettings.getString(
+    const hasDispatched = so.deliveries.some((d) =>
+      isDeliveryDispatched(d.status),
+    );
+
+    if (input.audience === 'customer') {
+      const windowHours = await this.platformSettings.getNumber(
         'commerce',
-        cutoffKey,
+        'customerCancelWindowHours',
       );
-      if (!isCancelAllowedBeforeCutoff(so.status, cutoff)) {
+      if (
+        !isCustomerCancelAllowed({
+          orderCreatedAt: so.order.createdAt,
+          windowHours: windowHours > 0 ? windowHours : 24,
+          hasDispatchedDelivery: hasDispatched,
+          subOrderStatus: so.status,
+        })
+      ) {
         throw domainBadRequest(
-          DOMAIN_ERROR_CODES.CANCEL_NOT_ALLOWED,
-          `Cancellation is not allowed after ${cutoff}`,
+          DOMAIN_ERROR_CODES.CANCEL_WINDOW_EXPIRED,
+          'Cancellation is no longer allowed for this sub-order',
         );
       }
     }
 
-    const paidOnline =
-      so.order.paymentMethod === PaymentMethod.ONLINE &&
-      so.order.paymentStatus === PaymentStatus.PAID &&
-      Boolean(so.order.razorpayPaymentId);
+    const remaining = this.remainingUndelivered(so);
+    if (remaining.qty <= 0) {
+      throw domainBadRequest(
+        DOMAIN_ERROR_CODES.CANCEL_NOT_ALLOWED,
+        'No remaining undelivered quantity to cancel',
+      );
+    }
 
-    if (paidOnline) {
+    const captured = this.isCaptured(so);
+    if (captured) {
       return this.refundSubOrderInternal({
         so,
         actorUserId: input.actorUserId,
@@ -147,7 +162,7 @@ export class CancelRefundService {
       reason: input.reason,
       targetStatus: SubOrderStatus.CANCELLED,
       restock: true,
-      clawbackWallet: Boolean(so.walletCreditedAt),
+      clawbackWallet: false,
       createRefund: false,
     });
 
@@ -216,19 +231,37 @@ export class CancelRefundService {
         continue;
       }
 
-      const paidOnline =
-        so.order.paymentMethod === PaymentMethod.ONLINE &&
-        so.order.paymentStatus === PaymentStatus.PAID &&
-        Boolean(so.order.razorpayPaymentId);
-
-      if (!paidOnline && so.order.paymentMethod === PaymentMethod.ONLINE) {
+      const remaining = this.remainingUndelivered(so);
+      if (remaining.qty <= 0) {
         throw domainBadRequest(
           DOMAIN_ERROR_CODES.REFUND_NOT_ALLOWED,
-          'Online order is not paid — cancel instead of refund',
+          'Delivered quantity must be returned instead of refunded',
         );
       }
 
-      if (paidOnline) {
+      const captured = this.isCaptured(so);
+      if (!captured && so.order.paymentMethod !== undefined) {
+        if (
+          so.order.paymentStatus !== PaymentStatus.PAID &&
+          so.order.paymentStatus !== PaymentStatus.PARTIALLY_PAID
+        ) {
+          await this.ordersRepository.applySubOrderCancelOrRefund({
+            subOrderId: so.id,
+            actorUserId: input.actorUserId,
+            actorRole: PlatformRole.ADMIN,
+            reason: input.note ?? 'Admin refund',
+            targetStatus: SubOrderStatus.CANCELLED,
+            restock: true,
+            clawbackWallet: false,
+            createRefund: true,
+            refundAmount: new Prisma.Decimal(0),
+            refundStatus: OrderRefundStatus.COMPLETED,
+          });
+          continue;
+        }
+      }
+
+      if (captured) {
         await this.refundSubOrderInternal({
           so,
           actorUserId: input.actorUserId,
@@ -245,9 +278,9 @@ export class CancelRefundService {
           reason: input.note ?? 'Admin refund',
           targetStatus: SubOrderStatus.REFUNDED,
           restock: true,
-          clawbackWallet: Boolean(so.walletCreditedAt),
+          clawbackWallet: false,
           createRefund: true,
-          refundAmount: so.total,
+          refundAmount: this.computeOnlineRefund(so),
           refundStatus: OrderRefundStatus.COMPLETED,
         });
 
@@ -269,9 +302,7 @@ export class CancelRefundService {
   }
 
   private async refundSubOrderInternal(input: {
-    so: NonNullable<
-      Awaited<ReturnType<OrdersRepository['findSubOrderForCancelRefund']>>
-    >;
+    so: CancelSubOrderRow;
     actorUserId: string | null;
     actorRole: PlatformRole | null;
     reason: string;
@@ -285,8 +316,6 @@ export class CancelRefundService {
       const result = await this.executeRefundSubOrder(input);
       ok = true;
       return result;
-    } catch (error) {
-      throw error;
     } finally {
       if (!input.fromCancel) {
         this.logger.log(
@@ -297,9 +326,7 @@ export class CancelRefundService {
   }
 
   private async executeRefundSubOrder(input: {
-    so: NonNullable<
-      Awaited<ReturnType<OrdersRepository['findSubOrderForCancelRefund']>>
-    >;
+    so: CancelSubOrderRow;
     actorUserId: string | null;
     actorRole: PlatformRole | null;
     reason: string;
@@ -307,16 +334,6 @@ export class CancelRefundService {
     audience: CancelAudience;
     vendorId?: string;
   }) {
-    const existing = await this.ordersRepository.findCompletedRefundForSubOrder(
-      input.so.id,
-    );
-    if (existing) {
-      throw domainConflict(
-        DOMAIN_ERROR_CODES.ALREADY_CANCELLED,
-        'Sub-order already has a refund in progress or completed',
-      );
-    }
-
     const paymentId = input.so.order.razorpayPaymentId;
     if (!paymentId) {
       throw domainBadRequest(
@@ -325,7 +342,23 @@ export class CancelRefundService {
       );
     }
 
-    const amountPaise = Number(input.so.total.mul(100).toFixed(0));
+    const computed = this.computeOnlineRefund(input.so);
+    const already = await this.ordersRepository.sumCompletedRefunds(
+      input.so.orderId,
+    );
+    const remainingCap = Prisma.Decimal.max(
+      input.so.order.onlineAmount.sub(already),
+      new Prisma.Decimal(0),
+    );
+    const refundAmount = Prisma.Decimal.min(computed, remainingCap);
+    if (refundAmount.lessThanOrEqualTo(0)) {
+      throw domainBadRequest(
+        DOMAIN_ERROR_CODES.REFUND_NOT_ALLOWED,
+        'No remaining refundable online amount',
+      );
+    }
+
+    const amountPaise = toPaise(refundAmount);
     let razorpayRefundId: string | null = null;
     let providerPayload: Prisma.InputJsonValue | undefined;
 
@@ -347,7 +380,7 @@ export class CancelRefundService {
         orderId: input.so.orderId,
         subOrderId: input.so.id,
         actorUserId: input.actorUserId,
-        amount: input.so.total,
+        amount: refundAmount,
         reason: message,
       });
       throw domainBadRequest(
@@ -361,11 +394,13 @@ export class CancelRefundService {
       actorUserId: input.actorUserId,
       actorRole: input.actorRole,
       reason: input.reason,
-      targetStatus: SubOrderStatus.REFUNDED,
+      targetStatus: input.fromCancel
+        ? SubOrderStatus.CANCELLED
+        : SubOrderStatus.REFUNDED,
       restock: true,
-      clawbackWallet: Boolean(input.so.walletCreditedAt),
+      clawbackWallet: false,
       createRefund: true,
-      refundAmount: input.so.total,
+      refundAmount,
       razorpayRefundId,
       providerPayload,
       refundStatus: OrderRefundStatus.COMPLETED,
@@ -402,5 +437,87 @@ export class CancelRefundService {
         input.vendorId,
       ),
     };
+  }
+
+  private isCaptured(so: CancelSubOrderRow): boolean {
+    return (
+      Boolean(so.order.razorpayPaymentId) &&
+      (so.order.paymentStatus === PaymentStatus.PAID ||
+        so.order.paymentStatus === PaymentStatus.PARTIALLY_PAID)
+    );
+  }
+
+  private remainingUndelivered(so: CancelSubOrderRow): {
+    qty: number;
+    merch: Prisma.Decimal;
+  } {
+    const deliveredByItem = new Map<string, number>();
+    for (const delivery of so.deliveries) {
+      if (delivery.status !== 'DELIVERED') {
+        continue;
+      }
+      for (const line of delivery.items) {
+        deliveredByItem.set(
+          line.orderItemId,
+          (deliveredByItem.get(line.orderItemId) ?? 0) + line.quantity,
+        );
+      }
+    }
+    let qty = 0;
+    let merch = new Prisma.Decimal(0);
+    for (const item of so.items) {
+      const delivered = deliveredByItem.get(item.id) ?? 0;
+      const remaining = item.quantity - item.cancelledQuantity - delivered;
+      if (remaining <= 0) {
+        continue;
+      }
+      qty += remaining;
+      const unit =
+        item.quantity > 0
+          ? item.total.div(item.quantity)
+          : new Prisma.Decimal(0);
+      merch = merch.add(unit.mul(remaining));
+    }
+    return { qty, merch };
+  }
+
+  private computeOnlineRefund(so: CancelSubOrderRow): Prisma.Decimal {
+    const remaining = this.remainingUndelivered(so);
+    const merchNet = Prisma.Decimal.max(
+      so.subtotal.sub(so.discountAmount),
+      new Prisma.Decimal(0),
+    );
+    const deliveredQty = so.items.reduce((sum, item) => {
+      const delivered = so.deliveries
+        .filter((d) => d.status === 'DELIVERED')
+        .reduce(
+          (dSum, d) =>
+            dSum +
+            d.items
+              .filter((line) => line.orderItemId === item.id)
+              .reduce((l, line) => l + line.quantity, 0),
+          0,
+        );
+      return sum + delivered;
+    }, 0);
+
+    let merchRefund: Prisma.Decimal;
+    if (deliveredQty === 0) {
+      merchRefund = so.onlineMerchandiseAmount;
+    } else if (merchNet.greaterThan(0)) {
+      merchRefund = roundMoney(
+        remaining.merch.div(merchNet).mul(so.onlineMerchandiseAmount),
+      );
+    } else {
+      merchRefund = new Prisma.Decimal(0);
+    }
+
+    const dispatched = so.deliveries.some((d) =>
+      isDeliveryDispatched(d.status),
+    );
+    const freight = dispatched
+      ? new Prisma.Decimal(0)
+      : so.onlineShippingAmount;
+    return merchRefund.add(freight);
   }
 }

@@ -1,43 +1,35 @@
-# Deferred Super Admin Platform Settings
+# Launch commerce platform settings
 
-## Purpose
+These knobs live in `platform_settings` (`commerce.*` / `finance.*` / `notifications.*`) and are editable by Super Admin except where marked.
 
-Future Super Admin–owned platform knobs for commercial and checkout behavior.
-Module 5 (Cart & Orders) hard-codes launch defaults in code/constants — no settings API yet.
-When a later **Platform Settings** module (or Module 8+) is planned, start from this file.
+## Commerce (launch contract)
 
-## Suggested model
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `commerce.platformFreightEnabled` | boolean | `true` | When ON, skip vendor methods and product shipping overrides. Charge `platformFreightAmount` once per vendor. Snapshot `{ source: "PLATFORM_FLAT", amount }`. |
+| `commerce.platformFreightAmount` | decimal string | `"500.00"` | Flat freight per vendor while the toggle is ON. |
+| `commerce.codAdvanceRate` | decimal string | `"0.5000"` | COD Razorpay amount = this rate × merchandise after discount/tax + 100% freight. COD is never zero-advance. |
+| `commerce.customerCancelWindowHours` | number | `24` | Customer may cancel a sub-order until `min(order.createdAt + window, first delivery SHIPPED)`. |
+| `commerce.returnWindowHours` | number | `48` | From that delivery's `deliveredAt`. Ignores product `isReturnable` / `returnWindowDays`. |
+| `commerce.deliveryOtpTtlMinutes` | number | `10` | Hashed commerce OTP TTL (delivery + return receipt/offline refund). |
+| `commerce.deliveryOtpMaxAttempts` | number | `5` | Lockout after this many failed verifies. |
+| `commerce.returnsEnabled` | boolean | `true` | Gates the returns module. |
+| `commerce.codEnabled` | boolean | `true` | Checkout COD method. |
+| `commerce.onlinePaymentTimeoutMinutes` | number | `30` | Unpaid COD-advance and ONLINE orders restock the same way. |
 
-- `PlatformSetting` key-value store (or typed config rows)
-- Admin API: `GET/PATCH /admin/settings`
-- Scope: Super Admin only for sensitive commercial rules
+`customerCancelUntilStatus` / `vendorCancelUntilStatus` are **not** used for launch cancel rules.
 
-## Module 5 hard-coded defaults
+## Wallet and payouts
 
-- Commission default `0.10` (with per-vendor `VendorProfile.commissionRate` override)
-- Payment methods: both COD + ONLINE enabled
-- Tax / GST: always `0`
-- Wallet credit: ONLINE on payment CAPTURED; COD on SubOrder `DELIVERED`
-- Payment timeout: 30 minutes
+- Wallet credits only after OTP-confirmed or admin-overridden **delivery** (append-only `vendor_transactions`). Not on Razorpay capture.
+- Payouts: vendor `POST /vendor/payouts` (step-up `PAYOUT_REQUEST`) and admin `POST /admin/payouts`. Complete with `payoutMethod` + `referenceUtr` (`razorpayPayoutId` optional).
+- `finance.payoutsEnabled` / `finance.minPayoutAmount` still apply (`PAYOUT_DISABLED` when off).
 
-## Checklist — settings to implement later
+## Notifications
 
-| Key / setting              | Module 5 hard-coded value | Notes                                                              |
-| -------------------------- | ------------------------- | ------------------------------------------------------------------ |
-| `defaultCommissionRate`    | `0.10`                    | Snapshot onto SubOrder; vendor override already on `VendorProfile` |
-| `paymentMethodsEnabled`    | `COD`, `ONLINE`           | Toggle which methods checkout accepts                              |
-| `taxEnabled` / GST rules   | off / `0`                 | Ship with tax module                                               |
-| `walletCreditTimingOnline` | on payment CAPTURED       | Treat as accounting rule; change carefully                         |
-| `walletCreditTimingCod`    | on SubOrder DELIVERED     | Refine with COD settlement                                         |
-| `paymentTimeoutMinutes`    | `30`                      | Today env/constant is fine; admin UI optional                      |
-
-## Explicit non-goals (early settings)
-
-Do **not** make wallet credit timing casually toggleable without a migration/audit plan.
-Flipping “credit on capture vs delivery” mid-flight is dangerous for accounting consistency.
+When `notifications.smsEnabled` is true, in-app events also send SMS via the Twilio `SmsSender`. Delivery/return OTPs always go through that sender regardless of the event toggle.
 
 ## Discoverability
 
-- Linked from Bruno `COVERAGE.md` (Module 5 section)
-- Backlog starter for future Platform Settings module / Module 8+
-)
+- Admin API: `GET/PATCH /admin/settings`
+- Bruno `COVERAGE.md` (cart/orders/returns/payouts)

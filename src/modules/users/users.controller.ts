@@ -26,6 +26,7 @@ export class UsersController {
 
   @Get('me')
   @HttpCode(200)
+  @Roles(PlatformRole.CUSTOMER, PlatformRole.VENDOR, PlatformRole.PROFESSIONAL)
   @ApiOperation({ summary: 'Get current user profile' })
   getMe(@CurrentUser() user: { userId: string }) {
     return this.usersService.getMe(user.userId);
@@ -33,6 +34,7 @@ export class UsersController {
 
   @Patch('me')
   @HttpCode(200)
+  @Roles(PlatformRole.CUSTOMER, PlatformRole.VENDOR, PlatformRole.PROFESSIONAL)
   @ApiOperation({ summary: 'Update current user profile' })
   updateMe(
     @CurrentUser() user: { userId: string },

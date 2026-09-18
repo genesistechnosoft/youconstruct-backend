@@ -5,6 +5,7 @@ import {
   IsLongitude,
   IsNotEmpty,
   IsOptional,
+  IsPhoneNumber,
   IsString,
   Matches,
 } from 'class-validator';
@@ -40,6 +41,11 @@ export class CreateAddressDto {
   @IsNotEmpty()
   @Matches(/^\d{6}$/, { message: 'pincode must be exactly 6 digits' })
   pincode: string;
+
+  @ApiPropertyOptional({ example: '+919876543210' })
+  @IsOptional()
+  @IsPhoneNumber('IN')
+  phone?: string;
 
   @ApiPropertyOptional({ example: 19.076 })
   @IsOptional()

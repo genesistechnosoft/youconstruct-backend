@@ -5,6 +5,7 @@ import {
   CouponDiscountType,
   CouponScope,
   CouponStatus,
+  DeliveryStatus,
   KycDocumentType,
   KycStatus,
   NotificationChannel,
@@ -14,10 +15,13 @@ import {
   OrderStatus,
   PaymentMethod,
   PaymentStatus,
+  PayoutOrigin,
   PayoutStatus,
   PlatformRole,
   ProductStatus,
   RestockStatus,
+  ReturnReasonCode,
+  ReturnStatus,
   ShipmentStatus,
   ShippingMethodType,
   ShippingUnitType,
@@ -25,7 +29,9 @@ import {
   VendorOnboardingStatus,
 } from '../../../generated/prisma/client.js';
 import {
+  ADMIN_DELIVERY_TRANSITIONS,
   ADMIN_SUB_ORDER_TRANSITIONS,
+  VENDOR_DELIVERY_TRANSITIONS,
   VENDOR_SUB_ORDER_TRANSITIONS,
 } from '../orders/order-status.util';
 import { PERMISSION_CATALOG } from '../rbac/permissions.constants';
@@ -42,6 +48,7 @@ export class MetaService {
           couponDiscountType: this.options(CouponDiscountType),
           couponScope: this.options(CouponScope),
           couponStatus: this.options(CouponStatus),
+          deliveryStatus: this.options(DeliveryStatus),
           kycDocumentType: this.options(KycDocumentType),
           kycStatus: this.options(KycStatus),
           notificationChannel: this.options(NotificationChannel),
@@ -51,10 +58,13 @@ export class MetaService {
           orderStatus: this.options(OrderStatus),
           paymentMethod: this.options(PaymentMethod),
           paymentStatus: this.options(PaymentStatus),
+          payoutOrigin: this.options(PayoutOrigin),
           payoutStatus: this.options(PayoutStatus),
           platformRole: this.options(PlatformRole),
           productStatus: this.options(ProductStatus),
           restockStatus: this.options(RestockStatus),
+          returnReasonCode: this.options(ReturnReasonCode),
+          returnStatus: this.options(ReturnStatus),
           shipmentStatus: this.options(ShipmentStatus),
           shippingMethodType: this.options(ShippingMethodType),
           shippingUnitType: this.options(ShippingUnitType),
@@ -64,6 +74,8 @@ export class MetaService {
         transitions: {
           vendorSubOrder: VENDOR_SUB_ORDER_TRANSITIONS,
           adminSubOrder: ADMIN_SUB_ORDER_TRANSITIONS,
+          vendorDelivery: VENDOR_DELIVERY_TRANSITIONS,
+          adminDelivery: ADMIN_DELIVERY_TRANSITIONS,
         },
         permissions: PERMISSION_CATALOG.map((entry) => ({
           value: entry.key,

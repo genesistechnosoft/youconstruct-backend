@@ -16,7 +16,6 @@ import {
   PaymentStatus,
   PlatformRole,
   Prisma,
-  ShipmentStatus,
   SubOrderStatus,
   NotificationEventType,
   MediaAccessLevel,
@@ -24,7 +23,12 @@ import {
 import { DOMAIN_ERROR_CODES } from '../../common/errors/domain-error-code';
 import { domainBadRequest } from '../../common/errors/domain-exception';
 import { paginate, paginationMeta } from '../../common/utils/pagination.util';
-import { formatMoney, formatRate } from '../../common/utils/money.util';
+import {
+  formatMoney,
+  formatRate,
+  roundMoney,
+  toPaise,
+} from '../../common/utils/money.util';
 import { PAYMENT_TIMEOUT_QUEUE } from '../../queue/queue.constants';
 import { StorageService } from '../../storage/storage.service';
 import { NotificationEmitterService } from '../notifications/notification-emitter.service';
@@ -93,8 +97,6 @@ export class OrdersService {
           : undefined;
       ok = true;
       return result;
-    } catch (error) {
-      throw error;
     } finally {
       this.logger.log(
         `checkout durationMs=${Date.now() - started} orderId=${orderId ?? 'n/a'} paymentMethod=${dto.paymentMethod} ${ok ? 'ok' : 'fail'}`,
@@ -128,10 +130,26 @@ export class OrdersService {
     if (!cart) {
       throw domainBadRequest(DOMAIN_ERROR_CODES.CART_EMPTY, 'Cart is empty');
     }
-    const visibleCategoryIds = new Set(
-      await this.categoriesService.getVisibleCategoryIds(),
+    const [visibleCategoryIds, freight, advanceRate, userRecord] =
+      await Promise.all([
+        this.categoriesService.getVisibleCategoryIds(),
+        this.shippingQuoteService.getFreightOptions(),
+        this.platformSettings.getDecimal('commerce', 'codAdvanceRate'),
+        this.ordersRepository.findUserPhone(userId),
+      ]);
+    this.ordersRepository.assertCheckoutCartValid(
+      cart,
+      new Set(visibleCategoryIds),
+      { requireVendorShipping: freight.freightSource !== 'PLATFORM_FLAT' },
     );
-    this.ordersRepository.assertCheckoutCartValid(cart, visibleCategoryIds);
+
+    const otpPhone = address.phone ?? userRecord?.phone ?? null;
+    if (!otpPhone) {
+      throw domainBadRequest(
+        DOMAIN_ERROR_CODES.OTP_PHONE_MISSING,
+        'A phone number on the address or account is required for checkout',
+      );
+    }
 
     const productIds = cart.items.map((i) => i.variant.product.id);
     const variantIds = cart.items.map((i) => i.variant.id);
@@ -230,28 +248,53 @@ export class OrdersService {
         latitude: address.latitude,
         longitude: address.longitude,
       },
+      freight,
     );
 
-    const isCod = dto.paymentMethod === PaymentMethod.COD;
-    const orderStatus = isCod
-      ? OrderStatus.CONFIRMED
-      : OrderStatus.PENDING_PAYMENT;
+    const orderStatus = OrderStatus.PENDING_PAYMENT;
     const paymentStatus = PaymentStatus.PENDING;
-    const subOrderStatus = isCod
-      ? SubOrderStatus.CONFIRMED
-      : SubOrderStatus.PENDING;
+    const subOrderStatus = SubOrderStatus.PENDING;
 
     const dateStamp = this.formatDateStamp(new Date());
     let orderNumber = this.buildOrderNumber(dateStamp);
+
+    const couponLines = cart.items.map((item) => ({
+      variantId: item.variant.id,
+      vendorId: item.variant.product.vendor.id,
+      lineTotal: item.variant.sellingPrice.mul(item.quantity),
+    }));
+
+    let discountAmount = new Prisma.Decimal(0);
+    let couponId: string | null = null;
+    let discountByVariant = new Map<string, Prisma.Decimal>();
+    if (dto.couponCode) {
+      const evaluation = await this.couponsService.evaluateCoupon(
+        dto.couponCode,
+        userId,
+        couponLines,
+      );
+      discountAmount = evaluation.discountAmount;
+      couponId = evaluation.couponId;
+      discountByVariant = this.couponsService.allocateDiscountToLines(
+        couponLines,
+        evaluation,
+      );
+    }
+
+    const isCod = dto.paymentMethod === PaymentMethod.COD;
     const subOrderPayloads: Array<{
       subOrderNumber: string;
       vendorId: string;
       status: SubOrderStatus;
       subtotal: Prisma.Decimal;
+      discountAmount: Prisma.Decimal;
       shippingCharge: Prisma.Decimal;
       shippingMethodSnapshot: Prisma.InputJsonValue;
       taxAmount: Prisma.Decimal;
       total: Prisma.Decimal;
+      onlineMerchandiseAmount: Prisma.Decimal;
+      onlineShippingAmount: Prisma.Decimal;
+      offlineMerchandiseAmount: Prisma.Decimal;
       platformCommissionRate: Prisma.Decimal;
       platformCommission: Prisma.Decimal;
       vendorEarning: Prisma.Decimal;
@@ -263,6 +306,7 @@ export class OrdersService {
         unitPrice: Prisma.Decimal;
         unitSymbol: string;
         quantity: number;
+        discountAmount: Prisma.Decimal;
         itemShippingCharge: Prisma.Decimal;
         total: Prisma.Decimal;
         imageUrlSnapshot: string | null;
@@ -272,6 +316,8 @@ export class OrdersService {
 
     let orderSubtotal = new Prisma.Decimal(0);
     let orderShipping = new Prisma.Decimal(0);
+    let orderOnline = new Prisma.Decimal(0);
+    let orderOffline = new Prisma.Decimal(0);
 
     for (const vendorGroup of vendorMap.values()) {
       const breakdown = quote.vendors.find(
@@ -290,6 +336,7 @@ export class OrdersService {
       );
 
       let subtotal = new Prisma.Decimal(0);
+      let vendorDiscount = new Prisma.Decimal(0);
       const items: Array<{
         variantId: string;
         productName: string;
@@ -298,6 +345,7 @@ export class OrdersService {
         unitPrice: Prisma.Decimal;
         unitSymbol: string;
         quantity: number;
+        discountAmount: Prisma.Decimal;
         itemShippingCharge: Prisma.Decimal;
         total: Prisma.Decimal;
         imageUrlSnapshot: string | null;
@@ -310,7 +358,10 @@ export class OrdersService {
         )!;
         const unitPrice = cartItem.variant.sellingPrice;
         const lineTotal = unitPrice.mul(line.quantity);
+        const lineDiscount =
+          discountByVariant.get(line.variantId) ?? new Prisma.Decimal(0);
         subtotal = subtotal.add(lineTotal);
+        vendorDiscount = vendorDiscount.add(lineDiscount);
 
         const lineShip = breakdown.lineCharges.find(
           (c) => c.variantId === line.variantId,
@@ -331,40 +382,70 @@ export class OrdersService {
           unitPrice,
           unitSymbol: cartItem.variant.primaryUnit.symbol,
           quantity: line.quantity,
+          discountAmount: lineDiscount,
           itemShippingCharge,
-          total: lineTotal,
+          total: Prisma.Decimal.max(
+            lineTotal.sub(lineDiscount),
+            new Prisma.Decimal(0),
+          ),
           imageUrlSnapshot: snap?.imageUrlSnapshot ?? null,
           imageStorageKeySnapshot: snap?.imageStorageKeySnapshot ?? null,
         });
       }
 
       const shippingCharge = new Prisma.Decimal(breakdown.shippingCharge);
-      const platformCommission = subtotal
-        .mul(commissionRate)
-        .toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP);
-      const vendorEarning = subtotal
+      const taxAmount = new Prisma.Decimal(0);
+      const merchNet = Prisma.Decimal.max(
+        subtotal.sub(vendorDiscount).add(taxAmount),
+        new Prisma.Decimal(0),
+      );
+      const platformCommission = roundMoney(merchNet.mul(commissionRate));
+      const onlineMerchandiseAmount = isCod
+        ? roundMoney(merchNet.mul(advanceRate))
+        : merchNet;
+      const offlineMerchandiseAmount = isCod
+        ? merchNet.sub(onlineMerchandiseAmount)
+        : new Prisma.Decimal(0);
+      const onlineShippingAmount = shippingCharge;
+      const vendorEarning = onlineMerchandiseAmount
         .sub(platformCommission)
         .add(shippingCharge);
-      const taxAmount = new Prisma.Decimal(0);
-      const total = subtotal.add(shippingCharge).add(taxAmount);
+      const total = merchNet.add(shippingCharge);
 
       orderSubtotal = orderSubtotal.add(subtotal);
       orderShipping = orderShipping.add(shippingCharge);
+      orderOnline = orderOnline
+        .add(onlineMerchandiseAmount)
+        .add(onlineShippingAmount);
+      orderOffline = orderOffline.add(offlineMerchandiseAmount);
+
+      const snapshot: Prisma.InputJsonValue =
+        freight.freightSource === 'PLATFORM_FLAT'
+          ? {
+              source: 'PLATFORM_FLAT',
+              amount: shippingCharge.toFixed(2),
+            }
+          : {
+              source: 'VENDOR',
+              methodType: breakdown.methodType,
+              shippingCharge: breakdown.shippingCharge,
+              distanceKm: breakdown.distanceKm,
+              lineCharges: breakdown.lineCharges,
+            };
 
       subOrderPayloads.push({
         subOrderNumber: this.buildSubOrderNumber(dateStamp),
         vendorId: vendorGroup.vendorId,
         status: subOrderStatus,
         subtotal,
+        discountAmount: vendorDiscount,
         shippingCharge,
-        shippingMethodSnapshot: {
-          methodType: breakdown.methodType,
-          shippingCharge: breakdown.shippingCharge,
-          distanceKm: breakdown.distanceKm,
-          lineCharges: breakdown.lineCharges,
-        },
+        shippingMethodSnapshot: snapshot,
         taxAmount,
         total,
+        onlineMerchandiseAmount,
+        onlineShippingAmount,
+        offlineMerchandiseAmount,
         platformCommissionRate: commissionRate,
         platformCommission,
         vendorEarning,
@@ -373,28 +454,17 @@ export class OrdersService {
     }
 
     const taxTotal = new Prisma.Decimal(0);
-
-    const couponLines = cart.items.map((item) => ({
-      vendorId: item.variant.product.vendor.id,
-      lineTotal: item.variant.sellingPrice.mul(item.quantity),
-    }));
-
-    let discountAmount = new Prisma.Decimal(0);
-    let couponId: string | null = null;
-    if (dto.couponCode) {
-      const evaluation = await this.couponsService.evaluateCoupon(
-        dto.couponCode,
-        userId,
-        couponLines,
-      );
-      discountAmount = evaluation.discountAmount;
-      couponId = evaluation.couponId;
-    }
-
     const grandTotal = Prisma.Decimal.max(
       orderSubtotal.add(orderShipping).add(taxTotal).sub(discountAmount),
       new Prisma.Decimal(0),
     );
+
+    if (isCod && orderOnline.lessThanOrEqualTo(0)) {
+      throw domainBadRequest(
+        DOMAIN_ERROR_CODES.COD_ADVANCE_REQUIRED,
+        'Cash on delivery requires an online advance',
+      );
+    }
 
     let order:
       | NonNullable<
@@ -415,6 +485,8 @@ export class OrdersService {
           shippingTotal: orderShipping,
           taxTotal,
           grandTotal,
+          onlineAmount: orderOnline,
+          offlineAmount: orderOffline,
           orderStatus,
           paymentStatus,
           subOrders: subOrderPayloads,
@@ -438,21 +510,7 @@ export class OrdersService {
       throw new ConflictException('Could not create order');
     }
 
-    if (isCod) {
-      this.notifications.emit({
-        userId,
-        eventType: NotificationEventType.ORDER_PLACED,
-        title: 'Order placed',
-        body: `Your order ${order.orderNumber} has been placed`,
-        data: { orderId: order.id },
-      });
-      return {
-        message: 'Order placed successfully',
-        data: { order: this.serializeOrder(order, 'customer') },
-      };
-    }
-
-    const amountPaise = Number(grandTotal.mul(100).toFixed(0));
+    const amountPaise = toPaise(orderOnline);
     const razorpayOrder = await this.razorpayClient.createOrder({
       amountPaise,
       receipt: order.orderNumber,
@@ -602,44 +660,13 @@ export class OrdersService {
       );
     }
 
-    if (
-      dto.status === SubOrderStatus.SHIPPED &&
-      !so.shipment?.trackingNumber &&
-      !dto.note
-    ) {
-      // tracking recommended but allow if shipment update done separately
-    }
-
-    const shipmentUpdate =
-      dto.status === SubOrderStatus.SHIPPED
-        ? {
-            status: ShipmentStatus.SHIPPED,
-            shippedAt: new Date(),
-          }
-        : dto.status === SubOrderStatus.OUT_FOR_DELIVERY
-          ? { status: ShipmentStatus.OUT_FOR_DELIVERY }
-          : dto.status === SubOrderStatus.DELIVERED
-            ? {
-                status: ShipmentStatus.DELIVERED,
-                deliveredAt: new Date(),
-              }
-            : undefined;
-
     const orderId = await this.ordersRepository.updateSubOrderStatus({
       subOrderId,
       fromStatuses: [so.status],
       toStatus: dto.status,
       changedByUserId: userId,
       note: dto.note,
-      shipmentUpdate,
     });
-
-    if (
-      dto.status === SubOrderStatus.DELIVERED &&
-      so.order.paymentMethod === PaymentMethod.COD
-    ) {
-      await this.ordersRepository.creditWalletForSubOrderId(subOrderId);
-    }
 
     const order =
       await this.ordersRepository.recomputeParentOrderStatus(orderId);
@@ -852,33 +879,13 @@ export class OrdersService {
       );
     }
 
-    const shipmentUpdate =
-      dto.status === SubOrderStatus.SHIPPED
-        ? { status: ShipmentStatus.SHIPPED, shippedAt: new Date() }
-        : dto.status === SubOrderStatus.OUT_FOR_DELIVERY
-          ? { status: ShipmentStatus.OUT_FOR_DELIVERY }
-          : dto.status === SubOrderStatus.DELIVERED
-            ? {
-                status: ShipmentStatus.DELIVERED,
-                deliveredAt: new Date(),
-              }
-            : undefined;
-
     const orderId = await this.ordersRepository.updateSubOrderStatus({
       subOrderId,
       fromStatuses: [so.status],
       toStatus: dto.status,
       changedByUserId: adminUserId,
       note: dto.note,
-      shipmentUpdate,
     });
-
-    if (
-      dto.status === SubOrderStatus.DELIVERED &&
-      so.order.paymentMethod === PaymentMethod.COD
-    ) {
-      await this.ordersRepository.creditWalletForSubOrderId(subOrderId);
-    }
 
     const order =
       await this.ordersRepository.recomputeParentOrderStatus(orderId);
@@ -1075,6 +1082,14 @@ export class OrdersService {
       shippingTotal: formatMoney(order.shippingTotal),
       taxTotal: formatMoney(order.taxTotal),
       grandTotal: formatMoney(order.grandTotal),
+      onlineAmount:
+        order.onlineAmount != null
+          ? formatMoney(order.onlineAmount as Prisma.Decimal)
+          : undefined,
+      offlineAmount:
+        order.offlineAmount != null
+          ? formatMoney(order.offlineAmount as Prisma.Decimal)
+          : undefined,
       subOrders: subOrders.map((so) =>
         this.serializeSubOrder(so as never, audience),
       ),
@@ -1110,18 +1125,43 @@ export class OrdersService {
     const serialized: Record<string, unknown> = {
       ...so,
       subtotal: formatMoney(so.subtotal),
+      discountAmount:
+        so.discountAmount != null
+          ? formatMoney(so.discountAmount as Prisma.Decimal)
+          : undefined,
       shippingCharge: formatMoney(so.shippingCharge),
       taxAmount: formatMoney(so.taxAmount),
       total: formatMoney(so.total),
+      onlineMerchandiseAmount:
+        so.onlineMerchandiseAmount != null
+          ? formatMoney(so.onlineMerchandiseAmount as Prisma.Decimal)
+          : undefined,
+      onlineShippingAmount:
+        so.onlineShippingAmount != null
+          ? formatMoney(so.onlineShippingAmount as Prisma.Decimal)
+          : undefined,
+      offlineMerchandiseAmount:
+        so.offlineMerchandiseAmount != null
+          ? formatMoney(so.offlineMerchandiseAmount as Prisma.Decimal)
+          : undefined,
       platformCommissionRate: formatRate(so.platformCommissionRate),
       platformCommission: formatMoney(so.platformCommission),
       vendorEarning: formatMoney(so.vendorEarning),
       items: so.items?.map((item) => ({
         ...item,
         unitPrice: formatMoney(item.unitPrice),
+        discountAmount:
+          item.discountAmount != null
+            ? formatMoney(item.discountAmount as Prisma.Decimal)
+            : undefined,
         itemShippingCharge: formatMoney(item.itemShippingCharge),
         total: formatMoney(item.total),
       })),
+      deliveries: Array.isArray(so.deliveries)
+        ? (so.deliveries as Array<Record<string, unknown>>).map((d) =>
+            this.serializeDelivery(d, audience),
+          )
+        : so.deliveries,
     };
 
     if (audience === 'customer') {
@@ -1131,6 +1171,33 @@ export class OrdersService {
       delete serialized.walletCreditedAt;
     }
 
+    return serialized;
+  }
+
+  private serializeDelivery(
+    delivery: Record<string, unknown>,
+    audience: 'customer' | 'vendor' | 'admin',
+  ) {
+    const serialized: Record<string, unknown> = {
+      ...delivery,
+      offlineAmountDue:
+        delivery.offlineAmountDue != null
+          ? formatMoney(delivery.offlineAmountDue as Prisma.Decimal)
+          : undefined,
+      offlineAmountCollected:
+        delivery.offlineAmountCollected != null
+          ? formatMoney(delivery.offlineAmountCollected as Prisma.Decimal)
+          : undefined,
+      walletCreditAmount:
+        delivery.walletCreditAmount != null
+          ? formatMoney(delivery.walletCreditAmount as Prisma.Decimal)
+          : undefined,
+    };
+    if (audience === 'customer') {
+      delete serialized.walletCreditAmount;
+      delete serialized.walletCreditedAt;
+      delete serialized.overriddenByUserId;
+    }
     return serialized;
   }
 }

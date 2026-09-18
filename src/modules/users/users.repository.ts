@@ -15,6 +15,7 @@ const ADDRESS_SELECT = {
   city: true,
   state: true,
   pincode: true,
+  phone: true,
   latitude: true,
   longitude: true,
   isDefault: true,
@@ -47,26 +48,30 @@ export class UsersRepository {
     });
   }
 
-  update(id: string, data: Prisma.UserUpdateInput) {
-    return this.prisma.user.update({
-      where: { id },
-      data,
-      select: {
-        id: true,
-        name: true,
-        email: true,
-        phone: true,
-        platformRole: true,
-        provider: true,
-        avatarUrl: true,
-        isEmailVerified: true,
-        isPhoneVerified: true,
-        isActive: true,
-        fcmToken: true,
-        createdAt: true,
-        updatedAt: true,
-      },
-    });
+  async update(id: string, data: Prisma.UserUpdateInput) {
+    try {
+      return await this.prisma.user.update({
+        where: { id },
+        data,
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          phone: true,
+          platformRole: true,
+          provider: true,
+          avatarUrl: true,
+          isEmailVerified: true,
+          isPhoneVerified: true,
+          isActive: true,
+          fcmToken: true,
+          createdAt: true,
+          updatedAt: true,
+        },
+      });
+    } catch (error) {
+      this.handlePrismaError(error);
+    }
   }
 
   findAddresses(userId: string) {

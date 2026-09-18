@@ -102,6 +102,11 @@ export class PlatformSettingsService {
     return typeof value === 'string' ? value : String(value ?? '');
   }
 
+  async getDecimal(namespace: string, key: string): Promise<Prisma.Decimal> {
+    const value = await this.getString(namespace, key);
+    return new Prisma.Decimal(value || '0');
+  }
+
   async syncDefaults() {
     await Promise.all(
       PLATFORM_SETTING_DEFINITIONS.map((definition) =>

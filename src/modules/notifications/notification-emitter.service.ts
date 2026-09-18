@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Inject } from '@nestjs/common';
 import {
   NotificationChannel,
   NotificationDeliveryStatus,
@@ -6,6 +6,10 @@ import {
   Prisma,
 } from '../../../generated/prisma/client.js';
 import { PrismaService } from '../../prisma/prisma.service';
+import {
+  SMS_SENDER,
+  type SmsSender,
+} from '../../common/sms/sms-sender.interface';
 import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
 
 type EventToggles = {
@@ -15,6 +19,7 @@ type EventToggles = {
   payout?: boolean;
   coupon?: boolean;
   bulkUpload?: boolean;
+  returns?: boolean;
 };
 
 const ORDER_EVENTS = new Set<NotificationEventType>([
@@ -51,6 +56,14 @@ const BULK_EVENTS = new Set<NotificationEventType>([
   NotificationEventType.BULK_UPLOAD_FAILED,
 ]);
 
+const RETURN_EVENTS = new Set<NotificationEventType>([
+  NotificationEventType.RETURN_REQUESTED,
+  NotificationEventType.RETURN_APPROVED,
+  NotificationEventType.RETURN_REJECTED,
+  NotificationEventType.RETURN_RECEIVED,
+  NotificationEventType.RETURN_REFUNDED,
+]);
+
 function isEventToggled(
   eventType: NotificationEventType,
   toggles: EventToggles,
@@ -61,6 +74,7 @@ function isEventToggled(
   if (PAYOUT_EVENTS.has(eventType)) return toggles.payout !== false;
   if (COUPON_EVENTS.has(eventType)) return toggles.coupon !== false;
   if (BULK_EVENTS.has(eventType)) return toggles.bulkUpload !== false;
+  if (RETURN_EVENTS.has(eventType)) return toggles.returns !== false;
   return true;
 }
 
@@ -71,6 +85,7 @@ export class NotificationEmitterService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly platformSettings: PlatformSettingsService,
+    @Inject(SMS_SENDER) private readonly smsSender: SmsSender,
   ) {}
 
   /**
@@ -160,6 +175,41 @@ export class NotificationEmitterService {
     this.logger.log(
       `notification_emit event=created id=${notification.id} eventType=${input.eventType} userId=${input.userId} channels=in_app:SENT,fcm:${fcmEnabled ? 'PENDING' : 'SKIPPED'},sms:${smsEnabled ? 'PENDING' : 'SKIPPED'},email:${emailEnabled ? 'PENDING' : 'SKIPPED'}`,
     );
+
+    if (smsEnabled) {
+      const user = await this.prisma.user.findUnique({
+        where: { id: input.userId },
+        select: { phone: true },
+      });
+      if (user?.phone) {
+        try {
+          await this.smsSender.send({
+            to: user.phone,
+            body: `${input.title}: ${input.body}`,
+          });
+          await this.prisma.notificationDelivery.updateMany({
+            where: {
+              notificationId: notification.id,
+              channel: NotificationChannel.SMS,
+            },
+            data: {
+              status: NotificationDeliveryStatus.SENT,
+              sentAt: new Date(),
+            },
+          });
+        } catch (error: unknown) {
+          const message = error instanceof Error ? error.message : 'unknown';
+          this.logger.error(`Notification SMS send failed: ${message}`);
+          await this.prisma.notificationDelivery.updateMany({
+            where: {
+              notificationId: notification.id,
+              channel: NotificationChannel.SMS,
+            },
+            data: { status: NotificationDeliveryStatus.FAILED },
+          });
+        }
+      }
+    }
 
     return notification;
   }

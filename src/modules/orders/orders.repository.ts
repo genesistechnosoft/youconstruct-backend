@@ -7,6 +7,7 @@ import {
 import {
   MediaContext,
   MediaEntityType,
+  DeliveryStatus,
   OrderRefundStatus,
   OrderStatus,
   PaymentMethod,
@@ -21,7 +22,11 @@ import {
   TransactionType,
 } from '../../../generated/prisma/client.js';
 import { PrismaService } from '../../prisma/prisma.service';
-import { aggregateParentOrderStatus } from './order-status.util';
+import {
+  aggregateParentOrderStatus,
+  aggregateParentOrderStatusFromQty,
+  deriveSubOrderStatusFromQty,
+} from './order-status.util';
 import { DEFAULT_PLATFORM_COMMISSION_RATE } from './order.constants';
 
 const ADDRESS_SELECT = {
@@ -33,6 +38,7 @@ const ADDRESS_SELECT = {
   city: true,
   state: true,
   pincode: true,
+  phone: true,
   latitude: true,
   longitude: true,
 } as const;
@@ -81,12 +87,15 @@ export const ORDER_DETAIL_SELECT = {
   shippingTotal: true,
   taxTotal: true,
   grandTotal: true,
+  onlineAmount: true,
+  offlineAmount: true,
   addressLabel: true,
   addressLine1: true,
   addressLine2: true,
   addressCity: true,
   addressState: true,
   addressPincode: true,
+  addressPhone: true,
   addressLatitude: true,
   addressLongitude: true,
   razorpayOrderId: true,
@@ -102,10 +111,14 @@ export const ORDER_DETAIL_SELECT = {
       vendorId: true,
       status: true,
       subtotal: true,
+      discountAmount: true,
       shippingCharge: true,
       shippingMethodSnapshot: true,
       taxAmount: true,
       total: true,
+      onlineMerchandiseAmount: true,
+      onlineShippingAmount: true,
+      offlineMerchandiseAmount: true,
       platformCommissionRate: true,
       platformCommission: true,
       vendorEarning: true,
@@ -126,6 +139,8 @@ export const ORDER_DETAIL_SELECT = {
           unitPrice: true,
           unitSymbol: true,
           quantity: true,
+          cancelledQuantity: true,
+          discountAmount: true,
           itemShippingCharge: true,
           total: true,
           imageUrlSnapshot: true,
@@ -143,6 +158,36 @@ export const ORDER_DETAIL_SELECT = {
           deliveredAt: true,
           status: true,
           updatedAt: true,
+        },
+      },
+      deliveries: {
+        orderBy: { createdAt: 'asc' as const },
+        select: {
+          id: true,
+          deliveryNumber: true,
+          status: true,
+          trackingNumber: true,
+          courierName: true,
+          shippingLabelUrl: true,
+          estimatedDelivery: true,
+          shippedAt: true,
+          deliveredAt: true,
+          vendorRemarks: true,
+          customerRemarks: true,
+          overrideReason: true,
+          offlineAmountDue: true,
+          offlineAmountCollected: true,
+          walletCreditAmount: true,
+          walletCreditedAt: true,
+          createdAt: true,
+          updatedAt: true,
+          items: {
+            select: {
+              id: true,
+              orderItemId: true,
+              quantity: true,
+            },
+          },
         },
       },
       statusHistory: {
@@ -165,9 +210,13 @@ const SUB_ORDER_LIST_SELECT = {
   vendorId: true,
   status: true,
   subtotal: true,
+  discountAmount: true,
   shippingCharge: true,
   taxAmount: true,
   total: true,
+  onlineMerchandiseAmount: true,
+  onlineShippingAmount: true,
+  offlineMerchandiseAmount: true,
   platformCommissionRate: true,
   platformCommission: true,
   vendorEarning: true,
@@ -188,10 +237,36 @@ const SUB_ORDER_LIST_SELECT = {
       unitPrice: true,
       unitSymbol: true,
       quantity: true,
+      cancelledQuantity: true,
+      discountAmount: true,
       itemShippingCharge: true,
       total: true,
       imageUrlSnapshot: true,
       imageStorageKeySnapshot: true,
+    },
+  },
+  deliveries: {
+    orderBy: { createdAt: 'asc' as const },
+    select: {
+      id: true,
+      deliveryNumber: true,
+      status: true,
+      shippedAt: true,
+      deliveredAt: true,
+      trackingNumber: true,
+      courierName: true,
+      vendorRemarks: true,
+      customerRemarks: true,
+      offlineAmountDue: true,
+      offlineAmountCollected: true,
+      walletCreditAmount: true,
+      items: {
+        select: {
+          id: true,
+          orderItemId: true,
+          quantity: true,
+        },
+      },
     },
   },
   shipment: {
@@ -219,6 +294,8 @@ export const ORDER_LIST_SELECT = {
   shippingTotal: true,
   taxTotal: true,
   grandTotal: true,
+  onlineAmount: true,
+  offlineAmount: true,
   addressCity: true,
   addressState: true,
   addressPincode: true,
@@ -239,6 +316,13 @@ export class OrdersRepository {
     return this.prisma.address.findFirst({
       where: { id: addressId, userId, deletedAt: null },
       select: ADDRESS_SELECT,
+    });
+  }
+
+  findUserPhone(userId: string) {
+    return this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { phone: true },
     });
   }
 
@@ -306,6 +390,7 @@ export class OrdersRepository {
       city: string;
       state: string;
       pincode: string;
+      phone: string | null;
       latitude: number | null;
       longitude: number | null;
     };
@@ -318,6 +403,8 @@ export class OrdersRepository {
     shippingTotal: Prisma.Decimal;
     taxTotal: Prisma.Decimal;
     grandTotal: Prisma.Decimal;
+    onlineAmount: Prisma.Decimal;
+    offlineAmount: Prisma.Decimal;
     orderStatus: OrderStatus;
     paymentStatus: PaymentStatus;
     subOrders: Array<{
@@ -325,10 +412,14 @@ export class OrdersRepository {
       vendorId: string;
       status: SubOrderStatus;
       subtotal: Prisma.Decimal;
+      discountAmount: Prisma.Decimal;
       shippingCharge: Prisma.Decimal;
       shippingMethodSnapshot: Prisma.InputJsonValue;
       taxAmount: Prisma.Decimal;
       total: Prisma.Decimal;
+      onlineMerchandiseAmount: Prisma.Decimal;
+      onlineShippingAmount: Prisma.Decimal;
+      offlineMerchandiseAmount: Prisma.Decimal;
       platformCommissionRate: Prisma.Decimal;
       platformCommission: Prisma.Decimal;
       vendorEarning: Prisma.Decimal;
@@ -340,6 +431,7 @@ export class OrdersRepository {
         unitPrice: Prisma.Decimal;
         unitSymbol: string;
         quantity: number;
+        discountAmount: Prisma.Decimal;
         itemShippingCharge: Prisma.Decimal;
         total: Prisma.Decimal;
         imageUrlSnapshot?: string | null;
@@ -383,12 +475,15 @@ export class OrdersRepository {
             shippingTotal: input.shippingTotal,
             taxTotal: input.taxTotal,
             grandTotal: input.grandTotal,
+            onlineAmount: input.onlineAmount,
+            offlineAmount: input.offlineAmount,
             addressLabel: input.address.label,
             addressLine1: input.address.line1,
             addressLine2: input.address.line2,
             addressCity: input.address.city,
             addressState: input.address.state,
             addressPincode: input.address.pincode,
+            addressPhone: input.address.phone,
             addressLatitude: input.address.latitude,
             addressLongitude: input.address.longitude,
             notes: input.notes ?? null,
@@ -398,10 +493,14 @@ export class OrdersRepository {
                 vendorId: so.vendorId,
                 status: so.status,
                 subtotal: so.subtotal,
+                discountAmount: so.discountAmount,
                 shippingCharge: so.shippingCharge,
                 shippingMethodSnapshot: so.shippingMethodSnapshot,
                 taxAmount: so.taxAmount,
                 total: so.total,
+                onlineMerchandiseAmount: so.onlineMerchandiseAmount,
+                onlineShippingAmount: so.onlineShippingAmount,
+                offlineMerchandiseAmount: so.offlineMerchandiseAmount,
                 platformCommissionRate: so.platformCommissionRate,
                 platformCommission: so.platformCommission,
                 vendorEarning: so.vendorEarning,
@@ -414,6 +513,7 @@ export class OrdersRepository {
                     unitPrice: item.unitPrice,
                     unitSymbol: item.unitSymbol,
                     quantity: item.quantity,
+                    discountAmount: item.discountAmount,
                     itemShippingCharge: item.itemShippingCharge,
                     total: item.total,
                     imageUrlSnapshot: item.imageUrlSnapshot ?? null,
@@ -426,11 +526,6 @@ export class OrdersRepository {
                     status: so.status,
                     changedByUserId: input.userId,
                     note: 'Order placed',
-                  },
-                },
-                shipment: {
-                  create: {
-                    status: ShipmentStatus.PENDING,
                   },
                 },
               })),
@@ -984,10 +1079,31 @@ export class OrdersRepository {
         vendorId: true,
         status: true,
         total: true,
+        subtotal: true,
+        discountAmount: true,
+        shippingCharge: true,
+        onlineMerchandiseAmount: true,
+        onlineShippingAmount: true,
+        offlineMerchandiseAmount: true,
         vendorEarning: true,
         walletCreditedAt: true,
         items: {
-          select: { variantId: true, quantity: true },
+          select: {
+            id: true,
+            variantId: true,
+            quantity: true,
+            cancelledQuantity: true,
+            total: true,
+          },
+        },
+        deliveries: {
+          select: {
+            id: true,
+            status: true,
+            items: {
+              select: { orderItemId: true, quantity: true },
+            },
+          },
         },
         order: {
           select: {
@@ -997,10 +1113,25 @@ export class OrdersRepository {
             paymentStatus: true,
             razorpayPaymentId: true,
             status: true,
+            createdAt: true,
+            onlineAmount: true,
           },
         },
       },
     });
+  }
+
+  async sumCompletedRefunds(orderId: string) {
+    const result = await this.prisma.orderRefund.aggregate({
+      where: {
+        orderId,
+        status: {
+          in: [OrderRefundStatus.COMPLETED, OrderRefundStatus.PROCESSING],
+        },
+      },
+      _sum: { amount: true },
+    });
+    return result._sum.amount ?? new Prisma.Decimal(0);
   }
 
   findCompletedRefundForSubOrder(subOrderId: string) {
@@ -1016,8 +1147,9 @@ export class OrdersRepository {
   }
 
   /**
-   * Applies cancel/refund ledger for one sub-order inside a transaction.
-   * Caller must perform Razorpay refund first when needed and pass provider ids.
+   * Cancels remaining not-yet-DELIVERED quantity: restock those units,
+   * cancel open deliveries, optionally record a Razorpay refund.
+   * Delivered qty and recorded offline cash are left intact.
    */
   async applySubOrderCancelOrRefund(input: {
     subOrderId: string;
@@ -1044,7 +1176,24 @@ export class OrdersRepository {
           total: true,
           vendorEarning: true,
           walletCreditedAt: true,
-          items: { select: { variantId: true, quantity: true } },
+          items: {
+            select: {
+              id: true,
+              variantId: true,
+              quantity: true,
+              cancelledQuantity: true,
+            },
+          },
+          deliveries: {
+            select: {
+              id: true,
+              status: true,
+              items: { select: { orderItemId: true, quantity: true } },
+            },
+          },
+          order: {
+            select: { paymentStatus: true, paymentMethod: true },
+          },
         },
       });
       if (!so) {
@@ -1055,6 +1204,44 @@ export class OrdersRepository {
         so.status === SubOrderStatus.REFUNDED
       ) {
         throw new ConflictException('Sub-order already cancelled or refunded');
+      }
+
+      const deliveredByItem = new Map<string, number>();
+      for (const delivery of so.deliveries) {
+        if (delivery.status !== DeliveryStatus.DELIVERED) {
+          continue;
+        }
+        for (const line of delivery.items) {
+          deliveredByItem.set(
+            line.orderItemId,
+            (deliveredByItem.get(line.orderItemId) ?? 0) + line.quantity,
+          );
+        }
+      }
+
+      const restockLines: Array<{ variantId: string; quantity: number }> = [];
+      for (const item of so.items) {
+        const delivered = deliveredByItem.get(item.id) ?? 0;
+        const remaining = item.quantity - item.cancelledQuantity - delivered;
+        if (remaining > 0) {
+          restockLines.push({ variantId: item.variantId, quantity: remaining });
+          await tx.orderItem.update({
+            where: { id: item.id },
+            data: { cancelledQuantity: { increment: remaining } },
+          });
+        }
+      }
+
+      for (const delivery of so.deliveries) {
+        if (
+          delivery.status !== DeliveryStatus.DELIVERED &&
+          delivery.status !== DeliveryStatus.CANCELLED
+        ) {
+          await tx.delivery.update({
+            where: { id: delivery.id },
+            data: { status: DeliveryStatus.CANCELLED },
+          });
+        }
       }
 
       let refundId: string | undefined;
@@ -1077,10 +1264,10 @@ export class OrdersRepository {
 
       let restockStatus: RestockStatus = RestockStatus.NOT_REQUIRED;
       if (input.restock) {
-        for (const item of so.items) {
+        for (const line of restockLines) {
           await tx.productInventory.updateMany({
-            where: { variantId: item.variantId },
-            data: { quantity: { increment: item.quantity } },
+            where: { variantId: line.variantId },
+            data: { quantity: { increment: line.quantity } },
           });
         }
         restockStatus = RestockStatus.COMPLETED;
@@ -1090,15 +1277,68 @@ export class OrdersRepository {
         await this.clawbackWalletForSubOrder(tx, so);
       }
 
+      const refreshed = await tx.subOrder.findUniqueOrThrow({
+        where: { id: so.id },
+        select: {
+          status: true,
+          items: {
+            select: { quantity: true, cancelledQuantity: true },
+          },
+          deliveries: {
+            select: {
+              status: true,
+              items: { select: { quantity: true } },
+            },
+          },
+        },
+      });
+      const derived =
+        input.targetStatus === SubOrderStatus.REFUNDED
+          ? SubOrderStatus.REFUNDED
+          : deriveSubOrderStatusFromQty({
+              status: refreshed.status,
+              orderedQty: refreshed.items.reduce((s, i) => s + i.quantity, 0),
+              cancelledQty: refreshed.items.reduce(
+                (s, i) => s + i.cancelledQuantity,
+                0,
+              ),
+              deliveredQty: refreshed.deliveries
+                .filter((d) => d.status === DeliveryStatus.DELIVERED)
+                .reduce(
+                  (s, d) =>
+                    s + d.items.reduce((line, i) => line + i.quantity, 0),
+                  0,
+                ),
+              dispatchedQty: refreshed.deliveries
+                .filter(
+                  (d) =>
+                    d.status === DeliveryStatus.SHIPPED ||
+                    d.status === DeliveryStatus.OUT_FOR_DELIVERY ||
+                    d.status === DeliveryStatus.DELIVERED,
+                )
+                .reduce(
+                  (s, d) =>
+                    s + d.items.reduce((line, i) => line + i.quantity, 0),
+                  0,
+                ),
+              allocatedQty: refreshed.deliveries
+                .filter((d) => d.status !== DeliveryStatus.CANCELLED)
+                .reduce(
+                  (s, d) =>
+                    s + d.items.reduce((line, i) => line + i.quantity, 0),
+                  0,
+                ),
+            });
+
       await tx.subOrder.update({
         where: { id: so.id },
-        data: { status: input.targetStatus },
+        data: { status: derived },
       });
 
       await tx.orderStatusHistory.create({
         data: {
           subOrderId: so.id,
-          status: input.targetStatus,
+          status: derived,
           changedByUserId: input.actorUserId,
           note: input.reason,
         },
@@ -1118,10 +1358,51 @@ export class OrdersRepository {
 
       const siblings = await tx.subOrder.findMany({
         where: { orderId: so.orderId },
-        select: { status: true },
+        select: {
+          status: true,
+          items: {
+            select: { quantity: true, cancelledQuantity: true },
+          },
+          deliveries: {
+            select: {
+              status: true,
+              items: { select: { quantity: true } },
+            },
+          },
+        },
       });
-      const parentStatus = aggregateParentOrderStatus(
-        siblings.map((s) => s.status),
+      const parentStatus = aggregateParentOrderStatusFromQty(
+        siblings.map((sibling) => ({
+          status: sibling.status,
+          orderedQty: sibling.items.reduce((s, i) => s + i.quantity, 0),
+          cancelledQty: sibling.items.reduce(
+            (s, i) => s + i.cancelledQuantity,
+            0,
+          ),
+          deliveredQty: sibling.deliveries
+            .filter((d) => d.status === DeliveryStatus.DELIVERED)
+            .reduce(
+              (s, d) => s + d.items.reduce((line, i) => line + i.quantity, 0),
+              0,
+            ),
+          dispatchedQty: sibling.deliveries
+            .filter(
+              (d) =>
+                d.status === DeliveryStatus.SHIPPED ||
+                d.status === DeliveryStatus.OUT_FOR_DELIVERY ||
+                d.status === DeliveryStatus.DELIVERED,
+            )
+            .reduce(
+              (s, d) => s + d.items.reduce((line, i) => line + i.quantity, 0),
+              0,
+            ),
+          allocatedQty: sibling.deliveries
+            .filter((d) => d.status !== DeliveryStatus.CANCELLED)
+            .reduce(
+              (s, d) => s + d.items.reduce((line, i) => line + i.quantity, 0),
+              0,
+            ),
+        })),
       );
 
       const paymentUpdate: {
@@ -1131,7 +1412,12 @@ export class OrdersRepository {
       } = { status: parentStatus };
 
       if (siblings.every((s) => s.status === SubOrderStatus.CANCELLED)) {
-        paymentUpdate.paymentStatus = PaymentStatus.FAILED;
+        const captured =
+          so.order.paymentStatus === PaymentStatus.PAID ||
+          so.order.paymentStatus === PaymentStatus.PARTIALLY_PAID;
+        paymentUpdate.paymentStatus = captured
+          ? PaymentStatus.REFUNDED
+          : PaymentStatus.FAILED;
         paymentUpdate.paymentTimeoutJobId = null;
       } else if (siblings.every((s) => s.status === SubOrderStatus.REFUNDED)) {
         paymentUpdate.paymentStatus = PaymentStatus.REFUNDED;
@@ -1320,14 +1606,12 @@ export class OrdersRepository {
         where: { id: input.orderId, deletedAt: null },
         select: {
           id: true,
+          paymentMethod: true,
           paymentStatus: true,
           paymentTimeoutJobId: true,
           subOrders: {
             select: {
               id: true,
-              vendorId: true,
-              vendorEarning: true,
-              walletCreditedAt: true,
               status: true,
             },
           },
@@ -1338,7 +1622,10 @@ export class OrdersRepository {
         throw new NotFoundException('Order not found');
       }
 
-      if (order.paymentStatus === PaymentStatus.PAID) {
+      if (
+        order.paymentStatus === PaymentStatus.PAID ||
+        order.paymentStatus === PaymentStatus.PARTIALLY_PAID
+      ) {
         return {
           alreadyPaid: true as const,
           orderId: order.id,
@@ -1346,10 +1633,15 @@ export class OrdersRepository {
         };
       }
 
+      const nextPaymentStatus =
+        order.paymentMethod === PaymentMethod.COD
+          ? PaymentStatus.PARTIALLY_PAID
+          : PaymentStatus.PAID;
+
       await tx.order.update({
         where: { id: order.id },
         data: {
-          paymentStatus: PaymentStatus.PAID,
+          paymentStatus: nextPaymentStatus,
           status: OrderStatus.CONFIRMED,
           razorpayPaymentId: input.razorpayPaymentId,
           paymentTimeoutJobId: null,
@@ -1370,8 +1662,6 @@ export class OrdersRepository {
             },
           });
         }
-
-        await this.creditWalletForSubOrder(tx, so);
       }
 
       return {
@@ -1473,10 +1763,13 @@ export class OrdersRepository {
       Awaited<ReturnType<OrdersRepository['findCartWithShippingData']>>
     >,
     visibleCategoryIds: Set<string>,
+    options?: { requireVendorShipping?: boolean },
   ) {
     if (cart.items.length === 0) {
       throw new BadRequestException('Cart is empty');
     }
+
+    const requireVendorShipping = options?.requireVendorShipping ?? true;
 
     for (const item of cart.items) {
       const v = item.variant;
@@ -1499,14 +1792,16 @@ export class OrdersRepository {
       ) {
         throw new ConflictException(`Insufficient stock for ${v.sku}`);
       }
-      if (
-        !v.product.vendor.shippingMethod ||
-        !v.product.vendor.shippingMethod.isActive
-      ) {
-        if (!v.product.shippingOverride) {
-          throw new ConflictException(
-            `Vendor ${v.product.vendor.businessName} has no shipping method`,
-          );
+      if (requireVendorShipping) {
+        if (
+          !v.product.vendor.shippingMethod ||
+          !v.product.vendor.shippingMethod.isActive
+        ) {
+          if (!v.product.shippingOverride) {
+            throw new ConflictException(
+              `Vendor ${v.product.vendor.businessName} has no shipping method`,
+            );
+          }
         }
       }
     }

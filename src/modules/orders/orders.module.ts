@@ -12,10 +12,15 @@ import {
 } from './admin-orders.controller';
 import { CancelRefundService } from './cancel-refund.service';
 import { CustomerCheckoutController } from './customer-checkout.controller';
+import { CustomerDeliveriesController } from './customer-deliveries.controller';
 import { CustomerOrdersController } from './customer-orders.controller';
+import { AdminDeliveriesController } from './admin-deliveries.controller';
+import { DeliveriesRepository } from './deliveries.repository';
+import { DeliveriesService } from './deliveries.service';
 import { OrdersRepository } from './orders.repository';
 import { OrdersService } from './orders.service';
 import { ShippingQuoteService } from './shipping-quote.service';
+import { VendorDeliveriesController } from './vendor-deliveries.controller';
 import { VendorOrdersController } from './vendor-orders.controller';
 
 @Module({
@@ -30,15 +35,20 @@ import { VendorOrdersController } from './vendor-orders.controller';
   controllers: [
     CustomerCheckoutController,
     CustomerOrdersController,
+    CustomerDeliveriesController,
     VendorOrdersController,
+    VendorDeliveriesController,
     AdminOrdersController,
     AdminSubOrdersController,
+    AdminDeliveriesController,
   ],
   providers: [
     OrdersService,
     OrdersRepository,
     ShippingQuoteService,
     CancelRefundService,
+    DeliveriesService,
+    DeliveriesRepository,
   ],
   exports: [OrdersService, OrdersRepository, ShippingQuoteService],
 })
