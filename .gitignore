@@ -62,3 +62,4 @@ report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 plan.md
 .cursor/plans
 .kiro
+youconstruct.dump

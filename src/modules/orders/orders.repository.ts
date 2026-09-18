@@ -74,10 +74,39 @@ const OVERRIDE_SELECT = {
   unitType: true,
 } as const;
 
+const ORDER_CUSTOMER_SELECT = {
+  id: true,
+  name: true,
+  email: true,
+  phone: true,
+  avatarUrl: true,
+} as const;
+
+const ORDER_PARENT_SELECT = {
+  id: true,
+  orderNumber: true,
+  paymentMethod: true,
+  paymentStatus: true,
+  status: true,
+  userId: true,
+  addressId: true,
+  addressLabel: true,
+  addressLine1: true,
+  addressLine2: true,
+  addressCity: true,
+  addressState: true,
+  addressPincode: true,
+  addressPhone: true,
+  addressLatitude: true,
+  addressLongitude: true,
+  user: { select: ORDER_CUSTOMER_SELECT },
+} as const;
+
 export const ORDER_DETAIL_SELECT = {
   id: true,
   orderNumber: true,
   userId: true,
+  user: { select: ORDER_CUSTOMER_SELECT },
   addressId: true,
   status: true,
   paymentStatus: true,
@@ -303,6 +332,7 @@ export const ORDER_LIST_SELECT = {
   notes: true,
   createdAt: true,
   updatedAt: true,
+  user: { select: ORDER_CUSTOMER_SELECT },
   subOrders: {
     select: SUB_ORDER_LIST_SELECT,
   },
@@ -793,14 +823,7 @@ export class OrdersRepository {
         select: {
           ...SUB_ORDER_LIST_SELECT,
           order: {
-            select: {
-              id: true,
-              orderNumber: true,
-              paymentMethod: true,
-              paymentStatus: true,
-              status: true,
-              userId: true,
-            },
+            select: ORDER_PARENT_SELECT,
           },
         },
       }),
@@ -841,14 +864,7 @@ export class OrdersRepository {
         select: {
           ...SUB_ORDER_LIST_SELECT,
           order: {
-            select: {
-              id: true,
-              orderNumber: true,
-              paymentMethod: true,
-              paymentStatus: true,
-              status: true,
-              userId: true,
-            },
+            select: ORDER_PARENT_SELECT,
           },
         },
       }),
@@ -868,14 +884,7 @@ export class OrdersRepository {
       select: {
         ...ORDER_DETAIL_SELECT.subOrders.select,
         order: {
-          select: {
-            id: true,
-            orderNumber: true,
-            paymentMethod: true,
-            paymentStatus: true,
-            status: true,
-            userId: true,
-          },
+          select: ORDER_PARENT_SELECT,
         },
       },
     });
@@ -887,14 +896,7 @@ export class OrdersRepository {
       select: {
         ...ORDER_DETAIL_SELECT.subOrders.select,
         order: {
-          select: {
-            id: true,
-            orderNumber: true,
-            paymentMethod: true,
-            paymentStatus: true,
-            status: true,
-            userId: true,
-          },
+          select: ORDER_PARENT_SELECT,
         },
       },
     });

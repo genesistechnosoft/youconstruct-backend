@@ -11,7 +11,7 @@
     "start": "nest start",
     "start:dev": "nest start --watch",
     "start:debug": "nest start --debug --watch",
-    "start:prod": "node dist/main",
+    "start:prod": "node dist/src/main",
     "lint": "eslint \"{src,apps,libs,test}/**/*.ts\" --fix",
     "test": "jest",
     "test:watch": "jest --watch",
@@ -19,7 +19,8 @@
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
     "test:e2e": "jest --config ./test/jest-e2e.json",
     "db:reset:dev": "prisma migrate reset --force",
-    "bootstrap:super-admin": "ts-node -r ./prisma/register.cjs prisma/bootstrap-super-admin.ts"
+    "bootstrap:super-admin": "ts-node -r ./prisma/register.cjs prisma/bootstrap-super-admin.ts",
+    "media:migrate-r2": "ts-node -r ./prisma/register.cjs prisma/migrate-local-media-to-r2.ts"
   },
   "prisma": {
     "seed": "ts-node -r ./prisma/register.cjs prisma/seed.ts"
@@ -44,6 +45,7 @@
     "cache-manager": "^7.2.8",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.15.1",
+    "express": "^5.2.1",
     "helmet": "^8.2.0",
     "ioredis": "^5.11.1",
     "multer": "^2.2.0",

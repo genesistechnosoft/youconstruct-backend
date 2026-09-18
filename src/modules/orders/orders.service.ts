@@ -1100,6 +1100,8 @@ export class OrdersService {
       delete serialized.razorpayPaymentId;
     }
 
+    this.attachCustomer(serialized, audience);
+
     return serialized;
   }
 
@@ -1171,7 +1173,52 @@ export class OrdersService {
       delete serialized.walletCreditedAt;
     }
 
+    if (
+      serialized.order &&
+      typeof serialized.order === 'object' &&
+      !Array.isArray(serialized.order)
+    ) {
+      const nested = { ...(serialized.order as Record<string, unknown>) };
+      this.attachCustomer(nested, audience);
+      serialized.order = nested;
+    }
+
     return serialized;
+  }
+
+  private attachCustomer(
+    serialized: Record<string, unknown>,
+    audience: 'customer' | 'vendor' | 'admin',
+  ) {
+    const user = serialized.user;
+    delete serialized.user;
+    if (audience === 'customer') {
+      return;
+    }
+    const customer = this.toCustomer(user);
+    if (customer) {
+      serialized.customer = customer;
+    }
+  }
+
+  private toCustomer(user: unknown) {
+    if (!user || typeof user !== 'object') {
+      return undefined;
+    }
+    const u = user as {
+      id: string;
+      name: string;
+      email: string | null;
+      phone: string | null;
+      avatarUrl: string | null;
+    };
+    return {
+      id: u.id,
+      name: u.name,
+      email: u.email ?? null,
+      phone: u.phone ?? null,
+      avatarUrl: u.avatarUrl ?? null,
+    };
   }
 
   private serializeDelivery(
