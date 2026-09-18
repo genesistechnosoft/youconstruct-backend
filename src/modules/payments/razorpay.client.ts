@@ -48,7 +48,8 @@ export class RazorpayClient implements OnModuleInit {
         currency: order.currency,
       };
     } catch (error) {
-      const nodeEnv = this.configService.get<string>('NODE_ENV') ?? 'development';
+      const nodeEnv =
+        this.configService.get<string>('NODE_ENV') ?? 'development';
       if (nodeEnv === 'production') {
         throw error;
       }
@@ -65,6 +66,19 @@ export class RazorpayClient implements OnModuleInit {
     amountPaise: number;
     notes?: Record<string, string>;
   }) {
+    if (this.isNonProdTestPayment(input.paymentId)) {
+      return {
+        id: `rfnd_test_${input.paymentId}_${Date.now()}`,
+        amount: input.amountPaise,
+        status: 'processed',
+        payload: {
+          stub: true,
+          paymentId: input.paymentId,
+          notes: input.notes ?? null,
+        },
+      };
+    }
+
     const refund = await this.client.payments.refund(input.paymentId, {
       amount: input.amountPaise,
       notes: input.notes,
@@ -76,6 +90,14 @@ export class RazorpayClient implements OnModuleInit {
       status: String(refund.status ?? ''),
       payload: refund as unknown as Record<string, unknown>,
     };
+  }
+
+  private isNonProdTestPayment(paymentId: string): boolean {
+    const nodeEnv = this.configService.get<string>('NODE_ENV') ?? 'development';
+    if (nodeEnv === 'production') {
+      return false;
+    }
+    return paymentId.startsWith('pay_test_');
   }
 
   verifyPaymentSignature(input: {
