@@ -17,7 +17,39 @@ import {
 import { PrismaService } from '../../prisma/prisma.service';
 import { roundMoney } from '../../common/utils/money.util';
 
-const RETURN_SELECT = {
+const RETURN_CUSTOMER_SELECT = {
+  id: true,
+  name: true,
+  email: true,
+  phone: true,
+  avatarUrl: true,
+} as const;
+
+const RETURN_VENDOR_SELECT = {
+  id: true,
+  businessName: true,
+  slug: true,
+} as const;
+
+const RETURN_ITEM_SELECT = {
+  id: true,
+  orderItemId: true,
+  deliveryItemId: true,
+  quantity: true,
+  orderItem: {
+    select: {
+      variantId: true,
+      productName: true,
+      variantName: true,
+      sku: true,
+      unitPrice: true,
+      unitSymbol: true,
+      imageUrlSnapshot: true,
+    },
+  },
+} as const;
+
+const RETURN_CORE_SELECT = {
   id: true,
   orderId: true,
   subOrderId: true,
@@ -37,12 +69,94 @@ const RETURN_SELECT = {
   offlineRefundConfirmedAt: true,
   createdAt: true,
   updatedAt: true,
-  items: {
+  items: { select: RETURN_ITEM_SELECT },
+  user: { select: RETURN_CUSTOMER_SELECT },
+  vendor: { select: RETURN_VENDOR_SELECT },
+} as const;
+
+const RETURN_LIST_SELECT = {
+  ...RETURN_CORE_SELECT,
+  order: {
     select: {
       id: true,
-      orderItemId: true,
-      deliveryItemId: true,
-      quantity: true,
+      orderNumber: true,
+      paymentMethod: true,
+    },
+  },
+  subOrder: {
+    select: {
+      id: true,
+      subOrderNumber: true,
+      onlineMerchandiseAmount: true,
+      offlineMerchandiseAmount: true,
+    },
+  },
+} as const;
+
+const RETURN_DETAIL_SELECT = {
+  ...RETURN_CORE_SELECT,
+  order: {
+    select: {
+      id: true,
+      orderNumber: true,
+      status: true,
+      paymentMethod: true,
+      paymentStatus: true,
+      razorpayPaymentId: true,
+      onlineAmount: true,
+      addressLabel: true,
+      addressLine1: true,
+      addressLine2: true,
+      addressCity: true,
+      addressState: true,
+      addressPincode: true,
+      addressPhone: true,
+      addressLatitude: true,
+      addressLongitude: true,
+    },
+  },
+  delivery: {
+    select: {
+      id: true,
+      deliveryNumber: true,
+      status: true,
+      deliveredAt: true,
+      walletCreditAmount: true,
+      walletCreditedAt: true,
+      offlineAmountCollected: true,
+      items: {
+        select: { id: true, orderItemId: true, quantity: true },
+      },
+    },
+  },
+  subOrder: {
+    select: {
+      id: true,
+      subOrderNumber: true,
+      vendorId: true,
+      subtotal: true,
+      discountAmount: true,
+      onlineMerchandiseAmount: true,
+      onlineShippingAmount: true,
+      offlineMerchandiseAmount: true,
+      platformCommission: true,
+      vendorEarning: true,
+      items: {
+        select: {
+          id: true,
+          quantity: true,
+          total: true,
+          variantId: true,
+        },
+      },
+    },
+  },
+  refunds: {
+    select: {
+      id: true,
+      amount: true,
+      status: true,
+      razorpayRefundId: true,
     },
   },
 } as const;
@@ -54,63 +168,7 @@ export class ReturnsRepository {
   findById(id: string) {
     return this.prisma.returnRequest.findUnique({
       where: { id },
-      select: {
-        ...RETURN_SELECT,
-        delivery: {
-          select: {
-            id: true,
-            status: true,
-            deliveredAt: true,
-            walletCreditAmount: true,
-            walletCreditedAt: true,
-            offlineAmountCollected: true,
-            items: {
-              select: { id: true, orderItemId: true, quantity: true },
-            },
-          },
-        },
-        subOrder: {
-          select: {
-            id: true,
-            vendorId: true,
-            subtotal: true,
-            discountAmount: true,
-            onlineMerchandiseAmount: true,
-            onlineShippingAmount: true,
-            offlineMerchandiseAmount: true,
-            platformCommission: true,
-            vendorEarning: true,
-            items: {
-              select: {
-                id: true,
-                quantity: true,
-                total: true,
-                variantId: true,
-              },
-            },
-            order: {
-              select: {
-                id: true,
-                userId: true,
-                paymentMethod: true,
-                paymentStatus: true,
-                razorpayPaymentId: true,
-                onlineAmount: true,
-                addressPhone: true,
-                user: { select: { phone: true } },
-              },
-            },
-          },
-        },
-        refunds: {
-          select: {
-            id: true,
-            amount: true,
-            status: true,
-            razorpayRefundId: true,
-          },
-        },
-      },
+      select: RETURN_DETAIL_SELECT,
     });
   }
 
@@ -118,7 +176,7 @@ export class ReturnsRepository {
     return this.prisma.returnRequest.findMany({
       where: { userId },
       orderBy: { createdAt: 'desc' },
-      select: RETURN_SELECT,
+      select: RETURN_LIST_SELECT,
     });
   }
 
@@ -126,14 +184,14 @@ export class ReturnsRepository {
     return this.prisma.returnRequest.findMany({
       where: { vendorId },
       orderBy: { createdAt: 'desc' },
-      select: RETURN_SELECT,
+      select: RETURN_LIST_SELECT,
     });
   }
 
   listForAdmin() {
     return this.prisma.returnRequest.findMany({
       orderBy: { createdAt: 'desc' },
-      select: RETURN_SELECT,
+      select: RETURN_LIST_SELECT,
     });
   }
 
@@ -217,7 +275,7 @@ export class ReturnsRepository {
           details: input.details ?? null,
           items: { create: input.items },
         },
-        select: RETURN_SELECT,
+        select: { id: true },
       });
 
       if (input.mediaIds?.length) {

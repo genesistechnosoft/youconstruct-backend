@@ -27,6 +27,14 @@ import {
 } from './dto/return-request.dto';
 import { ReturnsRepository } from './returns.repository';
 
+type ReturnAudience = 'customer' | 'vendor' | 'admin';
+type ReturnDetail = NonNullable<
+  Awaited<ReturnType<ReturnsRepository['findById']>>
+>;
+type ReturnListRow = Awaited<
+  ReturnType<ReturnsRepository['listForCustomer']>
+>[number];
+
 @Injectable()
 export class ReturnsService {
   constructor(
@@ -42,7 +50,7 @@ export class ReturnsService {
     const items = await this.returnsRepository.listForCustomer(userId);
     return {
       message: 'Returns fetched successfully',
-      data: items.map((item) => this.serialize(item)),
+      data: items.map((item) => this.serialize(item, 'customer', 'list')),
     };
   }
 
@@ -50,7 +58,7 @@ export class ReturnsService {
     const items = await this.returnsRepository.listForVendor(vendorId);
     return {
       message: 'Returns fetched successfully',
-      data: items.map((item) => this.serialize(item)),
+      data: items.map((item) => this.serialize(item, 'vendor', 'list')),
     };
   }
 
@@ -58,7 +66,7 @@ export class ReturnsService {
     const items = await this.returnsRepository.listForAdmin();
     return {
       message: 'Returns fetched successfully',
-      data: items.map((item) => this.serialize(item)),
+      data: items.map((item) => this.serialize(item, 'admin', 'list')),
     };
   }
 
@@ -73,9 +81,14 @@ export class ReturnsService {
     if (scope?.vendorId && request.vendorId !== scope.vendorId) {
       throw new NotFoundException('Return request not found');
     }
+    const audience: ReturnAudience = scope?.userId
+      ? 'customer'
+      : scope?.vendorId
+        ? 'vendor'
+        : 'admin';
     return {
       message: 'Return request fetched successfully',
-      data: this.serialize(request),
+      data: this.serialize(request, audience, 'detail'),
     };
   }
 
@@ -167,6 +180,11 @@ export class ReturnsService {
       mediaIds: dto.mediaIds,
     });
 
+    const loaded = await this.returnsRepository.findById(created.id);
+    if (!loaded) {
+      throw new NotFoundException('Return request not found');
+    }
+
     this.notifications.emit({
       userId,
       eventType: NotificationEventType.RETURN_REQUESTED,
@@ -177,7 +195,7 @@ export class ReturnsService {
 
     return {
       message: 'Return request created',
-      data: this.serialize(created),
+      data: this.serialize(loaded, 'customer', 'detail'),
     };
   }
 
@@ -203,7 +221,10 @@ export class ReturnsService {
       body: 'Your return request was approved',
       data: { returnRequestId: id },
     });
-    return { message: 'Return approved', data: this.serialize(updated) };
+    return {
+      message: 'Return approved',
+      data: this.serialize(updated, 'vendor', 'detail'),
+    };
   }
 
   async rejectVendor(
@@ -228,7 +249,10 @@ export class ReturnsService {
       body: dto.note ?? 'Your return request was rejected',
       data: { returnRequestId: id },
     });
-    return { message: 'Return rejected', data: this.serialize(updated) };
+    return {
+      message: 'Return rejected',
+      data: this.serialize(updated, 'vendor', 'detail'),
+    };
   }
 
   async adminOverride(
@@ -265,7 +289,10 @@ export class ReturnsService {
       body: dto.reason,
       data: { returnRequestId: id },
     });
-    return { message: 'Return updated', data: this.serialize(updated) };
+    return {
+      message: 'Return updated',
+      data: this.serialize(updated, 'admin', 'detail'),
+    };
   }
 
   async sendReceiptOtp(vendorId: string, id: string) {
@@ -331,13 +358,22 @@ export class ReturnsService {
       data: { returnRequestId: id },
     });
 
+    const audience: ReturnAudience = options.admin ? 'admin' : 'vendor';
     return {
       message: 'Return received',
-      data: this.serialize(await this.returnsRepository.findById(id)),
+      data: this.serialize(
+        await this.returnsRepository.findById(id),
+        audience,
+        'detail',
+      ),
     };
   }
 
-  async retryOnlineRefund(id: string, actorUserId: string) {
+  async retryOnlineRefund(
+    id: string,
+    actorUserId: string,
+    audience: Extract<ReturnAudience, 'vendor' | 'admin'>,
+  ) {
     const request = await this.requireExisting(id);
     this.assertStatus(request.status, [
       ReturnStatus.RECEIVED,
@@ -346,7 +382,11 @@ export class ReturnsService {
     await this.attemptOnlineRefund(request, actorUserId);
     return {
       message: 'Online refund attempted',
-      data: this.serialize(await this.returnsRepository.findById(id)),
+      data: this.serialize(
+        await this.returnsRepository.findById(id),
+        audience,
+        'detail',
+      ),
     };
   }
 
@@ -372,10 +412,11 @@ export class ReturnsService {
     const request = options.vendorId
       ? await this.requireVendor(options.vendorId, id)
       : await this.requireExisting(id);
+    const audience: ReturnAudience = options.admin ? 'admin' : 'vendor';
     if (request.offlineRefundConfirmedAt) {
       return {
         message: 'Offline refund already confirmed',
-        data: this.serialize(request),
+        data: this.serialize(request, audience, 'detail'),
       };
     }
     if (options.admin) {
@@ -422,7 +463,7 @@ export class ReturnsService {
 
     return {
       message: 'Offline refund confirmed',
-      data: this.serialize(updated),
+      data: this.serialize(updated, audience, 'detail'),
     };
   }
 
@@ -458,20 +499,17 @@ export class ReturnsService {
       request.orderId,
     );
     const remainingCap = Prisma.Decimal.max(
-      request.subOrder.order.onlineAmount.sub(already._sum.amount ?? 0),
+      request.order.onlineAmount.sub(already._sum.amount ?? 0),
       new Prisma.Decimal(0),
     );
     const amount = Prisma.Decimal.min(amounts.online, remainingCap);
-    if (
-      amount.lessThanOrEqualTo(0) ||
-      !request.subOrder.order.razorpayPaymentId
-    ) {
+    if (amount.lessThanOrEqualTo(0) || !request.order.razorpayPaymentId) {
       return;
     }
 
     try {
       const refund = await this.razorpayClient.createRefund({
-        paymentId: request.subOrder.order.razorpayPaymentId,
+        paymentId: request.order.razorpayPaymentId,
         amountPaise: toPaise(amount),
         notes: { returnRequestId: request.id, orderId: request.orderId },
       });
@@ -603,8 +641,7 @@ export class ReturnsService {
     purpose: (typeof COMMERCE_OTP_PURPOSES)[keyof typeof COMMERCE_OTP_PURPOSES],
     body: string,
   ) {
-    const phone =
-      request.subOrder.order.addressPhone ?? request.subOrder.order.user.phone;
+    const phone = request.order.addressPhone ?? request.user.phone;
     if (!phone) {
       throw domainBadRequest(
         DOMAIN_ERROR_CODES.OTP_PHONE_MISSING,
@@ -673,25 +710,232 @@ export class ReturnsService {
   }
 
   private serialize(
-    request: {
-      onlineRefundAmount?: Prisma.Decimal;
-      offlineRefundAmount?: Prisma.Decimal;
-      [key: string]: unknown;
-    } | null,
+    request: ReturnDetail | ReturnListRow | null,
+    audience: ReturnAudience,
+    mode: 'list' | 'detail',
   ) {
     if (!request) {
       return null;
     }
+
+    const payload: Record<string, unknown> = {
+      id: request.id,
+      orderId: request.orderId,
+      subOrderId: request.subOrderId,
+      deliveryId: request.deliveryId,
+      userId: request.userId,
+      vendorId: request.vendorId,
+      status: request.status,
+      reasonCode: request.reasonCode,
+      details: request.details,
+      vendorReviewNote: request.vendorReviewNote,
+      adminOverrideReason: request.adminOverrideReason,
+      reviewedByUserId: request.reviewedByUserId,
+      receivedAt: request.receivedAt,
+      inspectionNotes: request.inspectionNotes,
+      onlineRefundAmount: formatMoney(request.onlineRefundAmount),
+      offlineRefundAmount: formatMoney(request.offlineRefundAmount),
+      offlineRefundConfirmedAt: request.offlineRefundConfirmedAt,
+      createdAt: request.createdAt,
+      updatedAt: request.updatedAt,
+      items: this.serializeItems(request.items),
+      order: this.serializeOrderCard(request, audience, mode),
+      subOrder: this.serializeSubOrderCard(request, audience, mode),
+    };
+
+    if (audience === 'customer' || audience === 'admin') {
+      payload.vendor = this.serializeVendorCard(request.vendor, mode);
+    }
+    if (audience === 'vendor' || audience === 'admin') {
+      payload.customer = this.serializeCustomerCard(request.user, mode);
+    }
+
+    if (mode === 'detail' && this.isDetail(request)) {
+      payload.delivery = this.serializeDeliveryCard(request, audience);
+      payload.refunds = this.serializeRefunds(request, audience);
+      const flags = this.refundStepFlags(request);
+      payload.needsOfflineRefund = flags.needsOfflineRefund;
+      payload.needsOnlineRefund = flags.needsOnlineRefund;
+    }
+
+    return payload;
+  }
+
+  private isDetail(
+    request: ReturnDetail | ReturnListRow,
+  ): request is ReturnDetail {
+    return 'delivery' in request && 'refunds' in request;
+  }
+
+  private serializeItems(items: ReturnListRow['items']) {
+    return items.map((item) => ({
+      id: item.id,
+      orderItemId: item.orderItemId,
+      deliveryItemId: item.deliveryItemId,
+      variantId: item.orderItem.variantId,
+      quantity: item.quantity,
+      productName: item.orderItem.productName,
+      variantName: item.orderItem.variantName,
+      sku: item.orderItem.sku,
+      unitSymbol: item.orderItem.unitSymbol,
+      unitPrice: formatMoney(item.orderItem.unitPrice),
+      imageUrlSnapshot: item.orderItem.imageUrlSnapshot,
+    }));
+  }
+
+  private serializeOrderCard(
+    request: ReturnDetail | ReturnListRow,
+    audience: ReturnAudience,
+    mode: 'list' | 'detail',
+  ) {
+    const order = request.order;
+    const card: Record<string, unknown> = {
+      id: order.id,
+      orderNumber: order.orderNumber,
+      paymentMethod: order.paymentMethod,
+    };
+    if (mode !== 'detail' || !this.isDetail(request)) {
+      return card;
+    }
+    card.status = request.order.status;
+    card.paymentStatus = request.order.paymentStatus;
+    if (audience !== 'customer') {
+      card.razorpayPaymentId = request.order.razorpayPaymentId;
+      card.addressLabel = request.order.addressLabel;
+      card.addressLine1 = request.order.addressLine1;
+      card.addressLine2 = request.order.addressLine2;
+      card.addressCity = request.order.addressCity;
+      card.addressState = request.order.addressState;
+      card.addressPincode = request.order.addressPincode;
+      card.addressPhone = request.order.addressPhone;
+      card.addressLatitude = request.order.addressLatitude;
+      card.addressLongitude = request.order.addressLongitude;
+    }
+    return card;
+  }
+
+  private serializeSubOrderCard(
+    request: ReturnDetail | ReturnListRow,
+    audience: ReturnAudience,
+    mode: 'list' | 'detail',
+  ) {
+    const card: Record<string, unknown> = {
+      id: request.subOrder.id,
+      subOrderNumber: request.subOrder.subOrderNumber,
+    };
+    if (
+      mode !== 'detail' ||
+      !this.isDetail(request) ||
+      audience === 'customer'
+    ) {
+      return card;
+    }
+    card.onlineMerchandiseAmount = formatMoney(
+      request.subOrder.onlineMerchandiseAmount,
+    );
+    card.offlineMerchandiseAmount = formatMoney(
+      request.subOrder.offlineMerchandiseAmount,
+    );
+    card.onlineShippingAmount = formatMoney(
+      request.subOrder.onlineShippingAmount,
+    );
+    card.platformCommission = formatMoney(request.subOrder.platformCommission);
+    card.vendorEarning = formatMoney(request.subOrder.vendorEarning);
+    return card;
+  }
+
+  private serializeVendorCard(
+    vendor: ReturnListRow['vendor'],
+    mode: 'list' | 'detail',
+  ) {
+    const card: { id: string; businessName: string; slug?: string | null } = {
+      id: vendor.id,
+      businessName: vendor.businessName,
+    };
+    if (mode === 'detail') {
+      card.slug = vendor.slug;
+    }
+    return card;
+  }
+
+  private serializeCustomerCard(
+    user: ReturnListRow['user'],
+    mode: 'list' | 'detail',
+  ) {
+    const card: {
+      id: string;
+      name: string;
+      phone: string | null;
+      avatarUrl: string | null;
+      email?: string | null;
+    } = {
+      id: user.id,
+      name: user.name,
+      phone: user.phone,
+      avatarUrl: user.avatarUrl,
+    };
+    if (mode === 'detail') {
+      card.email = user.email;
+    }
+    return card;
+  }
+
+  private serializeDeliveryCard(
+    request: ReturnDetail,
+    audience: ReturnAudience,
+  ) {
+    const delivery: Record<string, unknown> = {
+      id: request.delivery.id,
+      deliveryNumber: request.delivery.deliveryNumber,
+      status: request.delivery.status,
+      deliveredAt: request.delivery.deliveredAt,
+    };
+    if (audience !== 'customer') {
+      delivery.offlineAmountCollected = formatMoney(
+        request.delivery.offlineAmountCollected,
+      );
+      delivery.walletCreditAmount = formatMoney(
+        request.delivery.walletCreditAmount,
+      );
+      delivery.walletCreditedAt = request.delivery.walletCreditedAt;
+    }
+    return delivery;
+  }
+
+  private serializeRefunds(request: ReturnDetail, audience: ReturnAudience) {
+    return request.refunds.map((refund) => {
+      const row: Record<string, unknown> = {
+        id: refund.id,
+        amount: formatMoney(refund.amount),
+        status: refund.status,
+      };
+      if (audience !== 'customer') {
+        row.razorpayRefundId = refund.razorpayRefundId;
+      }
+      return row;
+    });
+  }
+
+  private refundStepFlags(request: ReturnDetail) {
+    const received =
+      request.status === ReturnStatus.RECEIVED ||
+      request.status === ReturnStatus.COMPLETED ||
+      request.receivedAt != null;
+    const offline = received
+      ? request.offlineRefundAmount
+      : request.subOrder.offlineMerchandiseAmount;
+    const online = received
+      ? request.onlineRefundAmount
+      : request.subOrder.onlineMerchandiseAmount;
+    const onlineDone = request.refunds.some(
+      (refund) =>
+        refund.status === OrderRefundStatus.COMPLETED ||
+        refund.status === OrderRefundStatus.PROCESSING,
+    );
     return {
-      ...request,
-      onlineRefundAmount:
-        request.onlineRefundAmount != null
-          ? formatMoney(request.onlineRefundAmount)
-          : undefined,
-      offlineRefundAmount:
-        request.offlineRefundAmount != null
-          ? formatMoney(request.offlineRefundAmount)
-          : undefined,
+      needsOfflineRefund:
+        offline.greaterThan(0) && request.offlineRefundConfirmedAt == null,
+      needsOnlineRefund: online.greaterThan(0) && !onlineDone,
     };
   }
 }

@@ -107,7 +107,7 @@ export class AdminReturnsController {
     @CurrentUser() user: { userId: string },
     @Param('id', ParseUUIDPipe) id: string,
   ) {
-    return this.returnsService.retryOnlineRefund(id, user.userId);
+    return this.returnsService.retryOnlineRefund(id, user.userId, 'admin');
   }
 
   @Patch(':id/offline-refund')

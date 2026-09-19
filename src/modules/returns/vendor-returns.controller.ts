@@ -120,7 +120,7 @@ export class VendorReturnsController {
     @CurrentUser() user: AuthenticatedUser,
     @Param('id', ParseUUIDPipe) id: string,
   ) {
-    return this.returnsService.retryOnlineRefund(id, user.userId);
+    return this.returnsService.retryOnlineRefund(id, user.userId, 'vendor');
   }
 
   @Post(':id/offline-refund-otp')
