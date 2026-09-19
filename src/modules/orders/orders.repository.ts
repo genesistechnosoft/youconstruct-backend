@@ -1439,6 +1439,13 @@ export class OrdersRepository {
         data: paymentUpdate,
       });
 
+      if (
+        so.order.paymentStatus === PaymentStatus.PENDING &&
+        parentStatus === OrderStatus.CANCELLED
+      ) {
+        await this.releaseCouponUsagesForOrder(tx, so.orderId);
+      }
+
       return {
         orderId: so.orderId,
         subOrderId: so.id,
@@ -1586,6 +1593,8 @@ export class OrdersRepository {
         });
       }
 
+      await this.releaseCouponUsagesForOrder(tx, order.id);
+
       await tx.order.update({
         where: { id: order.id },
         data: {
@@ -1597,6 +1606,13 @@ export class OrdersRepository {
 
       return { orderId: order.id, userId: order.userId };
     });
+  }
+
+  private releaseCouponUsagesForOrder(
+    tx: Prisma.TransactionClient,
+    orderId: string,
+  ) {
+    return tx.couponUsage.deleteMany({ where: { orderId } });
   }
 
   async captureOnlinePayment(input: {

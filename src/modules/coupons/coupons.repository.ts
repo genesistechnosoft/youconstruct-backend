@@ -28,6 +28,7 @@ export const COUPON_SELECT = {
   createdByUserId: true,
   createdAt: true,
   updatedAt: true,
+  _count: { select: { usages: true } },
 } as const;
 
 @Injectable()
@@ -59,11 +60,12 @@ export class CouponsRepository {
     limit?: number;
   }) {
     const { skip, take } = paginate(filters.page, filters.limit);
+    const now = new Date();
     const where: Prisma.CouponWhereInput = {
       deletedAt: null,
       ...(filters.scope && { scope: filters.scope }),
       ...(filters.vendorId && { vendorId: filters.vendorId }),
-      ...(filters.status && { status: filters.status }),
+      ...this.statusFilter(filters.status, now),
     };
 
     const [items, total] = await Promise.all([
@@ -133,6 +135,33 @@ export class CouponsRepository {
       data,
       select: { id: true },
     });
+  }
+
+  private statusFilter(
+    status: CouponStatus | undefined,
+    now: Date,
+  ): Prisma.CouponWhereInput {
+    if (!status) {
+      return {};
+    }
+    if (status === CouponStatus.ACTIVE) {
+      return {
+        status: CouponStatus.ACTIVE,
+        OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
+      };
+    }
+    if (status === CouponStatus.EXPIRED) {
+      return {
+        OR: [
+          { status: CouponStatus.EXPIRED },
+          {
+            status: CouponStatus.ACTIVE,
+            expiresAt: { lte: now },
+          },
+        ],
+      };
+    }
+    return { status };
   }
 
   private handlePrismaError(error: unknown): never {

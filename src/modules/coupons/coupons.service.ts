@@ -550,8 +550,16 @@ export class CouponsService {
   private serializeCoupon(
     coupon: NonNullable<Awaited<ReturnType<CouponsRepository['findById']>>>,
   ) {
+    const usedCount = coupon._count.usages;
+    const expired =
+      coupon.expiresAt != null && coupon.expiresAt.getTime() <= Date.now();
     return {
-      ...coupon,
+      id: coupon.id,
+      code: coupon.code,
+      scope: coupon.scope,
+      vendorId: coupon.vendorId,
+      status: expired ? CouponStatus.EXPIRED : coupon.status,
+      discountType: coupon.discountType,
       discountValue: formatMoney(coupon.discountValue),
       maxDiscountAmount: coupon.maxDiscountAmount
         ? formatMoney(coupon.maxDiscountAmount)
@@ -559,6 +567,18 @@ export class CouponsService {
       minOrderAmount: coupon.minOrderAmount
         ? formatMoney(coupon.minOrderAmount)
         : null,
+      usageLimit: coupon.usageLimit,
+      usageLimitPerUser: coupon.usageLimitPerUser,
+      usedCount,
+      remainingUses:
+        coupon.usageLimit == null
+          ? null
+          : Math.max(0, coupon.usageLimit - usedCount),
+      startsAt: coupon.startsAt,
+      expiresAt: coupon.expiresAt,
+      createdByUserId: coupon.createdByUserId,
+      createdAt: coupon.createdAt,
+      updatedAt: coupon.updatedAt,
     };
   }
 }

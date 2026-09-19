@@ -1633,7 +1633,7 @@ model NotificationDelivery {
 
 model Coupon {
   id                String             @id @default(uuid())
-  code              String             @unique
+  code              String
   scope             CouponScope
   vendorId          String?
   status            CouponStatus       @default(DRAFT)
@@ -1655,6 +1655,7 @@ model Coupon {
   orders    Order[]
   usages    CouponUsage[]
 
+  @@index([code])
   @@index([scope, status, expiresAt])
   @@index([vendorId, status, expiresAt])
   @@index([createdAt])
