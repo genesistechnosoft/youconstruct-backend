@@ -12,6 +12,8 @@ import * as bcrypt from 'bcrypt';
 import { createHash, randomInt } from 'node:crypto';
 import { v4 as uuid } from 'uuid';
 import { PlatformRole } from '../../../generated/prisma/client.js';
+import { DOMAIN_ERROR_CODES } from '../../common/errors/domain-error-code';
+import { domainBadRequest } from '../../common/errors/domain-exception';
 import type {
   AuthenticatedUser,
   JwtPayload,
@@ -425,8 +427,14 @@ export class AuthService {
 
   async sendStepUpOtp(userId: string, purpose: StepUpPurpose) {
     const user = await this.authRepository.findUserById(userId);
-    if (!user || !user.isActive || !user.phone) {
-      return this.genericOtpResponse();
+    if (!user || !user.isActive) {
+      throw new UnauthorizedException('Invalid credentials');
+    }
+    if (!user.phone) {
+      throw domainBadRequest(
+        DOMAIN_ERROR_CODES.OTP_PHONE_MISSING,
+        'A phone number is required on your profile to send a verification OTP',
+      );
     }
 
     await this.assertOtpNotLocked(user.phone, purpose);
@@ -454,8 +462,14 @@ export class AuthService {
     dto: { purpose: StepUpPurpose; otp: string },
   ) {
     const user = await this.authRepository.findUserById(userId);
-    if (!user || !user.isActive || !user.phone) {
+    if (!user || !user.isActive) {
       throw new UnauthorizedException('Invalid credentials');
+    }
+    if (!user.phone) {
+      throw domainBadRequest(
+        DOMAIN_ERROR_CODES.OTP_PHONE_MISSING,
+        'A phone number is required on your profile to send a verification OTP',
+      );
     }
 
     await this.assertOtpNotLocked(user.phone, dto.purpose);
