@@ -52,7 +52,7 @@ export class VendorStoreService {
 
     return {
       message: 'Store settings fetched successfully',
-      data: settings,
+      data: await this.withStoreBrandMedia(vendorProfileId, settings),
     };
   }
 
@@ -126,7 +126,7 @@ export class VendorStoreService {
 
     return {
       message: 'Store settings updated successfully',
-      data: settings,
+      data: await this.withStoreBrandMedia(vendorProfileId, settings),
     };
   }
 
@@ -559,6 +559,21 @@ export class VendorStoreService {
     const aEnd = aMax ?? Number.POSITIVE_INFINITY;
     const bEnd = bMax ?? Number.POSITIVE_INFINITY;
     return aMin < bEnd && bMin < aEnd;
+  }
+
+  private async withStoreBrandMedia<T extends object>(
+    vendorProfileId: string,
+    settings: T,
+  ) {
+    const { logo, banner } = await this.getStoreBrandMedia(vendorProfileId);
+
+    return {
+      ...settings,
+      logo: logo?.url ? { url: logo.url, mediaId: logo.mediaId } : null,
+      banner: banner?.url
+        ? { url: banner.url, mediaId: banner.mediaId }
+        : null,
+    };
   }
 
   private async requireApprovedVendor(vendorProfileId: string) {

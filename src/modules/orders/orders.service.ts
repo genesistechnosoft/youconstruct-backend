@@ -1101,6 +1101,7 @@ export class OrdersService {
     }
 
     this.attachCustomer(serialized, audience);
+    this.attachCoupon(serialized);
 
     return serialized;
   }
@@ -1180,6 +1181,7 @@ export class OrdersService {
     ) {
       const nested = { ...(serialized.order as Record<string, unknown>) };
       this.attachCustomer(nested, audience);
+      this.attachCoupon(nested);
       serialized.order = nested;
     }
 
@@ -1199,6 +1201,21 @@ export class OrdersService {
     if (customer) {
       serialized.customer = customer;
     }
+  }
+
+  private attachCoupon(serialized: Record<string, unknown>) {
+    serialized.coupon = this.toCouponCard(serialized.coupon);
+  }
+
+  private toCouponCard(coupon: unknown) {
+    if (!coupon || typeof coupon !== 'object') {
+      return null;
+    }
+    const c = coupon as { id?: string; code?: string; scope?: string };
+    if (!c.id || !c.code || !c.scope) {
+      return null;
+    }
+    return { id: c.id, code: c.code, scope: c.scope };
   }
 
   private toCustomer(user: unknown) {

@@ -82,6 +82,12 @@ const ORDER_CUSTOMER_SELECT = {
   avatarUrl: true,
 } as const;
 
+const ORDER_COUPON_SELECT = {
+  id: true,
+  code: true,
+  scope: true,
+} as const;
+
 const ORDER_PARENT_SELECT = {
   id: true,
   orderNumber: true,
@@ -89,6 +95,8 @@ const ORDER_PARENT_SELECT = {
   paymentStatus: true,
   status: true,
   userId: true,
+  couponId: true,
+  coupon: { select: ORDER_COUPON_SELECT },
   addressId: true,
   addressLabel: true,
   addressLine1: true,
@@ -113,6 +121,8 @@ export const ORDER_DETAIL_SELECT = {
   paymentMethod: true,
   subtotal: true,
   discountAmount: true,
+  couponId: true,
+  coupon: { select: ORDER_COUPON_SELECT },
   shippingTotal: true,
   taxTotal: true,
   grandTotal: true,
@@ -320,6 +330,8 @@ export const ORDER_LIST_SELECT = {
   paymentMethod: true,
   subtotal: true,
   discountAmount: true,
+  couponId: true,
+  coupon: { select: ORDER_COUPON_SELECT },
   shippingTotal: true,
   taxTotal: true,
   grandTotal: true,
