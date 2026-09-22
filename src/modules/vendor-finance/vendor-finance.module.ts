@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
 import { PlatformSettingsModule } from '../platform-settings/platform-settings.module';
+import { AdminBankAccountsController } from './admin-bank-accounts.controller';
 import { AdminPayoutsController } from './admin-payouts.controller';
 import { AdminVendorFinanceController } from './admin-vendor-finance.controller';
 import { VendorBankAccountController } from './bank-account.controller';
@@ -16,6 +17,7 @@ import { VendorWalletController } from './wallet.controller';
     VendorBankAccountController,
     VendorPayoutsController,
     AdminVendorFinanceController,
+    AdminBankAccountsController,
     AdminPayoutsController,
   ],
   providers: [VendorFinanceService, VendorFinanceRepository],

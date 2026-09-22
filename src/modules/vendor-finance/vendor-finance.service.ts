@@ -20,6 +20,7 @@ import { NotificationEmitterService } from '../notifications/notification-emitte
 import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
 import { SecurityAuditService } from '../rbac/security-audit.service';
 import { AdminInitiatePayoutDto } from './dto/admin-initiate-payout.dto';
+import { AdminListBankAccountsQueryDto } from './dto/admin-list-bank-accounts-query.dto';
 import { AdminListPayoutsQueryDto } from './dto/admin-list-payouts-query.dto';
 import { CompletePayoutDto } from './dto/complete-payout.dto';
 import { CreateBankAccountDto } from './dto/create-bank-account.dto';
@@ -230,6 +231,31 @@ export class VendorFinanceService {
     return {
       message: 'Bank account deleted successfully',
       data: null,
+    };
+  }
+
+  async listAdminBankAccounts(query: AdminListBankAccountsQueryDto) {
+    const page = query.page ?? 1;
+    const limit = query.limit ?? 20;
+    const isVerified = query.isVerified ?? false;
+    const { skip, take } = paginate(page, limit);
+    const { items, total } =
+      await this.vendorFinanceRepository.findBankAccounts({
+        isVerified,
+        skip,
+        take,
+      });
+
+    return {
+      message: 'Bank accounts fetched successfully',
+      data: items.map((item) => {
+        const { vendor, ...account } = item;
+        return {
+          ...this.toBankAccountResponse(account),
+          vendor,
+        };
+      }),
+      meta: paginationMeta(page, limit, total),
     };
   }
 

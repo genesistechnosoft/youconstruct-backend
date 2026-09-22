@@ -157,6 +157,40 @@ export class VendorFinanceRepository {
     });
   }
 
+  async findBankAccounts(filters: {
+    isVerified: boolean;
+    skip: number;
+    take: number;
+  }) {
+    const where = {
+      deletedAt: null,
+      isVerified: filters.isVerified,
+      vendor: { deletedAt: null },
+    };
+
+    const [items, total] = await Promise.all([
+      this.prisma.vendorBankAccount.findMany({
+        where,
+        orderBy: { updatedAt: 'desc' },
+        skip: filters.skip,
+        take: filters.take,
+        select: {
+          ...BANK_ACCOUNT_SELECT,
+          vendor: {
+            select: {
+              id: true,
+              businessName: true,
+              slug: true,
+            },
+          },
+        },
+      }),
+      this.prisma.vendorBankAccount.count({ where }),
+    ]);
+
+    return { items, total };
+  }
+
   async createBankAccount(
     vendorId: string,
     data: {
