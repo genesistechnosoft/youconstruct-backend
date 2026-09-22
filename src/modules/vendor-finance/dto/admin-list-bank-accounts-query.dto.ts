@@ -11,11 +11,9 @@ export class AdminListBankAccountsQueryDto extends PaginationQueryDto {
       'Omit or false for the unverified inbox. true lists already verified accounts.',
   })
   @IsOptional()
-  @Transform(({ value }: { value: unknown }) => {
-    if (value === 'true' || value === true) return true;
-    if (value === 'false' || value === false) return false;
-    return value;
-  })
+  @Transform(
+    ({ obj }: { obj: Record<string, unknown> }) => obj.isVerified === 'true',
+  )
   @IsBoolean()
   isVerified?: boolean = false;
 }
