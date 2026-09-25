@@ -10,7 +10,7 @@ import { VendorDashboardRepository } from './vendor-dashboard.repository';
 import { VendorDashboardService } from './vendor-dashboard.service';
 
 @Module({
-  imports: [ProductsModule, VendorStoreModule],
+  imports: [ProductsModule, VendorStoreModule, MediaModule],
   controllers: [VendorDashboardController, PublicVendorsController],
   providers: [VendorDashboardService, VendorDashboardRepository],
   exports: [VendorDashboardService],

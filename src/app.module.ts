@@ -40,6 +40,7 @@ import { QueueModule } from './queue/queue.module';
 import { StorageModule } from './storage/storage.module';
 import { WishlistModule } from './modules/wishlist/wishlist.module';
 import { BulkUploadModule } from './modules/bulk-upload/bulk-upload.module';
+import { HomeModule } from './modules/home/home.module';
 import { SmsModule } from './common/sms/sms.module';
 import { CommerceOtpModule } from './common/otp/commerce-otp.module';
 
@@ -89,6 +90,7 @@ import { CommerceOtpModule } from './common/otp/commerce-otp.module';
     PlatformSettingsModule,
     WishlistModule,
     BulkUploadModule,
+    HomeModule,
   ],
   controllers: [AppController],
   providers: [

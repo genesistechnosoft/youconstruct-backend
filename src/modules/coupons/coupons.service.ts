@@ -47,6 +47,29 @@ export class CouponsService {
     private readonly notifications: NotificationEmitterService,
   ) {}
 
+  async listPublicPlatform(limit = 10) {
+    const coupons = await this.couponsRepository.findLivePlatform();
+    return coupons
+      .filter(
+        (coupon) =>
+          coupon.usageLimit == null ||
+          coupon._count.usages < coupon.usageLimit,
+      )
+      .slice(0, limit)
+      .map((coupon) => ({
+        code: coupon.code,
+        discountType: coupon.discountType,
+        discountValue: formatMoney(coupon.discountValue),
+        maxDiscountAmount: coupon.maxDiscountAmount
+          ? formatMoney(coupon.maxDiscountAmount)
+          : null,
+        minOrderAmount: coupon.minOrderAmount
+          ? formatMoney(coupon.minOrderAmount)
+          : null,
+        expiresAt: coupon.expiresAt,
+      }));
+  }
+
   async listAdmin(filters: CouponFiltersDto) {
     const { items, total } = await this.couponsRepository.list({
       scope: CouponScope.PLATFORM,

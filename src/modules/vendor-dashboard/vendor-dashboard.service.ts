@@ -3,11 +3,18 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma } from '../../../generated/prisma/client.js';
+import {
+  MediaContext,
+  MediaEntityType,
+  Prisma,
+} from '../../../generated/prisma/client.js';
 import { formatMoney } from '../../common/utils/money.util';
+import { paginate, paginationMeta } from '../../common/utils/pagination.util';
+import { MediaService } from '../media/media.service';
 import { ProductsService } from '../products/products.service';
 import { VendorStoreService } from '../vendor-store/vendor-store.service';
 import {
+  PublicVendorListQueryDto,
   VendorAnalyticsQueryDto,
   VendorStorefrontQueryDto,
 } from './dto/vendor-dashboard.dto';
@@ -19,7 +26,38 @@ export class VendorDashboardService {
     private readonly vendorDashboardRepository: VendorDashboardRepository,
     private readonly vendorStoreService: VendorStoreService,
     private readonly productsService: ProductsService,
+    private readonly mediaService: MediaService,
   ) {}
+
+  async listPublic(query: PublicVendorListQueryDto) {
+    const { items, total } =
+      await this.vendorDashboardRepository.findPublicList(query);
+    const vendorIds = items.map((vendor) => vendor.id);
+    const [logos, productCounts] = await Promise.all([
+      this.mediaService.getContextFilesForEntities(
+        MediaEntityType.VENDOR_PROFILE,
+        vendorIds,
+        MediaContext.LOGO,
+      ),
+      this.vendorDashboardRepository.countActiveProductsByVendors(vendorIds),
+    ]);
+    const { take } = paginate(query.page, query.limit);
+
+    return {
+      message: 'Vendors fetched successfully',
+      data: items.map((vendor) => ({
+        id: vendor.id,
+        businessName: vendor.businessName,
+        slug: vendor.slug,
+        bio: vendor.bio,
+        city: vendor.city,
+        state: vendor.state,
+        logo: logos.get(vendor.id) ?? null,
+        activeProductCount: productCounts.get(vendor.id) ?? 0,
+      })),
+      meta: paginationMeta(query.page, take, total),
+    };
+  }
 
   async getDashboard(vendorId: string) {
     const vendor =

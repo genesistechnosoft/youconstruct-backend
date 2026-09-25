@@ -11,6 +11,7 @@ import type { AuthenticatedUser } from '../../common/types/auth-user.type';
 import { requireVendorEntityId } from '../../common/utils/active-context.util';
 import { PERMISSIONS } from '../rbac/permissions.constants';
 import {
+  PublicVendorListQueryDto,
   VendorAnalyticsQueryDto,
   VendorStorefrontQueryDto,
 } from './dto/vendor-dashboard.dto';
@@ -58,6 +59,14 @@ export class PublicVendorsController {
   constructor(
     private readonly vendorDashboardService: VendorDashboardService,
   ) {}
+
+  @Get()
+  @Throttle({ default: { limit: 60, ttl: 60000 } })
+  @HttpCode(200)
+  @ApiOperation({ summary: 'List approved vendor storefronts' })
+  list(@Query() query: PublicVendorListQueryDto) {
+    return this.vendorDashboardService.listPublic(query);
+  }
 
   @Get('by-slug/:slug')
   @Throttle({ default: { limit: 60, ttl: 60000 } })

@@ -48,6 +48,13 @@ export class BrandsRepository {
     });
   }
 
+  findActiveBySlug(slug: string) {
+    return this.prisma.brand.findFirst({
+      where: { slug, isActive: true, deletedAt: null },
+      select: BRAND_SELECT,
+    });
+  }
+
   findActiveById(id: string) {
     return this.prisma.brand.findFirst({
       where: { id, isActive: true, deletedAt: null },

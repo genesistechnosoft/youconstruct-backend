@@ -868,7 +868,7 @@ export class ProductsService {
 
     return {
       message: 'Product fetched successfully',
-      data: await this.withProductMedia(product),
+      data: await this.toPublicProductDetail(product),
     };
   }
 
@@ -885,7 +885,7 @@ export class ProductsService {
 
     return {
       message: 'Product fetched successfully',
-      data: await this.withProductMedia(product),
+      data: await this.toPublicProductDetail(product),
     };
   }
 
@@ -1472,6 +1472,7 @@ export class ProductsService {
         tags: product.tags,
         category: product.category,
         brand: product.brand,
+        vendor: product.vendor,
         variantCount: product._count.variants,
         displayPrice: variant ? formatMoney(variant.sellingPrice) : null,
         unit: variant?.primaryUnit
@@ -1532,6 +1533,30 @@ export class ProductsService {
       media: galleries.get(product.id) ?? [],
       thumbnail: thumbnails.get(product.id) ?? null,
     }));
+  }
+
+  private async toPublicProductDetail<
+    T extends {
+      id: string;
+      variants: Array<{
+        id: string;
+        inventory: { quantity: number; allowBackorder: boolean } | null;
+      }>;
+    },
+  >(product: T) {
+    const withMedia = await this.withProductMedia(product);
+    return {
+      ...withMedia,
+      variants: withMedia.variants.map(({ inventory, ...rest }) => {
+        const quantity = inventory?.quantity ?? 0;
+        const allowBackorder = inventory?.allowBackorder ?? false;
+        return {
+          ...rest,
+          allowBackorder,
+          stockQuantity: quantity <= 0 && !allowBackorder ? 0 : quantity,
+        };
+      }),
+    };
   }
 
   private async withProductMedia<

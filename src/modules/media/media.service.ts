@@ -742,6 +742,41 @@ export class MediaService {
     return result;
   }
 
+  async getContextFilesForEntities(
+    entityType: MediaEntityType,
+    entityIds: string[],
+    context: MediaContext,
+  ): Promise<Map<string, { url: string; storageKey: string } | null>> {
+    const links = await this.mediaRepository.findLinksByEntityIds(
+      entityType,
+      entityIds,
+      context,
+    );
+    const result = new Map<string, { url: string; storageKey: string } | null>();
+
+    for (const entityId of entityIds) {
+      result.set(entityId, null);
+    }
+
+    for (const link of links) {
+      if (result.get(link.entityId)) {
+        continue;
+      }
+
+      const storageKey =
+        link.media.optimizedKey ??
+        link.media.thumbnailKey ??
+        link.media.originalKey;
+      const url = await this.storageService.getUrl(
+        storageKey,
+        link.media.accessLevel,
+      );
+      result.set(link.entityId, { url, storageKey });
+    }
+
+    return result;
+  }
+
   async getContextMediaForEntities(
     entityType: MediaEntityType,
     entityIds: string[],

@@ -34,6 +34,22 @@ export class BrandsService {
     };
   }
 
+  async listHighlights(limit = 12) {
+    const brands = await this.brandsRepository.findAll(false, 0, limit);
+    return this.withLogos(brands);
+  }
+
+  async findBySlug(slug: string) {
+    const brand = await this.brandsRepository.findActiveBySlug(slug);
+    if (!brand) {
+      throw new NotFoundException('Brand not found');
+    }
+    return {
+      message: 'Brand fetched successfully',
+      data: await this.withLogo(brand),
+    };
+  }
+
   async findById(id: string) {
     const brand = await this.brandsRepository.findActiveById(id);
     if (!brand) {

@@ -52,6 +52,33 @@ export class CouponsRepository {
     });
   }
 
+  findLivePlatform(take = 50) {
+    const now = new Date();
+    return this.prisma.coupon.findMany({
+      where: {
+        deletedAt: null,
+        scope: CouponScope.PLATFORM,
+        status: CouponStatus.ACTIVE,
+        AND: [
+          { OR: [{ startsAt: null }, { startsAt: { lte: now } }] },
+          { OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
+        ],
+      },
+      orderBy: { createdAt: 'desc' },
+      take,
+      select: {
+        code: true,
+        discountType: true,
+        discountValue: true,
+        maxDiscountAmount: true,
+        minOrderAmount: true,
+        expiresAt: true,
+        usageLimit: true,
+        _count: { select: { usages: true } },
+      },
+    });
+  }
+
   async list(filters: {
     scope?: CouponScope;
     vendorId?: string;

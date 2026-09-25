@@ -31,6 +31,11 @@ export class BrowseProductsDto {
   @IsUUID()
   brandId?: string;
 
+  @ApiPropertyOptional({ example: 'c1d2e3f4-a5b6-7890-abcd-ef1234567890' })
+  @IsOptional()
+  @IsUUID()
+  vendorId?: string;
+
   @ApiPropertyOptional({ example: 'marble' })
   @IsOptional()
   @IsString()

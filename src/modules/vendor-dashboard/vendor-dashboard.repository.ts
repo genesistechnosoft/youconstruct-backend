@@ -6,6 +6,7 @@ import {
   SubOrderStatus,
   VendorOnboardingStatus,
 } from '../../../generated/prisma/client.js';
+import { paginate } from '../../common/utils/pagination.util';
 import { PrismaService } from '../../prisma/prisma.service';
 
 const PENDING_VENDOR_ACTION: SubOrderStatus[] = [
@@ -76,6 +77,74 @@ export class VendorDashboardRepository {
         },
       },
     });
+  }
+
+  async findPublicList(filters: {
+    search?: string;
+    city?: string;
+    state?: string;
+    page?: number;
+    limit?: number;
+  }) {
+    const { skip, take } = paginate(filters.page, filters.limit);
+    const where: Prisma.VendorProfileWhereInput = {
+      deletedAt: null,
+      isApproved: true,
+      onboardingStatus: VendorOnboardingStatus.APPROVED,
+      slug: { not: null },
+      ...(filters.search && {
+        businessName: { contains: filters.search, mode: 'insensitive' },
+      }),
+      ...(filters.city && {
+        city: { equals: filters.city, mode: 'insensitive' },
+      }),
+      ...(filters.state && {
+        state: { equals: filters.state, mode: 'insensitive' },
+      }),
+    };
+
+    const [items, total] = await this.prisma.$transaction([
+      this.prisma.vendorProfile.findMany({
+        where,
+        skip,
+        take,
+        orderBy: [{ approvedAt: 'desc' }, { createdAt: 'desc' }],
+        select: {
+          id: true,
+          businessName: true,
+          slug: true,
+          bio: true,
+          city: true,
+          state: true,
+        },
+      }),
+      this.prisma.vendorProfile.count({ where }),
+    ]);
+
+    return { items, total };
+  }
+
+  async countActiveProductsByVendors(vendorIds: string[]) {
+    const counts = new Map<string, number>();
+    if (vendorIds.length === 0) {
+      return counts;
+    }
+
+    const rows = await this.prisma.product.groupBy({
+      by: ['vendorId'],
+      where: {
+        vendorId: { in: vendorIds },
+        deletedAt: null,
+        status: ProductStatus.ACTIVE,
+      },
+      _count: { _all: true },
+    });
+
+    for (const row of rows) {
+      counts.set(row.vendorId, row._count._all);
+    }
+
+    return counts;
   }
 
   findPublicBySlug(slug: string) {

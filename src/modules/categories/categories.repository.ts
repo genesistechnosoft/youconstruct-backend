@@ -100,6 +100,16 @@ export class CategoriesRepository {
     });
   }
 
+  findPublicBySlug(slug: string) {
+    return this.prisma.category.findFirst({
+      where: { slug, isActive: true, deletedAt: null },
+      select: {
+        ...CATEGORY_SELECT,
+        children: childrenOneLevel,
+      },
+    });
+  }
+
   findBySlug(slug: string, excludeId?: string) {
     return this.prisma.category.findFirst({
       where: {

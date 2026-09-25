@@ -71,6 +71,33 @@ export class CategoriesService {
     return { message: 'Categories fetched successfully', data: categories };
   }
 
+  async findBySlug(slug: string) {
+    const category = await this.categoriesRepository.findPublicBySlug(slug);
+    if (!category) {
+      throw new NotFoundException('Category not found');
+    }
+
+    const visibleIds = await this.getVisibleCategoryIds();
+    if (!visibleIds.includes(category.id)) {
+      throw new NotFoundException('Category not found');
+    }
+
+    return {
+      message: 'Category fetched successfully',
+      data: await this.withImages(category),
+    };
+  }
+
+  async listPublicParents() {
+    const { data } = await this.getTree();
+    return data.map((category) => ({
+      id: category.id,
+      name: category.name,
+      slug: category.slug,
+      image: category.image,
+    }));
+  }
+
   async findById(id: string) {
     const category = await this.categoriesRepository.findActiveById(id);
     if (!category) {

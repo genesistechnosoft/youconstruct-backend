@@ -186,6 +186,12 @@ const PUBLIC_VARIANT_SELECT = {
   baseUnit: {
     select: UNIT_SELECT,
   },
+  inventory: {
+    select: {
+      quantity: true,
+      allowBackorder: true,
+    },
+  },
 } as const;
 
 const variantOrderBy: Prisma.ProductVariantOrderByWithRelationInput[] = [
@@ -221,6 +227,9 @@ const publicProductListSelect = {
   brand: {
     select: BRAND_SELECT,
   },
+  vendor: {
+    select: VENDOR_SUMMARY_SELECT,
+  },
   variants: {
     where: { isActive: true, deletedAt: null },
     orderBy: [
@@ -247,6 +256,9 @@ const publicProductDetailSelect = {
   },
   brand: {
     select: BRAND_SELECT,
+  },
+  vendor: {
+    select: VENDOR_SUMMARY_SELECT,
   },
   variants: {
     where: { isActive: true, deletedAt: null },
@@ -369,14 +381,20 @@ export class ProductsRepository {
           }
         : {};
 
+    const categoryIsVisible =
+      !filters.categoryId ||
+      filters.visibleCategoryIds.includes(filters.categoryId);
     const where: Prisma.ProductWhereInput = {
       status: ProductStatus.ACTIVE,
       deletedAt: null,
       vendor: { isApproved: true, deletedAt: null },
-      categoryId: { in: filters.visibleCategoryIds },
+      categoryId: filters.categoryId
+        ? categoryIsVisible
+          ? filters.categoryId
+          : { in: [] }
+        : { in: filters.visibleCategoryIds },
       OR: [{ brandId: null }, { brand: { isActive: true, deletedAt: null } }],
       ...(filters.vendorId && { vendorId: filters.vendorId }),
-      ...(filters.categoryId && { categoryId: filters.categoryId }),
       ...(filters.brandId && { brandId: filters.brandId }),
       ...(filters.search && {
         name: { contains: filters.search, mode: 'insensitive' },

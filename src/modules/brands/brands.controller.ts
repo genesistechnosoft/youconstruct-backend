@@ -47,6 +47,13 @@ export class BrandsController {
     return this.brandsService.findAll();
   }
 
+  @Get('by-slug/:slug')
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Get an active brand by slug' })
+  findBySlug(@Param('slug') slug: string) {
+    return this.brandsService.findBySlug(slug);
+  }
+
   @Get(':id')
   @HttpCode(200)
   @ApiOperation({ summary: 'Get an active brand by ID' })
