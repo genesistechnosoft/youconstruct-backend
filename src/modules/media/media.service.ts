@@ -781,13 +781,34 @@ export class MediaService {
     entityType: MediaEntityType,
     entityIds: string[],
     context: MediaContext,
-  ): Promise<Map<string, { url: string; mediaId: string } | null>> {
+  ): Promise<
+    Map<
+      string,
+      {
+        mediaId: string;
+        processingStatus: MediaProcessingStatus;
+        originalUrl: string;
+        optimizedUrl: string | null;
+        thumbnailUrl: string | null;
+      } | null
+    >
+  > {
     const links = await this.mediaRepository.findLinksByEntityIds(
       entityType,
       entityIds,
       context,
+      false,
     );
-    const result = new Map<string, { url: string; mediaId: string } | null>();
+    const result = new Map<
+      string,
+      {
+        mediaId: string;
+        processingStatus: MediaProcessingStatus;
+        originalUrl: string;
+        optimizedUrl: string | null;
+        thumbnailUrl: string | null;
+      } | null
+    >();
 
     for (const entityId of entityIds) {
       result.set(entityId, null);
@@ -798,15 +819,14 @@ export class MediaService {
         continue;
       }
 
-      const storageKey =
-        link.media.optimizedKey ??
-        link.media.thumbnailKey ??
-        link.media.originalKey;
-      const url = await this.storageService.getUrl(
-        storageKey,
-        link.media.accessLevel,
-      );
-      result.set(link.entityId, { url, mediaId: link.mediaId });
+      const withUrls = await this.withUrls(link.media);
+      result.set(link.entityId, {
+        mediaId: link.mediaId,
+        processingStatus: withUrls.processingStatus,
+        originalUrl: withUrls.originalUrl,
+        optimizedUrl: withUrls.optimizedUrl,
+        thumbnailUrl: withUrls.thumbnailUrl,
+      });
     }
 
     return result;

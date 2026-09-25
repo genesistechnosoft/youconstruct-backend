@@ -7,6 +7,7 @@ import {
 import {
   MediaContext,
   MediaEntityType,
+  MediaProcessingStatus,
 } from '../../../generated/prisma/client.js';
 import { paginate, paginationMeta } from '../../common/utils/pagination.util';
 import { generateSlug } from '../../common/utils/slug.util';
@@ -15,7 +16,13 @@ import { BrandsRepository } from './brands.repository';
 import { CreateBrandDto } from './dto/create-brand.dto';
 import { UpdateBrandDto } from './dto/update-brand.dto';
 
-type BrandLogo = { url: string; mediaId: string } | null;
+type BrandLogo = {
+  mediaId: string;
+  processingStatus: MediaProcessingStatus;
+  originalUrl: string;
+  optimizedUrl: string | null;
+  thumbnailUrl: string | null;
+} | null;
 
 type BrandRecord = { id: string };
 
@@ -211,10 +218,13 @@ export class BrandsService {
       MediaContext.BRAND_LOGO,
     );
 
-    return brands.map((brand) => ({
-      ...brand,
-      logo: (logos.get(brand.id) ?? null) as BrandLogo,
-    }));
+    return brands.map((brand) => {
+      const logo: BrandLogo = logos.get(brand.id) ?? null;
+      return {
+        ...brand,
+        logo,
+      };
+    });
   }
 
   private async assertBrandHasNoActiveProducts(id: string) {

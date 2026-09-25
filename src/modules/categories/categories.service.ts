@@ -8,6 +8,7 @@ import {
 import {
   MediaContext,
   MediaEntityType,
+  MediaProcessingStatus,
 } from '../../../generated/prisma/client.js';
 import { RedisCacheService } from '../../common/redis/redis-cache.service';
 import {
@@ -26,7 +27,13 @@ import { ReorderCategoriesDto } from './dto/reorder-categories.dto';
 import { UpdateCategoryDto } from './dto/update-category.dto';
 import { CategoriesRepository } from './categories.repository';
 
-type CategoryImage = { url: string; mediaId: string } | null;
+type CategoryImage = {
+  mediaId: string;
+  processingStatus: MediaProcessingStatus;
+  originalUrl: string;
+  optimizedUrl: string | null;
+  thumbnailUrl: string | null;
+} | null;
 
 type CategoryNode = {
   id: string;
