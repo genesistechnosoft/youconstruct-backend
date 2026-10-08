@@ -1,5 +1,6 @@
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import {
+  ArrayMaxSize,
   IsEnum,
   IsInt,
   IsNumber,
@@ -21,10 +22,22 @@ export enum BrowseSortOrder {
 }
 
 export class BrowseProductsDto {
-  @ApiPropertyOptional({ example: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890' })
+  @ApiPropertyOptional({
+    type: [String],
+    isArray: true,
+    example: ['a1b2c3d4-e5f6-7890-abcd-ef1234567890'],
+  })
   @IsOptional()
-  @IsUUID()
-  categoryId?: string;
+  @Transform(({ value }: { value: unknown }) => {
+    if (value === undefined || value === null || value === '') return undefined;
+    const ids = (Array.isArray(value) ? value : [value])
+      .map((item) => (typeof item === 'string' ? item.trim() : ''))
+      .filter((id) => id.length > 0);
+    return ids.length > 0 ? ids : undefined;
+  })
+  @IsUUID('4', { each: true })
+  @ArrayMaxSize(50)
+  categoryIds?: string[];
 
   @ApiPropertyOptional({ example: 'b1c2d3e4-f5a6-7890-abcd-ef1234567890' })
   @IsOptional()

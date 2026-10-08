@@ -294,7 +294,7 @@ export interface ProductFilters {
 }
 
 export interface BrowseProductFilters {
-  categoryId?: string;
+  categoryIds?: string[];
   brandId?: string;
   vendorId?: string;
   search?: string;
@@ -381,18 +381,17 @@ export class ProductsRepository {
           }
         : {};
 
-    const categoryIsVisible =
-      !filters.categoryId ||
-      filters.visibleCategoryIds.includes(filters.categoryId);
+    const visibleCategoryIdSet = new Set(filters.visibleCategoryIds);
+    const categoryIds = filters.categoryIds?.length
+      ? [...new Set(filters.categoryIds)].filter((id) =>
+          visibleCategoryIdSet.has(id),
+        )
+      : filters.visibleCategoryIds;
     const where: Prisma.ProductWhereInput = {
       status: ProductStatus.ACTIVE,
       deletedAt: null,
       vendor: { isApproved: true, deletedAt: null },
-      categoryId: filters.categoryId
-        ? categoryIsVisible
-          ? filters.categoryId
-          : { in: [] }
-        : { in: filters.visibleCategoryIds },
+      categoryId: { in: categoryIds },
       OR: [{ brandId: null }, { brand: { isActive: true, deletedAt: null } }],
       ...(filters.vendorId && { vendorId: filters.vendorId }),
       ...(filters.brandId && { brandId: filters.brandId }),

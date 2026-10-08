@@ -200,7 +200,7 @@ export class AuthService {
       (dto.purpose === 'LOGIN' || dto.purpose === PASSWORD_RESET_PURPOSE) &&
       !existingUser
     ) {
-      return this.genericOtpResponse();
+      throw new BadRequestException('Phone number is not registered');
     }
 
     const otp = randomInt(100000, 1000000).toString();

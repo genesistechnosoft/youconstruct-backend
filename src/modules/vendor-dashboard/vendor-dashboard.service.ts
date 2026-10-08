@@ -33,11 +33,16 @@ export class VendorDashboardService {
     const { items, total } =
       await this.vendorDashboardRepository.findPublicList(query);
     const vendorIds = items.map((vendor) => vendor.id);
-    const [logos, productCounts] = await Promise.all([
+    const [logos, banners, productCounts] = await Promise.all([
       this.mediaService.getContextFilesForEntities(
         MediaEntityType.VENDOR_PROFILE,
         vendorIds,
         MediaContext.LOGO,
+      ),
+      this.mediaService.getContextFilesForEntities(
+        MediaEntityType.VENDOR_PROFILE,
+        vendorIds,
+        MediaContext.BANNER,
       ),
       this.vendorDashboardRepository.countActiveProductsByVendors(vendorIds),
     ]);
@@ -53,6 +58,7 @@ export class VendorDashboardService {
         city: vendor.city,
         state: vendor.state,
         logo: logos.get(vendor.id) ?? null,
+        banner: banners.get(vendor.id) ?? null,
         activeProductCount: productCounts.get(vendor.id) ?? 0,
       })),
       meta: paginationMeta(query.page, take, total),
