@@ -33,6 +33,7 @@ export type CartLineForCoupon = {
 export type CouponEvaluation = {
   couponId: string;
   code: string;
+  description: string | null;
   scope: CouponScope;
   vendorId: string | null;
   eligibleSubtotal: Prisma.Decimal;
@@ -58,6 +59,7 @@ export class CouponsService {
       .slice(0, limit)
       .map((coupon) => ({
         code: coupon.code,
+        description: coupon.description,
         discountType: coupon.discountType,
         discountValue: formatMoney(coupon.discountValue),
         maxDiscountAmount: coupon.maxDiscountAmount
@@ -130,6 +132,7 @@ export class CouponsService {
     this.validateDiscountDto(dto);
     const coupon = await this.couponsRepository.create({
       code: dto.code.trim().toUpperCase(),
+      description: this.normalizeDescription(dto.description),
       scope: CouponScope.PLATFORM,
       status: CouponStatus.DRAFT,
       discountType: dto.discountType,
@@ -166,6 +169,7 @@ export class CouponsService {
     this.validateDiscountDto(dto);
     const coupon = await this.couponsRepository.create({
       code: dto.code.trim().toUpperCase(),
+      description: this.normalizeDescription(dto.description),
       scope: CouponScope.VENDOR,
       vendorId,
       status: CouponStatus.DRAFT,
@@ -396,6 +400,7 @@ export class CouponsService {
     return {
       couponId: coupon.id,
       code: coupon.code,
+      description: coupon.description,
       scope: coupon.scope,
       vendorId: coupon.vendorId,
       eligibleSubtotal,
@@ -490,6 +495,9 @@ export class CouponsService {
     dto: UpdateCouponDto,
   ): Prisma.CouponUncheckedUpdateInput {
     return {
+      ...(dto.description !== undefined && {
+        description: this.normalizeDescription(dto.description),
+      }),
       ...(dto.discountType !== undefined && { discountType: dto.discountType }),
       ...(dto.discountValue !== undefined && {
         discountValue: new Prisma.Decimal(dto.discountValue),
@@ -518,6 +526,12 @@ export class CouponsService {
       }),
       ...(dto.status !== undefined && { status: dto.status }),
     };
+  }
+
+  private normalizeDescription(value: string | null | undefined): string | null {
+    if (value == null) return null;
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : null;
   }
 
   private validateDiscountDto(dto: CreateCouponDto) {
@@ -579,6 +593,7 @@ export class CouponsService {
     return {
       id: coupon.id,
       code: coupon.code,
+      description: coupon.description,
       scope: coupon.scope,
       vendorId: coupon.vendorId,
       status: expired ? CouponStatus.EXPIRED : coupon.status,

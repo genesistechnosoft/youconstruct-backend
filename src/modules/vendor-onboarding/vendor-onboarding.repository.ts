@@ -43,6 +43,7 @@ const VENDOR_PROFILE_SELECT = {
   isApproved: true,
   approvedAt: true,
   bio: true,
+  about: true,
   onboardingStatus: true,
   submittedAt: true,
   reviewedAt: true,

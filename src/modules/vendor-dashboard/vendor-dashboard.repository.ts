@@ -160,6 +160,7 @@ export class VendorDashboardRepository {
         businessName: true,
         slug: true,
         bio: true,
+        about: true,
         city: true,
         state: true,
         pincode: true,

@@ -711,6 +711,7 @@ model VendorProfile {
   isApproved       Boolean                @default(false)
   approvedAt       DateTime?
   bio              String?
+  about            String?                @db.VarChar(2000)
   onboardingStatus VendorOnboardingStatus @default(DRAFT)
   submittedAt      DateTime?
   reviewedAt       DateTime?
@@ -1634,6 +1635,7 @@ model NotificationDelivery {
 model Coupon {
   id                String             @id @default(uuid())
   code              String
+  description       String?            @db.VarChar(500)
   scope             CouponScope
   vendorId          String?
   status            CouponStatus       @default(DRAFT)

@@ -24,6 +24,15 @@ export class CreateCouponDto {
   @MaxLength(40)
   code!: string;
 
+  @ApiPropertyOptional({
+    example: '10% off orders above \u20b91000',
+    maxLength: 500,
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  description?: string;
+
   @ApiProperty({ enum: CouponDiscountType })
   @IsEnum(CouponDiscountType)
   discountType!: CouponDiscountType;
@@ -74,6 +83,16 @@ export class CreateCouponDto {
 }
 
 export class UpdateCouponDto {
+  @ApiPropertyOptional({
+    example: '10% off orders above \u20b91000',
+    maxLength: 500,
+    nullable: true,
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  description?: string | null;
+
   @ApiPropertyOptional({ enum: CouponDiscountType })
   @IsOptional()
   @IsEnum(CouponDiscountType)

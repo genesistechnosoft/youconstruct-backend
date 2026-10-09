@@ -132,6 +132,21 @@ export class VendorStoreRepository {
     });
   }
 
+  findVendorAbout(vendorId: string) {
+    return this.prisma.vendorProfile.findFirst({
+      where: { id: vendorId, deletedAt: null },
+      select: { about: true },
+    });
+  }
+
+  updateVendorAbout(vendorId: string, about: string | null) {
+    return this.prisma.vendorProfile.update({
+      where: { id: vendorId },
+      data: { about },
+      select: { about: true },
+    });
+  }
+
   findStoreSettings(vendorId: string) {
     return this.prisma.vendorStoreSettings.findUnique({
       where: { vendorId },

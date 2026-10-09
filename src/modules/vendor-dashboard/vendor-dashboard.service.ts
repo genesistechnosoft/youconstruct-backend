@@ -267,6 +267,7 @@ export class VendorDashboardService {
         businessName: vendor.businessName,
         slug: vendor.slug,
         bio: vendor.bio,
+        about: vendor.about,
         city: vendor.city,
         state: vendor.state,
         pincode: vendor.pincode,

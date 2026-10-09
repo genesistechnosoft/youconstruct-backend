@@ -14,6 +14,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 export const COUPON_SELECT = {
   id: true,
   code: true,
+  description: true,
   scope: true,
   vendorId: true,
   status: true,
@@ -68,6 +69,7 @@ export class CouponsRepository {
       take,
       select: {
         code: true,
+        description: true,
         discountType: true,
         discountValue: true,
         maxDiscountAmount: true,

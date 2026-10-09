@@ -1535,6 +1535,48 @@ export class ProductsService {
     }));
   }
 
+  private async toSellerCard(vendor: {
+    id: string;
+    businessName: string;
+    slug: string | null;
+    bio: string | null;
+    about: string | null;
+    businessAddress: string | null;
+    city: string | null;
+    state: string | null;
+    pincode: string | null;
+    approvedAt: Date | null;
+    createdAt: Date;
+    storeSettings: {
+      supportPhone: string | null;
+      supportEmail: string | null;
+    } | null;
+  }) {
+    const logos = await this.mediaService.getContextFilesForEntities(
+      MediaEntityType.VENDOR_PROFILE,
+      [vendor.id],
+      MediaContext.LOGO,
+    );
+
+    return {
+      id: vendor.id,
+      slug: vendor.slug,
+      businessName: vendor.businessName,
+      bio: vendor.bio,
+      about: vendor.about,
+      address: {
+        line1: vendor.businessAddress,
+        city: vendor.city,
+        state: vendor.state,
+        pincode: vendor.pincode,
+      },
+      phone: vendor.storeSettings?.supportPhone ?? null,
+      email: vendor.storeSettings?.supportEmail ?? null,
+      memberSince: vendor.approvedAt ?? vendor.createdAt,
+      logo: logos.get(vendor.id) ?? null,
+    };
+  }
+
   private async toPublicProductDetail<
     T extends {
       id: string;
@@ -1545,8 +1587,17 @@ export class ProductsService {
     },
   >(product: T) {
     const withMedia = await this.withProductMedia(product);
+    const seller =
+      'vendor' in withMedia &&
+      withMedia.vendor !== null &&
+      typeof withMedia.vendor === 'object'
+        ? await this.toSellerCard(
+            withMedia.vendor as Parameters<ProductsService['toSellerCard']>[0],
+          )
+        : undefined;
     return {
       ...withMedia,
+      ...(seller !== undefined ? { vendor: seller } : {}),
       variants: withMedia.variants.map(({ inventory, ...rest }) => {
         const quantity = inventory?.quantity ?? 0;
         const allowBackorder = inventory?.allowBackorder ?? false;

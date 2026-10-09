@@ -83,6 +83,26 @@ const VENDOR_SUMMARY_SELECT = {
   slug: true,
 } as const;
 
+const PUBLIC_VENDOR_CARD_SELECT = {
+  id: true,
+  businessName: true,
+  slug: true,
+  bio: true,
+  about: true,
+  businessAddress: true,
+  city: true,
+  state: true,
+  pincode: true,
+  approvedAt: true,
+  createdAt: true,
+  storeSettings: {
+    select: {
+      supportPhone: true,
+      supportEmail: true,
+    },
+  },
+} as const;
+
 const UNIT_SELECT = {
   id: true,
   name: true,
@@ -258,7 +278,7 @@ const publicProductDetailSelect = {
     select: BRAND_SELECT,
   },
   vendor: {
-    select: VENDOR_SUMMARY_SELECT,
+    select: PUBLIC_VENDOR_CARD_SELECT,
   },
   variants: {
     where: { isActive: true, deletedAt: null },

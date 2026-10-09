@@ -1211,11 +1211,21 @@ export class OrdersService {
     if (!coupon || typeof coupon !== 'object') {
       return null;
     }
-    const c = coupon as { id?: string; code?: string; scope?: string };
+    const c = coupon as {
+      id?: string;
+      code?: string;
+      description?: string | null;
+      scope?: string;
+    };
     if (!c.id || !c.code || !c.scope) {
       return null;
     }
-    return { id: c.id, code: c.code, scope: c.scope };
+    return {
+      id: c.id,
+      code: c.code,
+      description: c.description ?? null,
+      scope: c.scope,
+    };
   }
 
   private toCustomer(user: unknown) {

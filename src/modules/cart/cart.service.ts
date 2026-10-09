@@ -154,6 +154,7 @@ export class CartService {
       message: 'Coupon preview calculated',
       data: {
         code: evaluation.code,
+        description: evaluation.description,
         scope: evaluation.scope,
         eligibleSubtotal: formatMoney(evaluation.eligibleSubtotal),
         discountAmount: formatMoney(evaluation.discountAmount),

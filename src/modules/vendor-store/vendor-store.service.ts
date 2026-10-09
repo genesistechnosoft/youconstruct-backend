@@ -52,7 +52,10 @@ export class VendorStoreService {
 
     return {
       message: 'Store settings fetched successfully',
-      data: await this.withStoreBrandMedia(vendorProfileId, settings),
+      data: await this.withAbout(
+        vendorProfileId,
+        await this.withStoreBrandMedia(vendorProfileId, settings),
+      ),
     };
   }
 
@@ -119,14 +122,24 @@ export class VendorStoreService {
     dto: UpdateStoreSettingsDto,
   ) {
     await this.requireApprovedVendor(vendorProfileId);
+    const { about, ...settingsDto } = dto;
     const settings = await this.vendorStoreRepository.updateStoreSettings(
       vendorProfileId,
-      dto,
+      settingsDto,
     );
+    if (about !== undefined) {
+      await this.vendorStoreRepository.updateVendorAbout(
+        vendorProfileId,
+        this.normalizeAbout(about),
+      );
+    }
 
     return {
       message: 'Store settings updated successfully',
-      data: await this.withStoreBrandMedia(vendorProfileId, settings),
+      data: await this.withAbout(
+        vendorProfileId,
+        await this.withStoreBrandMedia(vendorProfileId, settings),
+      ),
     };
   }
 
@@ -559,6 +572,21 @@ export class VendorStoreService {
     const aEnd = aMax ?? Number.POSITIVE_INFINITY;
     const bEnd = bMax ?? Number.POSITIVE_INFINITY;
     return aMin < bEnd && bMin < aEnd;
+  }
+
+  private normalizeAbout(value: string | null): string | null {
+    if (value === null) return null;
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  }
+
+  private async withAbout<T extends object>(
+    vendorProfileId: string,
+    data: T,
+  ) {
+    const vendor =
+      await this.vendorStoreRepository.findVendorAbout(vendorProfileId);
+    return { ...data, about: vendor?.about ?? null };
   }
 
   private async withStoreBrandMedia<T extends object>(

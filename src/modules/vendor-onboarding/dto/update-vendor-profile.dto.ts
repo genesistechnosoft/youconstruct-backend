@@ -1,6 +1,12 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { Transform, Type } from 'class-transformer';
-import { IsNumber, IsOptional, IsString, Matches } from 'class-validator';
+import {
+  IsNumber,
+  IsOptional,
+  IsString,
+  Matches,
+  MaxLength,
+} from 'class-validator';
 import { GSTIN_PATTERN } from '../vendor-onboarding.constants.js';
 
 export class UpdateVendorProfileDto {
@@ -55,5 +61,16 @@ export class UpdateVendorProfileDto {
   @ApiPropertyOptional({ example: 'Premium construction materials supplier.' })
   @IsOptional()
   @IsString()
+  @MaxLength(280)
   bio?: string;
+
+  @ApiPropertyOptional({
+    example: 'Family-run tile yard supplying contractors across Chennai since 1998.',
+    maxLength: 2000,
+    nullable: true,
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(2000)
+  about?: string | null;
 }

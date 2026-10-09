@@ -85,6 +85,7 @@ const ORDER_CUSTOMER_SELECT = {
 const ORDER_COUPON_SELECT = {
   id: true,
   code: true,
+  description: true,
   scope: true,
 } as const;
 

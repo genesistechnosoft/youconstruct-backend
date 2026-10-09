@@ -102,6 +102,9 @@ export class VendorOnboardingService {
         ...(dto.longitude !== undefined && { longitude: dto.longitude }),
         ...(dto.gstNumber !== undefined && { gstNumber: dto.gstNumber }),
         ...(dto.bio !== undefined && { bio: dto.bio }),
+        ...(dto.about !== undefined && {
+          about: this.normalizeAbout(dto.about),
+        }),
         ...(!vendor.slug
           ? {
               slug: await this.allocateUniqueSlug(
@@ -798,6 +801,12 @@ export class VendorOnboardingService {
     }
 
     return missingFields;
+  }
+
+  private normalizeAbout(value: string | null): string | null {
+    if (value === null) return null;
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : null;
   }
 
   private hasText(value: string | null | undefined): value is string {
