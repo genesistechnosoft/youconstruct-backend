@@ -103,9 +103,9 @@ export class BannersService {
             userId,
             webImage,
             MediaEntityType.HOMEPAGE_BANNER,
-            banner!.id,
+            banner.id,
             MediaContext.BANNER_WEB,
-            `admin/banners/${banner!.id}/web`,
+            `admin/banners/${banner.id}/web`,
           )
         : Promise.resolve(),
       appImage
@@ -113,14 +113,14 @@ export class BannersService {
             userId,
             appImage,
             MediaEntityType.HOMEPAGE_BANNER,
-            banner!.id,
+            banner.id,
             MediaContext.BANNER_APP,
-            `admin/banners/${banner!.id}/app`,
+            `admin/banners/${banner.id}/app`,
           )
         : Promise.resolve(),
     ]);
 
-    const [enriched] = await this.withBannerMedia([banner!]);
+    const [enriched] = await this.withBannerMedia([banner]);
     return {
       message: 'Banner created successfully',
       data: enriched,
@@ -185,7 +185,7 @@ export class BannersService {
         : Promise.resolve(),
     ]);
 
-    const [enriched] = await this.withBannerMedia([banner!]);
+    const [enriched] = await this.withBannerMedia([banner]);
     return {
       message: 'Banner updated successfully',
       data: enriched,
@@ -203,7 +203,7 @@ export class BannersService {
       updatedBy: { connect: { id: userId } },
     });
 
-    const [enriched] = await this.withBannerMedia([banner!]);
+    const [enriched] = await this.withBannerMedia([banner]);
     return {
       message: 'Banner activated successfully',
       data: enriched,
@@ -221,7 +221,7 @@ export class BannersService {
       updatedBy: { connect: { id: userId } },
     });
 
-    const [enriched] = await this.withBannerMedia([banner!]);
+    const [enriched] = await this.withBannerMedia([banner]);
     return {
       message: 'Banner deactivated successfully',
       data: enriched,
@@ -243,7 +243,7 @@ export class BannersService {
     }
 
     const banners = await this.bannersRepository.reorder(dto.orderedIds);
-    const data = await this.withBannerMedia(banners!);
+    const data = await this.withBannerMedia(banners);
     return { message: 'Banners reordered successfully', data };
   }
 

@@ -345,7 +345,7 @@ export class BulkUploadService {
         status: isValid
           ? BulkProductUploadRowStatus.VALID
           : BulkProductUploadRowStatus.INVALID,
-        rawData: record as Prisma.InputJsonObject,
+        rawData: record,
         errorMessage: isValid ? null : errors.join('; '),
       });
     }

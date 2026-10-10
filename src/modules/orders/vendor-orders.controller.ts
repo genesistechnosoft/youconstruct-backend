@@ -20,7 +20,6 @@ import { requireVendorEntityId } from '../../common/utils/active-context.util';
 import { PERMISSIONS } from '../rbac/permissions.constants';
 import { VendorCancelSubOrderDto } from './dto/cancel-sub-order.dto';
 import { ListSubOrdersQueryDto } from './dto/list-orders-query.dto';
-import { UpdateShipmentDto } from './dto/update-shipment.dto';
 import { UpdateSubOrderStatusDto } from './dto/update-sub-order-status.dto';
 import { OrdersService } from './orders.service';
 
@@ -87,23 +86,6 @@ export class VendorOrdersController {
     @Body() dto: UpdateSubOrderStatusDto,
   ) {
     return this.ordersService.updateVendorSubOrderStatus(
-      requireVendorEntityId(user),
-      id,
-      user.userId,
-      dto,
-    );
-  }
-
-  @Patch(':id/shipment')
-  @HttpCode(200)
-  @Permissions(PERMISSIONS.VENDOR.ORDERS_MANAGE)
-  @ApiOperation({ summary: 'Update shipment for sub-order' })
-  updateShipment(
-    @CurrentUser() user: AuthenticatedUser,
-    @Param('id', ParseUUIDPipe) id: string,
-    @Body() dto: UpdateShipmentDto,
-  ) {
-    return this.ordersService.updateVendorShipment(
       requireVendorEntityId(user),
       id,
       user.userId,

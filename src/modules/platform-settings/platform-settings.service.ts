@@ -67,7 +67,7 @@ export class PlatformSettingsService {
         key,
         oldValue: existing.value,
         newValue: value,
-      } as Prisma.InputJsonObject,
+      },
       impersonatedBy: user.impersonatedBy,
     });
 

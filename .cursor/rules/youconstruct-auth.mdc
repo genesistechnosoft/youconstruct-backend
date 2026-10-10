@@ -39,7 +39,8 @@ Throttler → JwtAuthGuard → RolesGuard → PermissionsGuard → ActiveContext
 
 - `@Public()` — skip JWT
 - `@Roles(PlatformRole.ADMIN)` — platform role; `SUPER_ADMIN` always passes
-- `@Permissions('products:create')` — required for `/vendor|/admin|/professional` routes (default-deny)
+- `@Permissions('products:create')` — required for `/vendor|/admin` routes (default-deny). `/professional/` is planned and has no controllers yet.
+- Coupon routes (`/admin/coupons`, `/vendor/coupons`) require `coupons:manage`.
 - `@OwnerOnly()` — business owner only (or Super Admin)
 - `@OnboardingOnly()` — owner onboarding routes (GET allowed after APPROVED; writes 400)
 - `@RequireActiveContext(PermissionScope.VENDOR)` — matching server-derived context
@@ -125,5 +126,6 @@ New OTP send cannot reset lockout.
 ## Security
 
 Rate limit login, OTP send, OTP verify, register. Never log passwords or tokens.
+`security` namespace platform settings (`cartMutationLimitPerMinute`, `checkoutLimitPerMinute`, `paymentVerifyLimitPerMinute`, `productBrowseLimitPerMinute`) are stored in the database but are not wired to `@Throttle`. Hardcoded decorator limits are authoritative.
 `SUPER_ADMIN`, `ADMIN` cannot self-register.
 Identical login failure messages (no account-status enumeration).

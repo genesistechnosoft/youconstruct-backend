@@ -580,10 +580,7 @@ export class VendorStoreService {
     return trimmed.length > 0 ? trimmed : null;
   }
 
-  private async withAbout<T extends object>(
-    vendorProfileId: string,
-    data: T,
-  ) {
+  private async withAbout<T extends object>(vendorProfileId: string, data: T) {
     const vendor =
       await this.vendorStoreRepository.findVendorAbout(vendorProfileId);
     return { ...data, about: vendor?.about ?? null };
@@ -598,9 +595,7 @@ export class VendorStoreService {
     return {
       ...settings,
       logo: logo?.url ? { url: logo.url, mediaId: logo.mediaId } : null,
-      banner: banner?.url
-        ? { url: banner.url, mediaId: banner.mediaId }
-        : null,
+      banner: banner?.url ? { url: banner.url, mediaId: banner.mediaId } : null,
     };
   }
 

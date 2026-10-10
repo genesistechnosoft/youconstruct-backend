@@ -30,7 +30,7 @@ import { CouponsService } from './coupons.service';
 @Controller('admin/coupons')
 @Roles(PlatformRole.ADMIN)
 @RequireActiveContext(PermissionScope.ADMIN)
-@Permissions(PERMISSIONS.ADMIN.ORDERS_MANAGE)
+@Permissions(PERMISSIONS.ADMIN.COUPONS_MANAGE)
 @ApiBearerAuth()
 export class AdminCouponsController {
   constructor(private readonly couponsService: CouponsService) {}
@@ -52,20 +52,14 @@ export class AdminCouponsController {
   @Post()
   @HttpCode(200)
   @ApiOperation({ summary: 'Create platform coupon' })
-  create(
-    @CurrentUser() user: AuthenticatedUser,
-    @Body() dto: CreateCouponDto,
-  ) {
+  create(@CurrentUser() user: AuthenticatedUser, @Body() dto: CreateCouponDto) {
     return this.couponsService.createPlatform(user.userId, dto);
   }
 
   @Patch(':id')
   @HttpCode(200)
   @ApiOperation({ summary: 'Update platform coupon' })
-  update(
-    @Param('id', ParseUUIDPipe) id: string,
-    @Body() dto: UpdateCouponDto,
-  ) {
+  update(@Param('id', ParseUUIDPipe) id: string, @Body() dto: UpdateCouponDto) {
     return this.couponsService.updatePlatform(id, dto);
   }
 
@@ -101,21 +95,18 @@ export class VendorCouponsController {
 
   @Get()
   @HttpCode(200)
-  @Permissions(PERMISSIONS.VENDOR.PRODUCTS_EDIT)
+  @Permissions(PERMISSIONS.VENDOR.COUPONS_MANAGE)
   @ApiOperation({ summary: 'List my vendor coupons' })
   list(
     @CurrentUser() user: AuthenticatedUser,
     @Query() filters: CouponFiltersDto,
   ) {
-    return this.couponsService.listVendor(
-      requireVendorEntityId(user),
-      filters,
-    );
+    return this.couponsService.listVendor(requireVendorEntityId(user), filters);
   }
 
   @Get(':id')
   @HttpCode(200)
-  @Permissions(PERMISSIONS.VENDOR.PRODUCTS_EDIT)
+  @Permissions(PERMISSIONS.VENDOR.COUPONS_MANAGE)
   @ApiOperation({ summary: 'Get my vendor coupon' })
   get(
     @CurrentUser() user: AuthenticatedUser,
@@ -126,12 +117,9 @@ export class VendorCouponsController {
 
   @Post()
   @HttpCode(200)
-  @Permissions(PERMISSIONS.VENDOR.PRODUCTS_EDIT)
+  @Permissions(PERMISSIONS.VENDOR.COUPONS_MANAGE)
   @ApiOperation({ summary: 'Create vendor coupon' })
-  create(
-    @CurrentUser() user: AuthenticatedUser,
-    @Body() dto: CreateCouponDto,
-  ) {
+  create(@CurrentUser() user: AuthenticatedUser, @Body() dto: CreateCouponDto) {
     return this.couponsService.createVendor(
       requireVendorEntityId(user),
       user.userId,
@@ -141,7 +129,7 @@ export class VendorCouponsController {
 
   @Patch(':id')
   @HttpCode(200)
-  @Permissions(PERMISSIONS.VENDOR.PRODUCTS_EDIT)
+  @Permissions(PERMISSIONS.VENDOR.COUPONS_MANAGE)
   @ApiOperation({ summary: 'Update vendor coupon' })
   update(
     @CurrentUser() user: AuthenticatedUser,
@@ -157,21 +145,18 @@ export class VendorCouponsController {
 
   @Patch(':id/activate')
   @HttpCode(200)
-  @Permissions(PERMISSIONS.VENDOR.PRODUCTS_EDIT)
+  @Permissions(PERMISSIONS.VENDOR.COUPONS_MANAGE)
   @ApiOperation({ summary: 'Activate vendor coupon' })
   activate(
     @CurrentUser() user: AuthenticatedUser,
     @Param('id', ParseUUIDPipe) id: string,
   ) {
-    return this.couponsService.activateVendor(
-      requireVendorEntityId(user),
-      id,
-    );
+    return this.couponsService.activateVendor(requireVendorEntityId(user), id);
   }
 
   @Patch(':id/deactivate')
   @HttpCode(200)
-  @Permissions(PERMISSIONS.VENDOR.PRODUCTS_EDIT)
+  @Permissions(PERMISSIONS.VENDOR.COUPONS_MANAGE)
   @ApiOperation({ summary: 'Deactivate vendor coupon' })
   deactivate(
     @CurrentUser() user: AuthenticatedUser,
@@ -185,7 +170,7 @@ export class VendorCouponsController {
 
   @Delete(':id')
   @HttpCode(200)
-  @Permissions(PERMISSIONS.VENDOR.PRODUCTS_EDIT)
+  @Permissions(PERMISSIONS.VENDOR.COUPONS_MANAGE)
   @ApiOperation({ summary: 'Soft-delete vendor coupon' })
   remove(
     @CurrentUser() user: AuthenticatedUser,

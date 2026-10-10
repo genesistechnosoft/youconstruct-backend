@@ -16,7 +16,6 @@ import {
   Prisma,
   ProductStatus,
   RestockStatus,
-  ShipmentStatus,
   SubOrderStatus,
   TransactionReason,
   TransactionType,
@@ -187,19 +186,6 @@ export const ORDER_DETAIL_SELECT = {
           imageStorageKeySnapshot: true,
         },
       },
-      shipment: {
-        select: {
-          id: true,
-          trackingNumber: true,
-          courierName: true,
-          shippingLabelUrl: true,
-          estimatedDelivery: true,
-          shippedAt: true,
-          deliveredAt: true,
-          status: true,
-          updatedAt: true,
-        },
-      },
       deliveries: {
         orderBy: { createdAt: 'asc' as const },
         select: {
@@ -307,17 +293,6 @@ const SUB_ORDER_LIST_SELECT = {
           quantity: true,
         },
       },
-    },
-  },
-  shipment: {
-    select: {
-      id: true,
-      trackingNumber: true,
-      courierName: true,
-      status: true,
-      shippedAt: true,
-      deliveredAt: true,
-      updatedAt: true,
     },
   },
 } as const;
@@ -921,11 +896,6 @@ export class OrdersRepository {
     toStatus: SubOrderStatus;
     changedByUserId: string | null;
     note?: string;
-    shipmentUpdate?: {
-      status?: ShipmentStatus;
-      shippedAt?: Date | null;
-      deliveredAt?: Date | null;
-    };
   }) {
     return this.prisma.$transaction(async (tx) => {
       const updated = await tx.subOrder.updateMany({
@@ -951,24 +921,6 @@ export class OrdersRepository {
         },
       });
 
-      if (input.shipmentUpdate) {
-        await tx.shipment.updateMany({
-          where: { subOrderId: input.subOrderId },
-          data: {
-            ...(input.shipmentUpdate.status
-              ? { status: input.shipmentUpdate.status }
-              : {}),
-            ...(input.shipmentUpdate.shippedAt !== undefined
-              ? { shippedAt: input.shipmentUpdate.shippedAt }
-              : {}),
-            ...(input.shipmentUpdate.deliveredAt !== undefined
-              ? { deliveredAt: input.shipmentUpdate.deliveredAt }
-              : {}),
-            lastUpdatedBy: input.changedByUserId,
-          },
-        });
-      }
-
       const subOrder = await tx.subOrder.findUniqueOrThrow({
         where: { id: input.subOrderId },
         select: { orderId: true },
@@ -990,38 +942,6 @@ export class OrdersRepository {
       where: { id: orderId },
       data: { status },
       select: ORDER_DETAIL_SELECT,
-    });
-  }
-
-  updateShipment(
-    subOrderId: string,
-    data: {
-      trackingNumber?: string;
-      courierName?: string;
-      shippingLabelUrl?: string;
-      estimatedDelivery?: Date | null;
-      status?: ShipmentStatus;
-      lastUpdatedBy: string;
-    },
-  ) {
-    return this.prisma.shipment.update({
-      where: { subOrderId },
-      data: {
-        ...(data.trackingNumber !== undefined
-          ? { trackingNumber: data.trackingNumber }
-          : {}),
-        ...(data.courierName !== undefined
-          ? { courierName: data.courierName }
-          : {}),
-        ...(data.shippingLabelUrl !== undefined
-          ? { shippingLabelUrl: data.shippingLabelUrl }
-          : {}),
-        ...(data.estimatedDelivery !== undefined
-          ? { estimatedDelivery: data.estimatedDelivery }
-          : {}),
-        ...(data.status !== undefined ? { status: data.status } : {}),
-        lastUpdatedBy: data.lastUpdatedBy,
-      },
     });
   }
 
@@ -1700,88 +1620,6 @@ export class OrdersRepository {
         orderId: order.id,
         paymentTimeoutJobId: order.paymentTimeoutJobId,
       };
-    });
-  }
-
-  async creditWalletForSubOrderId(subOrderId: string) {
-    return this.prisma.$transaction(async (tx) => {
-      const so = await tx.subOrder.findUnique({
-        where: { id: subOrderId },
-        select: {
-          id: true,
-          vendorId: true,
-          vendorEarning: true,
-          walletCreditedAt: true,
-        },
-      });
-      if (!so) {
-        throw new NotFoundException('Sub-order not found');
-      }
-      await this.creditWalletForSubOrder(tx, so);
-    });
-  }
-
-  private async creditWalletForSubOrder(
-    tx: Prisma.TransactionClient,
-    so: {
-      id: string;
-      vendorId: string;
-      vendorEarning: Prisma.Decimal;
-      walletCreditedAt: Date | null;
-    },
-  ) {
-    if (so.walletCreditedAt) {
-      return;
-    }
-
-    const existingTx = await tx.vendorTransaction.findFirst({
-      where: {
-        reason: TransactionReason.ORDER_EARNING,
-        referenceType: 'SUB_ORDER',
-        referenceId: so.id,
-      },
-      select: { id: true },
-    });
-    if (existingTx) {
-      return;
-    }
-
-    const wallet = await tx.vendorWallet.upsert({
-      where: { vendorId: so.vendorId },
-      update: {},
-      create: { vendorId: so.vendorId },
-      select: { id: true, balance: true, totalEarned: true },
-    });
-
-    const balanceBefore = wallet.balance;
-    const balanceAfter = balanceBefore.add(so.vendorEarning);
-
-    await tx.vendorWallet.update({
-      where: { id: wallet.id },
-      data: {
-        balance: balanceAfter,
-        totalEarned: wallet.totalEarned.add(so.vendorEarning),
-      },
-    });
-
-    await tx.vendorTransaction.create({
-      data: {
-        vendorId: so.vendorId,
-        walletId: wallet.id,
-        type: TransactionType.CREDIT,
-        reason: TransactionReason.ORDER_EARNING,
-        amount: so.vendorEarning,
-        balanceBefore,
-        balanceAfter,
-        referenceId: so.id,
-        referenceType: 'SUB_ORDER',
-        note: 'Order earning',
-      },
-    });
-
-    await tx.subOrder.update({
-      where: { id: so.id },
-      data: { walletCreditedAt: new Date() },
     });
   }
 

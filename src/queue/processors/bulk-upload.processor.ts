@@ -68,7 +68,10 @@ export class BulkUploadProcessor extends WorkerHost {
           const tagsStr = rawData['tags']?.trim() ?? '';
           const tags = normalizeProductTags(
             tagsStr
-              ? tagsStr.split('|').map((t) => t.trim()).filter(Boolean)
+              ? tagsStr
+                  .split('|')
+                  .map((t) => t.trim())
+                  .filter(Boolean)
               : [],
           );
           const metaTitle = rawData['metaTitle']?.trim() ?? '';
@@ -133,9 +136,7 @@ export class BulkUploadProcessor extends WorkerHost {
         status: finalStatus,
         importedRows: importedCount,
         errorMessage:
-          failedCount > 0
-            ? `${failedCount} row(s) failed to import`
-            : null,
+          failedCount > 0 ? `${failedCount} row(s) failed to import` : null,
       });
 
       const eventType =

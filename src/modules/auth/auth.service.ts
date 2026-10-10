@@ -18,7 +18,10 @@ import type {
   AuthenticatedUser,
   JwtPayload,
 } from '../../common/types/auth-user.type';
-import { SMS_SENDER, type SmsSender } from '../../common/sms/sms-sender.interface';
+import {
+  SMS_SENDER,
+  type SmsSender,
+} from '../../common/sms/sms-sender.interface';
 import { RbacService } from '../rbac/rbac.service';
 import { SecurityAuditService } from '../rbac/security-audit.service';
 import { AuthRepository } from './auth.repository';

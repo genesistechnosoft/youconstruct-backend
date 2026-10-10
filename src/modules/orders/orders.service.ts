@@ -43,7 +43,6 @@ import {
   ListOrdersQueryDto,
   ListSubOrdersQueryDto,
 } from './dto/list-orders-query.dto';
-import { UpdateShipmentDto } from './dto/update-shipment.dto';
 import { UpdateSubOrderStatusDto } from './dto/update-sub-order-status.dto';
 import {
   PAYMENT_TIMEOUT_JOB_PREFIX,
@@ -675,67 +674,12 @@ export class OrdersService {
       vendorId,
     );
 
-    if (dto.status === SubOrderStatus.SHIPPED) {
-      this.notifications.emit({
-        userId: so.order.userId ?? order.userId,
-        eventType: NotificationEventType.ORDER_SHIPPED,
-        title: 'Order shipped',
-        body: `Sub-order ${so.subOrderNumber} has been shipped`,
-        data: { orderId, subOrderId },
-      });
-    }
-    if (dto.status === SubOrderStatus.DELIVERED) {
-      this.notifications.emit({
-        userId: so.order.userId ?? order.userId,
-        eventType: NotificationEventType.ORDER_DELIVERED,
-        title: 'Order delivered',
-        body: `Sub-order ${so.subOrderNumber} has been delivered`,
-        data: { orderId, subOrderId },
-      });
-    }
-
     return {
       message: 'Sub-order status updated',
       data: {
         subOrder: this.serializeSubOrder(refreshed!, 'vendor'),
         order: this.serializeOrder(order, 'vendor', vendorId),
       },
-    };
-  }
-
-  async updateVendorShipment(
-    vendorId: string,
-    subOrderId: string,
-    userId: string,
-    dto: UpdateShipmentDto,
-  ) {
-    const so = await this.ordersRepository.findSubOrderForVendor(
-      subOrderId,
-      vendorId,
-    );
-    if (!so) {
-      throw new NotFoundException('Order not found');
-    }
-
-    await this.ordersRepository.updateShipment(subOrderId, {
-      trackingNumber: dto.trackingNumber,
-      courierName: dto.courierName,
-      shippingLabelUrl: dto.shippingLabelUrl,
-      estimatedDelivery: dto.estimatedDelivery
-        ? new Date(dto.estimatedDelivery)
-        : undefined,
-      status: dto.status,
-      lastUpdatedBy: userId,
-    });
-
-    const refreshed = await this.ordersRepository.findSubOrderForVendor(
-      subOrderId,
-      vendorId,
-    );
-
-    return {
-      message: 'Shipment updated',
-      data: this.serializeSubOrder(refreshed!, 'vendor'),
     };
   }
 

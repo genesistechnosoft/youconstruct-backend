@@ -7,7 +7,7 @@ alwaysApply: false
 # Media
 
 - Media references via `media_links` (polymorphic) — never URLs on entity tables
-- Upload: client → `POST /api/v1/media/upload` → StorageService → BullMQ processing job
+- Upload: client → `POST /api/v1/vendor/media` → StorageService → BullMQ processing job
 - Use `StorageService` only — never write to disk directly
 - Switch local ↔ R2: change `STORAGE_DRIVER` env var, no code changes
 - Validate mime type and size before saving

@@ -4,6 +4,11 @@ import {
   SubOrderStatus,
 } from '../../../generated/prisma/client.js';
 
+/**
+ * Vendor PATCH /vendor/orders/:id/status may only move CONFIRMED → PROCESSING.
+ * SHIPPED, OUT_FOR_DELIVERY, and DELIVERED are set exclusively by Delivery
+ * status transitions through deriveSubOrderStatusFromQty, never by this map.
+ */
 export const VENDOR_SUB_ORDER_TRANSITIONS: Record<
   SubOrderStatus,
   SubOrderStatus[]
@@ -298,39 +303,4 @@ export function aggregateParentOrderStatusFromQty(
     return OrderStatus.PENDING_PAYMENT;
   }
   return OrderStatus.CONFIRMED;
-}
-
-const SUB_ORDER_STATUS_RANK: Record<SubOrderStatus, number> = {
-  [SubOrderStatus.PENDING]: 0,
-  [SubOrderStatus.CONFIRMED]: 1,
-  [SubOrderStatus.PROCESSING]: 2,
-  [SubOrderStatus.SHIPPED]: 3,
-  [SubOrderStatus.OUT_FOR_DELIVERY]: 4,
-  [SubOrderStatus.DELIVERED]: 5,
-  [SubOrderStatus.CANCELLED]: 100,
-  [SubOrderStatus.REFUNDED]: 100,
-};
-
-/**
- * Cancel is allowed for statuses strictly before the configured cutoff.
- * Default cutoff SHIPPED → PENDING, CONFIRMED, PROCESSING.
- */
-export function isCancelAllowedBeforeCutoff(
-  current: SubOrderStatus,
-  cutoffStatus: string,
-): boolean {
-  if (
-    current === SubOrderStatus.CANCELLED ||
-    current === SubOrderStatus.REFUNDED
-  ) {
-    return false;
-  }
-
-  const cutoff = (Object.values(SubOrderStatus) as string[]).includes(
-    cutoffStatus,
-  )
-    ? (cutoffStatus as SubOrderStatus)
-    : SubOrderStatus.SHIPPED;
-
-  return SUB_ORDER_STATUS_RANK[current] < SUB_ORDER_STATUS_RANK[cutoff];
 }

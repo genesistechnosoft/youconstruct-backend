@@ -53,8 +53,7 @@ export class CouponsService {
     return coupons
       .filter(
         (coupon) =>
-          coupon.usageLimit == null ||
-          coupon._count.usages < coupon.usageLimit,
+          coupon.usageLimit == null || coupon._count.usages < coupon.usageLimit,
       )
       .slice(0, limit)
       .map((coupon) => ({
@@ -528,7 +527,9 @@ export class CouponsService {
     };
   }
 
-  private normalizeDescription(value: string | null | undefined): string | null {
+  private normalizeDescription(
+    value: string | null | undefined,
+  ): string | null {
     if (value == null) return null;
     const trimmed = value.trim();
     return trimmed.length > 0 ? trimmed : null;

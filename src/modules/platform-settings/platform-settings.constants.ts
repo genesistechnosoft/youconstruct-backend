@@ -73,7 +73,8 @@ export const PLATFORM_SETTING_DEFINITIONS = [
     key: 'platformFreightAmount',
     valueType: PlatformSettingValueType.DECIMAL_STRING,
     label: 'Platform freight amount',
-    description: 'Flat freight charged once per vendor when platform freight is enabled.',
+    description:
+      'Flat freight charged once per vendor when platform freight is enabled.',
     defaultValue: '500.00',
     isEditable: true,
     isPublic: false,
@@ -105,7 +106,8 @@ export const PLATFORM_SETTING_DEFINITIONS = [
     key: 'returnWindowHours',
     valueType: PlatformSettingValueType.NUMBER,
     label: 'Return window hours',
-    description: 'Hours after OTP-confirmed delivery during which a quantity may be returned.',
+    description:
+      'Hours after OTP-confirmed delivery during which a quantity may be returned.',
     defaultValue: 48,
     isEditable: true,
     isPublic: false,

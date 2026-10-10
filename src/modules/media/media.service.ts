@@ -752,7 +752,10 @@ export class MediaService {
       entityIds,
       context,
     );
-    const result = new Map<string, { url: string; storageKey: string } | null>();
+    const result = new Map<
+      string,
+      { url: string; storageKey: string } | null
+    >();
 
     for (const entityId of entityIds) {
       result.set(entityId, null);

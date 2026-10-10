@@ -10,7 +10,8 @@ import { PreferredPaymentMethod } from '../../../../generated/prisma/client.js';
 
 export class UpdateStoreSettingsDto {
   @ApiPropertyOptional({
-    example: 'Family-run tile yard supplying contractors across Chennai since 1998.',
+    example:
+      'Family-run tile yard supplying contractors across Chennai since 1998.',
     maxLength: 2000,
     nullable: true,
   })
