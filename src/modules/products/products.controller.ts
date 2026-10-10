@@ -8,6 +8,7 @@ import {
   ParseUUIDPipe,
   Patch,
   Post,
+  Put,
   Query,
   UploadedFile,
   UseInterceptors,
@@ -36,7 +37,10 @@ import { ReorderMediaLinksDto } from '../media/dto/reorder-media-links.dto';
 import { AdminProductFiltersDto } from './dto/admin-product-filters.dto';
 import { BrowseProductsDto } from './dto/browse-products.dto';
 import { CreateProductDto } from './dto/create-product.dto';
+import { CheckSkusDto } from './dto/check-skus.dto';
 import { CreateVariantDto } from './dto/create-variant.dto';
+import { ReplaceProductMediaDto } from './dto/replace-product-media.dto';
+import { DryRunQueryDto, ReplaceVariantsDto } from './dto/replace-variants.dto';
 import { LinkThumbnailDto } from './dto/link-thumbnail.dto';
 import { ProductFiltersDto } from './dto/product-filters.dto';
 import { SearchTagsQueryDto } from './dto/search-tags-query.dto';
@@ -323,6 +327,46 @@ export class VendorProductsController {
     );
   }
 
+  @Put(':id/variants')
+  @HttpCode(200)
+  @Permissions(PERMISSIONS.VENDOR.PRODUCTS_EDIT)
+  @ApiOperation({
+    summary: 'Replace product variants, attributes, and inventory',
+  })
+  replaceVariants(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: ReplaceVariantsDto,
+    @Query() query: DryRunQueryDto,
+  ) {
+    return this.productsService.replaceVariants(
+      user,
+      requireVendorEntityId(user),
+      id,
+      dto,
+      query.dryRun === true,
+    );
+  }
+
+  @Put(':id/media')
+  @HttpCode(200)
+  @Permissions(
+    PERMISSIONS.VENDOR.PRODUCTS_EDIT,
+    PERMISSIONS.VENDOR.MEDIA_UPLOAD,
+  )
+  @ApiOperation({ summary: 'Replace product and variant galleries' })
+  replaceProductMedia(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: ReplaceProductMediaDto,
+  ) {
+    return this.productsService.replaceProductMedia(
+      requireVendorEntityId(user),
+      id,
+      dto,
+    );
+  }
+
   @Post(':id/variants')
   @HttpCode(200)
   @Permissions(PERMISSIONS.VENDOR.PRODUCTS_EDIT)
@@ -512,6 +556,23 @@ export class VendorProductsController {
       variantId,
       mediaId,
     );
+  }
+}
+
+@ApiTags('Vendor - SKUs')
+@Controller('vendor/skus')
+@Roles(PlatformRole.VENDOR)
+@RequireActiveContext(PermissionScope.VENDOR)
+@ApiBearerAuth()
+export class VendorSkusController {
+  constructor(private readonly productsService: ProductsService) {}
+
+  @Post('check')
+  @HttpCode(200)
+  @Permissions(PERMISSIONS.VENDOR.PRODUCTS_EDIT)
+  @ApiOperation({ summary: 'Check which SKUs are already taken' })
+  checkSkus(@CurrentUser() user: AuthenticatedUser, @Body() dto: CheckSkusDto) {
+    return this.productsService.checkSkus(requireVendorEntityId(user), dto);
   }
 }
 

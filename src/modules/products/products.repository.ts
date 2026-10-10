@@ -3,7 +3,16 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma, ProductStatus } from '../../../generated/prisma/client.js';
+import {
+  MediaContext,
+  MediaEntityType,
+  Prisma,
+  ProductStatus,
+} from '../../../generated/prisma/client.js';
+import { DOMAIN_ERROR_CODES } from '../../common/errors/domain-error-code';
+import { domainConflict } from '../../common/errors/domain-exception';
+import { MediaRepository } from '../media/media.repository';
+import type { PlannedRemoval, PlannedVariantWrite } from './bulk-variant.logic';
 import { paginate } from '../../common/utils/pagination.util';
 import { PrismaService } from '../../prisma/prisma.service';
 
@@ -24,6 +33,7 @@ export const PRODUCT_SELECT = {
   metaDescription: true,
   pendingContentReview: true,
   pendingContent: true,
+  version: true,
   createdAt: true,
   updatedAt: true,
 } as const;
@@ -334,7 +344,10 @@ export interface VariantAttributeInput {
 
 @Injectable()
 export class ProductsRepository {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly mediaRepository: MediaRepository,
+  ) {}
 
   findVendorByUserId(userId: string) {
     return this.prisma.vendorProfile.findFirst({
@@ -642,7 +655,7 @@ export class ProductsRepository {
     try {
       return await this.prisma.product.update({
         where: { id },
-        data,
+        data: { ...data, version: { increment: 1 } },
         select: PRODUCT_REVIEW_SELECT,
       });
     } catch (error) {
@@ -664,7 +677,11 @@ export class ProductsRepository {
 
         const product = await tx.product.update({
           where: { id },
-          data: { slug: `${existing.slug}-deleted-${id}`, deletedAt },
+          data: {
+            slug: `${existing.slug}-deleted-${id}`,
+            deletedAt,
+            version: { increment: 1 },
+          },
           select: PRODUCT_REVIEW_SELECT,
         });
 
@@ -701,6 +718,7 @@ export class ProductsRepository {
         data: {
           status: ProductStatus.PENDING_APPROVAL,
           rejectionNote: null,
+          version: { increment: 1 },
         },
         select: PRODUCT_REVIEW_SELECT,
       });
@@ -739,6 +757,7 @@ export class ProductsRepository {
         await tx.productInventory.create({
           data: { variantId: variant.id, quantity: 0 },
         });
+        await this.bumpVersion(tx, data.productId);
 
         return tx.productVariant.findFirst({
           where: { id: variant.id },
@@ -782,11 +801,13 @@ export class ProductsRepository {
           });
         }
 
-        return tx.productVariant.update({
+        const variant = await tx.productVariant.update({
           where: { id },
           data,
           select: VARIANT_DETAIL_SELECT,
         });
+        await this.bumpVersion(tx, productId);
+        return variant;
       });
     } catch (error) {
       this.handlePrismaError(error);
@@ -795,22 +816,26 @@ export class ProductsRepository {
 
   async softDeleteVariant(id: string) {
     try {
-      const existing = await this.prisma.productVariant.findFirst({
-        where: { id, deletedAt: null },
-        select: { sku: true },
-      });
-      if (!existing) {
-        throw new NotFoundException('Variant not found');
-      }
+      return await this.prisma.$transaction(async (tx) => {
+        const existing = await tx.productVariant.findFirst({
+          where: { id, deletedAt: null },
+          select: { sku: true, productId: true },
+        });
+        if (!existing) {
+          throw new NotFoundException('Variant not found');
+        }
 
-      return await this.prisma.productVariant.update({
-        where: { id },
-        data: {
-          sku: `${existing.sku}-deleted-${id}`,
-          deletedAt: new Date(),
-          isActive: false,
-        },
-        select: VARIANT_SELECT,
+        const variant = await tx.productVariant.update({
+          where: { id },
+          data: {
+            sku: `${existing.sku}-deleted-${id}`,
+            deletedAt: new Date(),
+            isActive: false,
+          },
+          select: VARIANT_SELECT,
+        });
+        await this.bumpVersion(tx, existing.productId);
+        return variant;
       });
     } catch (error) {
       this.handlePrismaError(error);
@@ -822,10 +847,22 @@ export class ProductsRepository {
     data: Prisma.ProductInventoryUncheckedUpdateInput,
   ) {
     try {
-      return await this.prisma.productInventory.update({
-        where: { variantId },
-        data,
-        select: INVENTORY_SELECT,
+      return await this.prisma.$transaction(async (tx) => {
+        const variant = await tx.productVariant.findFirst({
+          where: { id: variantId, deletedAt: null },
+          select: { productId: true },
+        });
+        if (!variant) {
+          throw new NotFoundException('Variant not found');
+        }
+
+        const inventory = await tx.productInventory.update({
+          where: { variantId },
+          data,
+          select: INVENTORY_SELECT,
+        });
+        await this.bumpVersion(tx, variant.productId);
+        return inventory;
       });
     } catch (error) {
       this.handlePrismaError(error);
@@ -868,10 +905,18 @@ export class ProductsRepository {
           );
         }
 
-        return tx.variantAttribute.findMany({
+        const savedAttributes = await tx.variantAttribute.findMany({
           where: { variantId },
           select: VARIANT_ATTRIBUTE_SELECT,
         });
+        const variant = await tx.productVariant.findFirst({
+          where: { id: variantId },
+          select: { productId: true },
+        });
+        if (variant) {
+          await this.bumpVersion(tx, variant.productId);
+        }
+        return savedAttributes;
       });
     } catch (error) {
       this.handlePrismaError(error);
@@ -880,15 +925,305 @@ export class ProductsRepository {
 
   async deleteVariantAttribute(variantId: string, attributeId: string) {
     try {
-      const result = await this.prisma.variantAttribute.deleteMany({
-        where: { variantId, attributeId },
+      await this.prisma.$transaction(async (tx) => {
+        const result = await tx.variantAttribute.deleteMany({
+          where: { variantId, attributeId },
+        });
+        if (result.count === 0) {
+          throw new NotFoundException('Variant attribute not found');
+        }
+
+        const variant = await tx.productVariant.findFirst({
+          where: { id: variantId },
+          select: { productId: true },
+        });
+        if (variant) {
+          await this.bumpVersion(tx, variant.productId);
+        }
       });
-      if (result.count === 0) {
-        throw new NotFoundException('Variant attribute not found');
-      }
     } catch (error) {
       this.handlePrismaError(error);
     }
+  }
+
+  incrementVersion(productId: string) {
+    return this.bumpVersion(this.prisma, productId);
+  }
+
+  setPendingContentReview(productId: string) {
+    return this.prisma.product.update({
+      where: { id: productId },
+      data: { pendingContentReview: true },
+      select: { id: true },
+    });
+  }
+
+  findUnitsByIds(ids: string[]) {
+    return this.prisma.unit.findMany({
+      where: { id: { in: ids }, isActive: true },
+      select: { id: true },
+    });
+  }
+
+  async findVariantIdsWithOrders(variantIds: string[]) {
+    if (variantIds.length === 0) {
+      return [];
+    }
+
+    const rows = await this.prisma.orderItem.findMany({
+      where: { variantId: { in: variantIds } },
+      distinct: ['variantId'],
+      select: { variantId: true },
+    });
+    return rows.map((row) => row.variantId);
+  }
+
+  async findConflictingSkus(skus: string[], ignoreVariantIds: string[]) {
+    if (skus.length === 0) {
+      return [];
+    }
+
+    const rows = await this.prisma.productVariant.findMany({
+      where: {
+        sku: { in: skus },
+        deletedAt: null,
+        ...(ignoreVariantIds.length > 0 && { id: { notIn: ignoreVariantIds } }),
+      },
+      select: { sku: true },
+    });
+    return rows.map((row) => row.sku);
+  }
+
+  async findTakenSkus(skus: string[], excludeProductId?: string) {
+    if (skus.length === 0) {
+      return [];
+    }
+
+    const rows = await this.prisma.productVariant.findMany({
+      where: {
+        sku: { in: skus },
+        deletedAt: null,
+        ...(excludeProductId && { NOT: { productId: excludeProductId } }),
+      },
+      select: { sku: true },
+    });
+    const taken = new Set(rows.map((row) => row.sku));
+    return [...new Set(skus.filter((sku) => taken.has(sku)))];
+  }
+
+  async replaceVariants(input: {
+    productId: string;
+    expectedVersion: number;
+    markPendingContentReview: boolean;
+    writes: PlannedVariantWrite[];
+    removals: PlannedRemoval[];
+  }) {
+    try {
+      return await this.prisma.$transaction(
+        async (tx) => {
+          const bumped = await tx.product.updateMany({
+            where: {
+              id: input.productId,
+              version: input.expectedVersion,
+              deletedAt: null,
+            },
+            data: {
+              version: { increment: 1 },
+              ...(input.markPendingContentReview && {
+                pendingContentReview: true,
+              }),
+            },
+          });
+          if (bumped.count !== 1) {
+            throw domainConflict(
+              DOMAIN_ERROR_CODES.STALE_VERSION,
+              'Product was updated. Reload and try again.',
+            );
+          }
+
+          const currentIds = [
+            ...input.writes
+              .map((write) => write.existingId)
+              .filter((id): id is string => id !== undefined),
+            ...input.removals.map((removal) => removal.id),
+          ];
+          const finalSkus = new Set([
+            ...input.writes.map((write) => write.sku),
+            ...input.removals
+              .filter((removal) => removal.mode === 'deactivate')
+              .map((removal) => removal.sku),
+          ]);
+          const prefix = swapPrefix(currentIds, finalSkus);
+          const reservedSkus = new Set([
+            ...finalSkus,
+            ...currentIds.map((id) => `${prefix}${id}`),
+          ]);
+
+          for (const id of currentIds) {
+            await tx.productVariant.update({
+              where: { id },
+              data: { sku: `${prefix}${id}`, isDefault: false },
+              select: { id: true },
+            });
+          }
+
+          for (const removal of input.removals) {
+            if (removal.mode === 'delete') {
+              const deletedSku = freedSku(
+                removal.sku,
+                removal.id,
+                reservedSkus,
+              );
+              reservedSkus.add(deletedSku);
+              await tx.productVariant.update({
+                where: { id: removal.id },
+                data: {
+                  sku: deletedSku,
+                  deletedAt: new Date(),
+                  isActive: false,
+                  isDefault: false,
+                },
+                select: { id: true },
+              });
+              continue;
+            }
+
+            await tx.productVariant.update({
+              where: { id: removal.id },
+              data: {
+                sku: removal.sku,
+                isActive: false,
+                isDefault: false,
+              },
+              select: { id: true },
+            });
+          }
+
+          const idMap: Record<string, string> = {};
+          let defaultVariantId: string | undefined;
+
+          for (const write of input.writes) {
+            const data = variantWriteData(input.productId, write);
+            const variantId = write.existingId
+              ? (
+                  await tx.productVariant.update({
+                    where: { id: write.existingId },
+                    data,
+                    select: { id: true },
+                  })
+                ).id
+              : (
+                  await tx.productVariant.create({
+                    data,
+                    select: { id: true },
+                  })
+                ).id;
+
+            if (write.clientKey && !write.existingId) {
+              idMap[write.clientKey] = variantId;
+            }
+            if (write.isDefault) {
+              defaultVariantId = variantId;
+            }
+
+            await replaceVariantAttributes(tx, variantId, write.attributes);
+            await applyInventory(tx, variantId, write, !write.existingId);
+          }
+
+          if (defaultVariantId) {
+            await tx.productVariant.update({
+              where: { id: defaultVariantId },
+              data: { isDefault: true },
+              select: { id: true },
+            });
+          }
+
+          return idMap;
+        },
+        { timeout: 15000 },
+      );
+    } catch (error) {
+      this.handlePrismaError(error);
+    }
+  }
+
+  async replaceProductMedia(input: {
+    productId: string;
+    expectedVersion: number;
+    markPendingContentReview: boolean;
+    thumbnailMediaId?: string | null;
+    gallery: string[] | null;
+    variantGalleries: { variantId: string; mediaIds: string[] }[];
+  }) {
+    try {
+      await this.prisma.$transaction(
+        async (tx) => {
+          const bumped = await tx.product.updateMany({
+            where: {
+              id: input.productId,
+              version: input.expectedVersion,
+              deletedAt: null,
+            },
+            data: {
+              version: { increment: 1 },
+              ...(input.markPendingContentReview && {
+                pendingContentReview: true,
+              }),
+            },
+          });
+          if (bumped.count !== 1) {
+            throw domainConflict(
+              DOMAIN_ERROR_CODES.STALE_VERSION,
+              'Product was updated. Reload and try again.',
+            );
+          }
+
+          if (input.thumbnailMediaId !== undefined) {
+            await this.mediaRepository.replaceContextLinks(
+              tx,
+              MediaEntityType.PRODUCT,
+              input.productId,
+              MediaContext.THUMBNAIL,
+              input.thumbnailMediaId ? [input.thumbnailMediaId] : [],
+            );
+          }
+
+          if (input.gallery) {
+            await this.mediaRepository.replaceContextLinks(
+              tx,
+              MediaEntityType.PRODUCT,
+              input.productId,
+              MediaContext.GALLERY,
+              input.gallery,
+            );
+          }
+
+          for (const variant of input.variantGalleries) {
+            await this.mediaRepository.replaceContextLinks(
+              tx,
+              MediaEntityType.PRODUCT_VARIANT,
+              variant.variantId,
+              MediaContext.GALLERY,
+              variant.mediaIds,
+            );
+          }
+        },
+        { timeout: 15000 },
+      );
+    } catch (error) {
+      this.handlePrismaError(error);
+    }
+  }
+
+  private bumpVersion(
+    tx: Prisma.TransactionClient | PrismaService,
+    productId: string,
+  ) {
+    return tx.product.update({
+      where: { id: productId },
+      data: { version: { increment: 1 } },
+      select: { id: true },
+    });
   }
 
   private handlePrismaError(error: unknown): never {
@@ -908,4 +1243,123 @@ export class ProductsRepository {
 
     throw error;
   }
+}
+
+function swapPrefix(ids: string[], finals: Set<string>) {
+  let prefix = '__swap__';
+  while (ids.some((id) => finals.has(`${prefix}${id}`))) {
+    prefix = `_${prefix}`;
+  }
+  return prefix;
+}
+
+function freedSku(original: string, id: string, reserved: Set<string>) {
+  let sku = `${original}-deleted-${id}`;
+  while (reserved.has(sku)) {
+    sku = `${sku}-freed`;
+  }
+  return sku;
+}
+
+function variantWriteData(
+  productId: string,
+  write: PlannedVariantWrite,
+): Prisma.ProductVariantUncheckedCreateInput {
+  return {
+    productId,
+    sku: write.sku,
+    name: write.name,
+    price: new Prisma.Decimal(write.price),
+    sellingPrice: new Prisma.Decimal(write.sellingPrice),
+    costPrice:
+      write.costPrice === null ? null : new Prisma.Decimal(write.costPrice),
+    primaryUnitId: write.primaryUnitId,
+    coverageArea: write.coverageArea,
+    baseUnitId: write.baseUnitId,
+    weightKg: write.weightKg,
+    isDefault: false,
+    isActive: write.isActive,
+  };
+}
+
+async function replaceVariantAttributes(
+  tx: Prisma.TransactionClient,
+  variantId: string,
+  attributes: PlannedVariantWrite['attributes'],
+) {
+  if (attributes.length === 0) {
+    await tx.variantAttribute.deleteMany({ where: { variantId } });
+    return;
+  }
+
+  await tx.variantAttribute.deleteMany({
+    where: {
+      variantId,
+      attributeId: {
+        notIn: attributes.map((attribute) => attribute.attributeId),
+      },
+    },
+  });
+
+  for (const attribute of attributes) {
+    await tx.variantAttribute.upsert({
+      where: {
+        variantId_attributeId: {
+          variantId,
+          attributeId: attribute.attributeId,
+        },
+      },
+      create: {
+        variantId,
+        attributeId: attribute.attributeId,
+        value: attribute.value,
+      },
+      update: { value: attribute.value },
+      select: { id: true },
+    });
+  }
+}
+
+async function applyInventory(
+  tx: Prisma.TransactionClient,
+  variantId: string,
+  write: PlannedVariantWrite,
+  isCreate: boolean,
+) {
+  if (isCreate) {
+    await tx.productInventory.create({
+      data: {
+        variantId,
+        ...(write.inventory && {
+          quantity: write.inventory.quantity,
+          ...(write.inventory.lowStockThreshold !== undefined && {
+            lowStockThreshold: write.inventory.lowStockThreshold,
+          }),
+          ...(write.inventory.allowBackorder !== undefined && {
+            allowBackorder: write.inventory.allowBackorder,
+          }),
+        }),
+      },
+      select: { id: true },
+    });
+    return;
+  }
+
+  if (!write.inventory) {
+    return;
+  }
+
+  await tx.productInventory.update({
+    where: { variantId },
+    data: {
+      quantity: write.inventory.quantity,
+      ...(write.inventory.lowStockThreshold !== undefined && {
+        lowStockThreshold: write.inventory.lowStockThreshold,
+      }),
+      ...(write.inventory.allowBackorder !== undefined && {
+        allowBackorder: write.inventory.allowBackorder,
+      }),
+    },
+    select: { variantId: true },
+  });
 }

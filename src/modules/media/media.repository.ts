@@ -607,6 +607,33 @@ export class MediaRepository {
     });
   }
 
+  async replaceContextLinks(
+    tx: Prisma.TransactionClient,
+    entityType: MediaEntityType,
+    entityId: string,
+    context: MediaContext,
+    mediaIds: string[],
+  ) {
+    await tx.mediaLink.updateMany({
+      where: { entityType, entityId, context, deletedAt: null },
+      data: { deletedAt: new Date(), isPrimary: false },
+    });
+
+    for (const [index, mediaId] of mediaIds.entries()) {
+      await tx.mediaLink.create({
+        data: {
+          mediaId,
+          entityType,
+          entityId,
+          context,
+          isPrimary: index === 0,
+          sortOrder: index,
+        },
+        select: { id: true },
+      });
+    }
+  }
+
   async replaceLink(
     mediaId: string,
     entityType: MediaEntityType,

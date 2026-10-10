@@ -6,7 +6,14 @@ import {
 } from '@nestjs/common';
 import { Response } from 'express';
 
-type ErrorDetail = { field?: string; message: string };
+type ErrorDetail = {
+  field?: string;
+  path?: string;
+  id?: string;
+  clientKey?: string;
+  code?: string;
+  message: string;
+};
 
 @Catch()
 export class HttpExceptionFilter implements ExceptionFilter {

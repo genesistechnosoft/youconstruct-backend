@@ -6,6 +6,7 @@ import {
   AdminProductsController,
   ProductsController,
   VendorProductsController,
+  VendorSkusController,
 } from './products.controller';
 import { ProductsRepository } from './products.repository';
 import { ProductsService } from './products.service';
@@ -15,6 +16,7 @@ import { ProductsService } from './products.service';
   controllers: [
     ProductsController,
     VendorProductsController,
+    VendorSkusController,
     AdminProductsController,
   ],
   providers: [ProductsService, ProductsRepository],

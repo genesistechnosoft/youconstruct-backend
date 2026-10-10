@@ -637,6 +637,43 @@ export class MediaService {
     return map;
   }
 
+  async findOwnedMediaIds(owner: MediaOwner, mediaIds: string[]) {
+    if (mediaIds.length === 0) {
+      return [];
+    }
+
+    const rows = await this.mediaRepository.findMediaByIds(
+      owner.ownerType,
+      owner.ownerId,
+      mediaIds,
+    );
+    return rows.map((row) => row.id);
+  }
+
+  async getOrderedGalleryMediaIds(
+    entityType: MediaEntityType,
+    entityIds: string[],
+  ) {
+    const map = new Map<string, string[]>();
+    for (const entityId of entityIds) {
+      map.set(entityId, []);
+    }
+    if (entityIds.length === 0) {
+      return map;
+    }
+
+    const links = await this.mediaRepository.findLinksByEntityIds(
+      entityType,
+      entityIds,
+      MediaContext.GALLERY,
+      false,
+    );
+    for (const link of links) {
+      map.get(link.entityId)?.push(link.mediaId);
+    }
+    return map;
+  }
+
   async getEntityThumbnail(entityType: MediaEntityType, entityId: string) {
     const links = await this.mediaRepository.findLinks(
       entityType,

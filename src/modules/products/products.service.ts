@@ -10,9 +10,13 @@ import {
   MediaEntityType,
   MediaOwnerType,
   NotificationEventType,
+  PlatformRole,
   Prisma,
   ProductStatus,
 } from '../../../generated/prisma/client.js';
+import { DOMAIN_ERROR_CODES } from '../../common/errors/domain-error-code';
+import { domainConflict } from '../../common/errors/domain-exception';
+import type { AuthenticatedUser } from '../../common/types/auth-user.type';
 import { formatMoney } from '../../common/utils/money.util';
 import { paginate, paginationMeta } from '../../common/utils/pagination.util';
 import { generateSlug } from '../../common/utils/slug.util';
@@ -20,6 +24,8 @@ import { LinkMediaDto } from '../media/dto/link-media.dto';
 import { ReorderMediaLinksDto } from '../media/dto/reorder-media-links.dto';
 import { MediaService } from '../media/media.service';
 import { NotificationEmitterService } from '../notifications/notification-emitter.service';
+import { PERMISSIONS } from '../rbac/permissions.constants';
+import { RbacService } from '../rbac/rbac.service';
 import { SecurityAuditService } from '../rbac/security-audit.service';
 import { VendorStoreService } from '../vendor-store/vendor-store.service';
 import { BrowseProductsDto } from './dto/browse-products.dto';
@@ -34,6 +40,11 @@ import { SetAttributesDto } from './dto/set-attributes.dto';
 import { UpdateInventoryDto } from './dto/update-inventory.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
 import { UpdateVariantDto } from './dto/update-variant.dto';
+import { planVariantReplace } from './bulk-variant.logic';
+import type { BulkFieldError } from './bulk-variant.logic';
+import { CheckSkusDto } from './dto/check-skus.dto';
+import { ReplaceProductMediaDto } from './dto/replace-product-media.dto';
+import { ReplaceVariantsDto } from './dto/replace-variants.dto';
 import { normalizeProductTags } from './product-tags.util';
 import { ProductsRepository } from './products.repository';
 import { CategoriesService } from '../categories/categories.service';
@@ -60,6 +71,7 @@ export class ProductsService {
     private readonly securityAudit: SecurityAuditService,
     private readonly notifications: NotificationEmitterService,
     private readonly categoriesService: CategoriesService,
+    private readonly rbacService: RbacService,
   ) {}
 
   async getMyProducts(userId: string, filters: ProductFiltersDto) {
@@ -80,7 +92,7 @@ export class ProductsService {
     const product = await this.verifyProductOwnership(userId, productId);
     return {
       message: 'Product fetched successfully',
-      data: await this.withProductMedia(product),
+      data: await this.toEditorProduct(product),
     };
   }
 
@@ -541,9 +553,7 @@ export class ProductsService {
       productId,
     );
 
-    if (product.status === ProductStatus.ACTIVE) {
-      await this.markPendingContentReview(productId);
-    }
+    await this.recordMediaWrite(productId, product.status);
 
     return {
       message: 'Media uploaded and linked successfully',
@@ -566,9 +576,7 @@ export class ProductsService {
       dto,
     );
 
-    if (product.status === ProductStatus.ACTIVE) {
-      await this.markPendingContentReview(productId);
-    }
+    await this.recordMediaWrite(productId, product.status);
 
     return {
       message: 'Media linked successfully',
@@ -590,9 +598,7 @@ export class ProductsService {
       dto,
     );
 
-    if (product.status === ProductStatus.ACTIVE) {
-      await this.markPendingContentReview(productId);
-    }
+    await this.recordMediaWrite(productId, product.status);
 
     return {
       message: 'Media links reordered successfully',
@@ -614,9 +620,7 @@ export class ProductsService {
       mediaId,
     );
 
-    if (product.status === ProductStatus.ACTIVE) {
-      await this.markPendingContentReview(productId);
-    }
+    await this.recordMediaWrite(productId, product.status);
 
     return {
       message: 'Media unlinked successfully',
@@ -645,9 +649,7 @@ export class ProductsService {
       MediaContext.THUMBNAIL,
     );
 
-    if (product.status === ProductStatus.ACTIVE) {
-      await this.markPendingContentReview(productId);
-    }
+    await this.recordMediaWrite(productId, product.status);
 
     return {
       message: 'Product thumbnail uploaded successfully',
@@ -671,9 +673,7 @@ export class ProductsService {
       dto.mediaId,
     );
 
-    if (product.status === ProductStatus.ACTIVE) {
-      await this.markPendingContentReview(productId);
-    }
+    await this.recordMediaWrite(productId, product.status);
 
     return {
       message: 'Product thumbnail linked successfully',
@@ -700,9 +700,7 @@ export class ProductsService {
       MediaContext.THUMBNAIL,
     );
 
-    if (product.status === ProductStatus.ACTIVE) {
-      await this.markPendingContentReview(productId);
-    }
+    await this.recordMediaWrite(productId, product.status);
 
     return {
       message: 'Product thumbnail removed successfully',
@@ -732,9 +730,7 @@ export class ProductsService {
       variantId,
     );
 
-    if (product.status === ProductStatus.ACTIVE) {
-      await this.markPendingContentReview(productId);
-    }
+    await this.recordMediaWrite(productId, product.status);
 
     return {
       message: 'Media uploaded and linked successfully',
@@ -759,9 +755,7 @@ export class ProductsService {
       dto,
     );
 
-    if (product.status === ProductStatus.ACTIVE) {
-      await this.markPendingContentReview(productId);
-    }
+    await this.recordMediaWrite(productId, product.status);
 
     return {
       message: 'Media linked successfully',
@@ -785,9 +779,7 @@ export class ProductsService {
       dto,
     );
 
-    if (product.status === ProductStatus.ACTIVE) {
-      await this.markPendingContentReview(productId);
-    }
+    await this.recordMediaWrite(productId, product.status);
 
     return {
       message: 'Media links reordered successfully',
@@ -811,13 +803,302 @@ export class ProductsService {
       mediaId,
     );
 
-    if (product.status === ProductStatus.ACTIVE) {
-      await this.markPendingContentReview(productId);
-    }
+    await this.recordMediaWrite(productId, product.status);
 
     return {
       message: 'Media unlinked successfully',
       data: await this.toVendorProductResponse(userId, productId),
+    };
+  }
+
+  async replaceVariants(
+    user: AuthenticatedUser,
+    vendorProfileId: string,
+    productId: string,
+    dto: ReplaceVariantsDto,
+    dryRun: boolean,
+  ) {
+    const product = await this.verifyProductOwnership(
+      vendorProfileId,
+      productId,
+    );
+    this.ensureVendorCanMutateProduct(product.status);
+    this.assertCurrentVersion(product.version, dto.version);
+
+    const missingRefs = await this.missingVariantReferences(dto);
+    if (missingRefs.length > 0) {
+      throw new NotFoundException({
+        message: 'One or more records were not found',
+        error: 'NOT_FOUND',
+        details: missingRefs,
+      });
+    }
+
+    const existingIds = product.variants.map((variant) => variant.id);
+    const [conflictingSkus, variantIdsWithOrders] = await Promise.all([
+      this.productsRepository.findConflictingSkus(
+        dto.variants.map((variant) => variant.sku),
+        existingIds,
+      ),
+      this.productsRepository.findVariantIdsWithOrders(existingIds),
+    ]);
+
+    const plan = planVariantReplace({
+      status: product.status,
+      incoming: dto.variants,
+      existing: product.variants.map((variant) => ({
+        id: variant.id,
+        sku: variant.sku,
+        name: variant.name,
+        price: variant.price,
+        sellingPrice: variant.sellingPrice,
+        costPrice: variant.costPrice,
+        primaryUnitId: variant.primaryUnitId,
+        coverageArea: variant.coverageArea,
+        baseUnitId: variant.baseUnitId,
+        weightKg: variant.weightKg,
+        isDefault: variant.isDefault,
+        isActive: variant.isActive,
+        attributes: variant.attributes.map((attribute) => ({
+          attributeId: attribute.attributeId,
+          value: attribute.value,
+        })),
+        inventory: variant.inventory
+          ? {
+              quantity: variant.inventory.quantity,
+              lowStockThreshold: variant.inventory.lowStockThreshold,
+              allowBackorder: variant.inventory.allowBackorder,
+            }
+          : null,
+      })),
+      variantIdsWithOrders,
+      conflictingSkus,
+    });
+
+    const notFound = plan.errors.filter(
+      (error) => error.code === 'VARIANT_NOT_FOUND',
+    );
+    if (notFound.length > 0) {
+      throw new NotFoundException({
+        message: 'Variant not found',
+        error: 'NOT_FOUND',
+        details: notFound,
+      });
+    }
+    if (plan.errors.length > 0) {
+      this.throwFieldErrors(plan.errors);
+    }
+    if (plan.requiresInventoryPermission) {
+      await this.assertInventoryPermission(user);
+    }
+
+    if (dryRun) {
+      return {
+        message: 'Variant save validated successfully',
+        data: {
+          review: plan.review,
+          removed: plan.removed,
+          errors: [] as BulkFieldError[],
+        },
+      };
+    }
+
+    const idMap = await this.productsRepository.replaceVariants({
+      productId,
+      expectedVersion: dto.version,
+      markPendingContentReview: plan.markPendingContentReview,
+      writes: plan.writes,
+      removals: plan.removals,
+    });
+
+    return {
+      message: 'Variants saved successfully',
+      data: {
+        product: await this.toVendorProductResponse(vendorProfileId, productId),
+        idMap: idMap ?? {},
+        removed: plan.removed,
+        review: plan.review,
+      },
+    };
+  }
+
+  async replaceProductMedia(
+    vendorProfileId: string,
+    productId: string,
+    dto: ReplaceProductMediaDto,
+  ) {
+    const product = await this.verifyProductOwnership(
+      vendorProfileId,
+      productId,
+    );
+    this.ensureVendorCanMutateProduct(product.status);
+    this.assertCurrentVersion(product.version, dto.version);
+
+    const knownVariantIds = new Set(
+      product.variants.map((variant) => variant.id),
+    );
+    const variantEntries = Object.entries(dto.variants ?? {});
+    const fieldErrors: BulkFieldError[] = [];
+    const notFoundErrors: BulkFieldError[] = [];
+
+    if (new Set(dto.gallery).size !== dto.gallery.length) {
+      fieldErrors.push({
+        path: 'gallery',
+        code: 'DUPLICATE_MEDIA',
+        message: 'Duplicate media IDs are not allowed',
+      });
+    }
+
+    for (const [variantId, mediaIds] of variantEntries) {
+      if (!knownVariantIds.has(variantId)) {
+        notFoundErrors.push({
+          path: `variants.${variantId}`,
+          id: variantId,
+          code: 'VARIANT_NOT_FOUND',
+          message: 'Variant not found',
+        });
+        continue;
+      }
+      if (
+        !Array.isArray(mediaIds) ||
+        mediaIds.some((mediaId) => !isUuid(mediaId))
+      ) {
+        fieldErrors.push({
+          path: `variants.${variantId}`,
+          id: variantId,
+          code: 'MEDIA_INVALID',
+          message: 'Gallery media ids must be UUIDs',
+        });
+        continue;
+      }
+      if (new Set(mediaIds).size !== mediaIds.length) {
+        fieldErrors.push({
+          path: `variants.${variantId}`,
+          id: variantId,
+          code: 'DUPLICATE_MEDIA',
+          message: 'Duplicate media IDs are not allowed',
+        });
+      }
+    }
+
+    if (fieldErrors.length > 0) {
+      this.throwFieldErrors(fieldErrors);
+    }
+    if (notFoundErrors.length > 0) {
+      throw new NotFoundException({
+        message: 'Variant not found',
+        error: 'NOT_FOUND',
+        details: notFoundErrors,
+      });
+    }
+
+    const requestedMedia: { path: string; id: string }[] = [];
+    if (dto.thumbnailMediaId) {
+      requestedMedia.push({
+        path: 'thumbnailMediaId',
+        id: dto.thumbnailMediaId,
+      });
+    }
+    dto.gallery.forEach((mediaId, index) => {
+      requestedMedia.push({ path: `gallery[${index}]`, id: mediaId });
+    });
+    for (const [variantId, mediaIds] of variantEntries) {
+      mediaIds.forEach((mediaId, index) => {
+        requestedMedia.push({
+          path: `variants.${variantId}[${index}]`,
+          id: mediaId,
+        });
+      });
+    }
+
+    const ownedIds = new Set(
+      await this.mediaService.findOwnedMediaIds(
+        { ownerType: MediaOwnerType.VENDOR, ownerId: product.vendorId },
+        [...new Set(requestedMedia.map((item) => item.id))],
+      ),
+    );
+    const missingMedia = requestedMedia.filter(
+      (item) => !ownedIds.has(item.id),
+    );
+    if (missingMedia.length > 0) {
+      throw new NotFoundException({
+        message: 'One or more media records were not found',
+        error: 'NOT_FOUND',
+        details: missingMedia.map((item) => ({
+          path: item.path,
+          id: item.id,
+          code: 'MEDIA_NOT_FOUND',
+          message: 'Media record not found',
+        })),
+      });
+    }
+
+    const variantIds = variantEntries.map(([variantId]) => variantId);
+    const [thumbnail, gallery, variantGalleries] = await Promise.all([
+      this.mediaService.getEntityThumbnail(MediaEntityType.PRODUCT, productId),
+      this.mediaService.getEntityGallery(MediaEntityType.PRODUCT, productId),
+      this.mediaService.getOrderedGalleryMediaIds(
+        MediaEntityType.PRODUCT_VARIANT,
+        variantIds,
+      ),
+    ]);
+
+    const pendingReview: string[] = [];
+    const thumbnailChanged =
+      (thumbnail?.mediaId ?? null) !== dto.thumbnailMediaId;
+    if (thumbnailChanged) {
+      pendingReview.push('thumbnail');
+    }
+
+    const galleryIds = gallery.map((link: { mediaId: string }) => link.mediaId);
+    const galleryChanged = !sameIds(galleryIds, dto.gallery);
+    if (galleryChanged) {
+      pendingReview.push('gallery');
+    }
+
+    const variantGalleriesToWrite: {
+      variantId: string;
+      mediaIds: string[];
+    }[] = [];
+    for (const [variantId, mediaIds] of variantEntries) {
+      const current = variantGalleries.get(variantId) ?? [];
+      if (!sameIds(current, mediaIds)) {
+        pendingReview.push(`variants.${variantId}.gallery`);
+        variantGalleriesToWrite.push({ variantId, mediaIds });
+      }
+    }
+
+    await this.productsRepository.replaceProductMedia({
+      productId,
+      expectedVersion: dto.version,
+      markPendingContentReview:
+        product.status === ProductStatus.ACTIVE && pendingReview.length > 0,
+      ...(thumbnailChanged && { thumbnailMediaId: dto.thumbnailMediaId }),
+      gallery: galleryChanged ? dto.gallery : null,
+      variantGalleries: variantGalleriesToWrite,
+    });
+
+    return {
+      message: 'Product media saved successfully',
+      data: {
+        product: await this.toVendorProductResponse(vendorProfileId, productId),
+        review: { live: [] as string[], pendingReview },
+      },
+    };
+  }
+
+  async checkSkus(vendorProfileId: string, dto: CheckSkusDto) {
+    if (dto.excludeProductId) {
+      await this.verifyProductOwnership(vendorProfileId, dto.excludeProductId);
+    }
+
+    const taken = await this.productsRepository.findTakenSkus(
+      dto.skus,
+      dto.excludeProductId,
+    );
+    return {
+      message: 'SKUs checked successfully',
+      data: { taken },
     };
   }
 
@@ -1238,10 +1519,132 @@ export class ProductsService {
     }
   }
 
-  private async markPendingContentReview(productId: string) {
-    await this.productsRepository.update(productId, {
-      pendingContentReview: true,
+  private assertCurrentVersion(current: number, expected: number) {
+    if (current !== expected) {
+      throw domainConflict(
+        DOMAIN_ERROR_CODES.STALE_VERSION,
+        'Product was updated. Reload and try again.',
+      );
+    }
+  }
+
+  private throwFieldErrors(details: BulkFieldError[]): never {
+    throw new BadRequestException({
+      message: 'Validation failed',
+      error: 'VALIDATION_ERROR',
+      details,
     });
+  }
+
+  private async missingVariantReferences(dto: ReplaceVariantsDto) {
+    const details: BulkFieldError[] = [];
+    const unitIds = [
+      ...new Set(
+        dto.variants.flatMap((variant) =>
+          [variant.primaryUnitId, variant.baseUnitId].filter(
+            (id): id is string => Boolean(id),
+          ),
+        ),
+      ),
+    ];
+    const attributeIds = [
+      ...new Set(
+        dto.variants.flatMap((variant) =>
+          variant.attributes.map((attribute) => attribute.attributeId),
+        ),
+      ),
+    ];
+    const units = await this.productsRepository.findUnitsByIds(unitIds);
+    const attributeRows =
+      attributeIds.length === 0
+        ? []
+        : await this.productsRepository.findAttributeDefinitionsByIds(
+            attributeIds,
+          );
+    const unitSet = new Set(units.map((unit) => unit.id));
+    const attributeSet = new Set(
+      attributeRows.map((attribute) => attribute.id),
+    );
+
+    dto.variants.forEach((variant, index) => {
+      const identity = {
+        ...(variant.id ? { id: variant.id } : {}),
+        ...(variant.clientKey ? { clientKey: variant.clientKey } : {}),
+      };
+      if (!unitSet.has(variant.primaryUnitId)) {
+        details.push({
+          path: `variants[${index}].primaryUnitId`,
+          ...identity,
+          code: 'UNIT_NOT_FOUND',
+          message: 'Primary unit not found',
+        });
+      }
+      if (variant.baseUnitId && !unitSet.has(variant.baseUnitId)) {
+        details.push({
+          path: `variants[${index}].baseUnitId`,
+          ...identity,
+          code: 'UNIT_NOT_FOUND',
+          message: 'Base unit not found',
+        });
+      }
+      variant.attributes.forEach((attribute, attributeIndex) => {
+        if (!attributeSet.has(attribute.attributeId)) {
+          details.push({
+            path: `variants[${index}].attributes[${attributeIndex}].attributeId`,
+            ...identity,
+            code: 'ATTRIBUTE_NOT_FOUND',
+            message: 'Attribute not found',
+          });
+        }
+      });
+    });
+
+    return details;
+  }
+
+  private async assertInventoryPermission(user: AuthenticatedUser) {
+    if (user.platformRole === PlatformRole.SUPER_ADMIN) {
+      return;
+    }
+
+    const required = [PERMISSIONS.VENDOR.INVENTORY_MANAGE];
+    if (user.activeContext?.isOwner) {
+      const inScope = await this.rbacService.scopeDefinesAllPermissions(
+        user.activeContext.type,
+        required,
+      );
+      if (!inScope) {
+        throw new ForbiddenException(
+          'You do not have permission to access this resource',
+        );
+      }
+      return;
+    }
+
+    if (!user.activeContext?.customRoleId) {
+      throw new ForbiddenException('Active context required');
+    }
+
+    const allowed = await this.rbacService.hasPermissions(
+      user.activeContext.customRoleId,
+      required,
+    );
+    if (!allowed) {
+      throw new ForbiddenException(
+        'You do not have permission to access this resource',
+      );
+    }
+  }
+
+  private async markPendingContentReview(productId: string) {
+    await this.productsRepository.setPendingContentReview(productId);
+  }
+
+  private async recordMediaWrite(productId: string, status: ProductStatus) {
+    await this.productsRepository.incrementVersion(productId);
+    if (status === ProductStatus.ACTIVE) {
+      await this.markPendingContentReview(productId);
+    }
   }
 
   private mergePendingContent(
@@ -1498,7 +1901,45 @@ export class ProductsService {
       vendorProfileId,
       productId,
     );
-    return this.withProductMedia(product);
+    return this.toEditorProduct(product);
+  }
+
+  private async toEditorProduct<
+    T extends {
+      id: string;
+      variants?: { id: string; isActive: boolean; isDefault: boolean }[];
+    },
+  >(product: T) {
+    const withMedia = await this.withProductMedia(product);
+    return {
+      ...withMedia,
+      submitBlockers: this.buildSubmitBlockers({
+        thumbnail: withMedia.thumbnail,
+        variants: product.variants,
+      }),
+    };
+  }
+
+  private buildSubmitBlockers(product: {
+    thumbnail: unknown;
+    variants?: { isActive: boolean; isDefault: boolean }[];
+  }) {
+    const blockers: string[] = [];
+    if (!product.thumbnail) {
+      blockers.push('NO_THUMBNAIL');
+    }
+
+    const active = (product.variants ?? []).filter(
+      (variant) => variant.isActive,
+    );
+    if (active.length === 0) {
+      blockers.push('NO_ACTIVE_VARIANT');
+    }
+    if (active.filter((variant) => variant.isDefault).length !== 1) {
+      blockers.push('NO_DEFAULT_VARIANT');
+    }
+
+    return blockers;
   }
 
   private async toAdminProductResponse(productId: string) {
@@ -1634,4 +2075,18 @@ export class ProductsService {
 
     return { ...product, media, thumbnail, variants };
   }
+}
+
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isUuid(value: string) {
+  return UUID_PATTERN.test(value);
+}
+
+function sameIds(left: string[], right: string[]) {
+  return (
+    left.length === right.length &&
+    left.every((id, index) => id === right[index])
+  );
 }

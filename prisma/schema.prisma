@@ -1127,6 +1127,7 @@ model Product {
   rejectionNote        String?
   pendingContentReview Boolean       @default(false)
   pendingContent       Json?
+  version              Int           @default(1)
   createdAt            DateTime      @default(now())
   updatedAt            DateTime      @updatedAt
   deletedAt            DateTime?

@@ -3,6 +3,10 @@ import type { DomainErrorCode } from './domain-error-code';
 
 export type DomainErrorDetail = {
   field?: string;
+  path?: string;
+  id?: string;
+  clientKey?: string;
+  code?: string;
   message: string;
 };
 
