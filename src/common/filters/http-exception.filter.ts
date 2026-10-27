@@ -18,6 +18,10 @@ type ErrorDetail = {
 @Catch()
 export class HttpExceptionFilter implements ExceptionFilter {
   catch(exception: unknown, host: ArgumentsHost) {
+    if (!(exception instanceof HttpException)) {
+      console.error(exception);
+    }
+
     const response = host.switchToHttp().getResponse<Response>();
 
     let status = 500;

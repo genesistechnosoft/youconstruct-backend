@@ -31,7 +31,11 @@ export class CreateBannerDto {
   @IsUrl({ require_tld: false })
   targetUrl?: string;
 
-  @ApiPropertyOptional({ example: 0, default: 0 })
+  @ApiPropertyOptional({
+    example: 2,
+    description:
+      'Omitted: one past the highest sortOrder among banners that are not deleted. First banner is 0. An explicit value, including 0, is stored as sent.',
+  })
   @IsOptional()
   @Transform(({ value }: { value: unknown }) => {
     const n = Number(value);

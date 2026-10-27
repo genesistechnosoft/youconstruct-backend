@@ -92,7 +92,12 @@ export class AdminBannersController {
         title: { type: 'string', example: 'Monsoon Sale' },
         subtitle: { type: 'string', example: 'Up to 40% off on tiles' },
         targetUrl: { type: 'string', example: 'https://youconstruct.com/sale' },
-        sortOrder: { type: 'integer', example: 0 },
+        sortOrder: {
+          type: 'integer',
+          example: 2,
+          description:
+            'Optional. Omitted assigns one past the highest sortOrder among banners that are not deleted.',
+        },
         isActive: { type: 'boolean', example: true },
         startsAt: {
           type: 'string',
@@ -185,12 +190,14 @@ export class AdminBannersController {
         endsAt: { type: 'string', format: 'date-time' },
         webImage: { type: 'string', format: 'binary' },
         appImage: { type: 'string', format: 'binary' },
+        removeWebImage: { type: 'boolean', example: false },
+        removeAppImage: { type: 'boolean', example: true },
       },
     },
   })
   @ApiOperation({
     summary:
-      'Update a homepage banner. Files are optional; providing a file replaces the existing image for that platform.',
+      'Update a homepage banner. A file replaces that image. removeWebImage or removeAppImage true clears that image when no file is sent.',
   })
   update(
     @Param('id', ParseUUIDPipe) id: string,

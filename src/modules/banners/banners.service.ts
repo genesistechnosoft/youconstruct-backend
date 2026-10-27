@@ -85,11 +85,14 @@ export class BannersService {
 
     this.assertValidSchedule(dto.startsAt, dto.endsAt);
 
+    const sortOrder =
+      dto.sortOrder ?? (await this.bannersRepository.findNextSortOrder());
+
     const banner = await this.bannersRepository.create({
       title: dto.title,
       ...(dto.subtitle !== undefined && { subtitle: dto.subtitle }),
       ...(dto.targetUrl !== undefined && { targetUrl: dto.targetUrl }),
-      sortOrder: dto.sortOrder ?? 0,
+      sortOrder,
       isActive: dto.isActive ?? true,
       ...(dto.startsAt !== undefined && { startsAt: new Date(dto.startsAt) }),
       ...(dto.endsAt !== undefined && { endsAt: new Date(dto.endsAt) }),
@@ -147,6 +150,9 @@ export class BannersService {
       dto.endsAt !== undefined ? dto.endsAt : existing.endsAt?.toISOString();
     this.assertValidSchedule(startsAt, endsAt);
 
+    const [current] = await this.withBannerMedia([existing]);
+    this.assertKeepsAnImage(current, dto, webImage, appImage);
+
     const banner = await this.bannersRepository.update(id, {
       ...(dto.title !== undefined && { title: dto.title }),
       ...(dto.subtitle !== undefined && { subtitle: dto.subtitle }),
@@ -163,26 +169,22 @@ export class BannersService {
     });
 
     await Promise.all([
-      webImage
-        ? this.mediaService.uploadAdminEntityMedia(
-            userId,
-            webImage,
-            MediaEntityType.HOMEPAGE_BANNER,
-            id,
-            MediaContext.BANNER_WEB,
-            `admin/banners/${id}/web`,
-          )
-        : Promise.resolve(),
-      appImage
-        ? this.mediaService.uploadAdminEntityMedia(
-            userId,
-            appImage,
-            MediaEntityType.HOMEPAGE_BANNER,
-            id,
-            MediaContext.BANNER_APP,
-            `admin/banners/${id}/app`,
-          )
-        : Promise.resolve(),
+      this.syncBannerImage(
+        userId,
+        id,
+        webImage,
+        dto.removeWebImage,
+        MediaContext.BANNER_WEB,
+        `admin/banners/${id}/web`,
+      ),
+      this.syncBannerImage(
+        userId,
+        id,
+        appImage,
+        dto.removeAppImage,
+        MediaContext.BANNER_APP,
+        `admin/banners/${id}/app`,
+      ),
     ]);
 
     const [enriched] = await this.withBannerMedia([banner]);
@@ -255,6 +257,55 @@ export class BannersService {
 
     await this.bannersRepository.softDelete(id);
     return { message: 'Banner deleted successfully', data: null };
+  }
+
+  private assertKeepsAnImage(
+    current: { webMedia: unknown; appMedia: unknown },
+    dto: UpdateBannerDto,
+    webImage?: Express.Multer.File,
+    appImage?: Express.Multer.File,
+  ) {
+    const keepsWeb =
+      Boolean(webImage) ||
+      (Boolean(current.webMedia) && dto.removeWebImage !== true);
+    const keepsApp =
+      Boolean(appImage) ||
+      (Boolean(current.appMedia) && dto.removeAppImage !== true);
+
+    if (!keepsWeb && !keepsApp) {
+      throw new BadRequestException(
+        'A banner must keep at least one of web or app image',
+      );
+    }
+  }
+
+  private async syncBannerImage(
+    userId: string,
+    bannerId: string,
+    file: Express.Multer.File | undefined,
+    remove: boolean | undefined,
+    context: MediaContext,
+    keyPrefix: string,
+  ) {
+    if (file) {
+      await this.mediaService.uploadAdminEntityMedia(
+        userId,
+        file,
+        MediaEntityType.HOMEPAGE_BANNER,
+        bannerId,
+        context,
+        keyPrefix,
+      );
+      return;
+    }
+
+    if (remove === true) {
+      await this.mediaService.clearEntityMediaContextAndDelete(
+        MediaEntityType.HOMEPAGE_BANNER,
+        bannerId,
+        context,
+      );
+    }
   }
 
   private assertValidSchedule(

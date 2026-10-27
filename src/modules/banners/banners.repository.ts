@@ -63,6 +63,15 @@ export class BannersRepository {
     });
   }
 
+  async findNextSortOrder() {
+    const result = await this.prisma.homepageBanner.aggregate({
+      where: { deletedAt: null },
+      _max: { sortOrder: true },
+    });
+
+    return (result._max.sortOrder ?? -1) + 1;
+  }
+
   async create(data: Prisma.HomepageBannerCreateInput) {
     try {
       return await this.prisma.homepageBanner.create({

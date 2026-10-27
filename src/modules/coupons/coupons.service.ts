@@ -590,7 +590,9 @@ export class CouponsService {
   ) {
     const usedCount = coupon._count.usages;
     const expired =
-      coupon.expiresAt != null && coupon.expiresAt.getTime() <= Date.now();
+      coupon.status === CouponStatus.ACTIVE &&
+      coupon.expiresAt != null &&
+      coupon.expiresAt.getTime() <= Date.now();
     return {
       id: coupon.id,
       code: coupon.code,
