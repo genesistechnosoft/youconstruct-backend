@@ -244,6 +244,13 @@ export class MediaRepository {
     });
   }
 
+  findMediaByIdList(ids: string[]) {
+    return this.prisma.media.findMany({
+      where: { id: { in: ids }, deletedAt: null },
+      select: MEDIA_SELECT,
+    });
+  }
+
   async createMedia(data: Prisma.MediaUncheckedCreateInput) {
     try {
       return await this.prisma.media.create({

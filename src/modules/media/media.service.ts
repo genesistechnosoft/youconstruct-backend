@@ -177,6 +177,25 @@ export class MediaService {
     };
   }
 
+  async uploadUnlinkedVendorMedia(
+    actorUserId: string,
+    vendorId: string,
+    file: Express.Multer.File | undefined,
+    imagesOnly: boolean,
+  ) {
+    await this.getApprovedVendorOwner(vendorId);
+    return this.uploadMedia({
+      userId: actorUserId,
+      owner: { ownerType: MediaOwnerType.VENDOR, ownerId: vendorId },
+      file,
+      accessLevel: MediaAccessLevel.PUBLIC,
+      keyPrefix: `vendors/${vendorId}/media`,
+      allowedFileTypes: imagesOnly
+        ? [MediaFileType.IMAGE]
+        : [MediaFileType.IMAGE, MediaFileType.VIDEO],
+    });
+  }
+
   async uploadPrivateDocument(
     userId: string,
     owner: MediaOwner,
@@ -635,6 +654,47 @@ export class MediaService {
     }
 
     return map;
+  }
+
+  async previewMediaLinks(
+    mediaIds: string[],
+    entityType: MediaEntityType,
+    entityId: string,
+    context: MediaContext,
+  ) {
+    const rows = await this.mediaRepository.findMediaByIdList(mediaIds);
+    const byId = new Map(rows.map((row) => [row.id, row]));
+    const links: {
+      id: string;
+      mediaId: string;
+      entityType: MediaEntityType;
+      entityId: string;
+      context: MediaContext;
+      isPrimary: boolean;
+      sortOrder: number;
+      createdAt: Date;
+      media: Awaited<ReturnType<MediaService['withUrls']>>;
+    }[] = [];
+    for (const [index, mediaId] of mediaIds.entries()) {
+      const media = byId.get(mediaId);
+      if (!media) {
+        continue;
+      }
+
+      links.push({
+        id: media.id,
+        mediaId: media.id,
+        entityType,
+        entityId,
+        context,
+        isPrimary: index === 0,
+        sortOrder: index,
+        createdAt: media.createdAt,
+        media: await this.withUrls(media),
+      });
+    }
+
+    return links;
   }
 
   async findOwnedMediaIds(owner: MediaOwner, mediaIds: string[]) {

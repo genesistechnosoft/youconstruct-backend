@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import {
   BadRequestException,
   ConflictException,
@@ -41,26 +42,28 @@ import { UpdateInventoryDto } from './dto/update-inventory.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
 import { UpdateVariantDto } from './dto/update-variant.dto';
 import { planVariantReplace } from './bulk-variant.logic';
-import type { BulkFieldError } from './bulk-variant.logic';
+import type { BulkFieldError, PlannedVariantWrite } from './bulk-variant.logic';
+import {
+  catalogMatchesPublished,
+  draftSkuConflicts,
+  moneyToDraft,
+  parseCatalogDraft,
+  seedCatalogDraft,
+  skusToReserve,
+  type CatalogDraft,
+  type CatalogDraftVariant,
+} from './catalog-draft';
 import { CheckSkusDto } from './dto/check-skus.dto';
 import { ReplaceProductMediaDto } from './dto/replace-product-media.dto';
 import { ReplaceVariantsDto } from './dto/replace-variants.dto';
 import { normalizeProductTags } from './product-tags.util';
 import { ProductsRepository } from './products.repository';
+import type { LivePriceWrite } from './products.repository';
 import { CategoriesService } from '../categories/categories.service';
 
-type PendingProductContent = {
-  name?: string;
-  description?: string;
-  shortDescription?: string;
-  categoryId?: string;
-  brandId?: string | null;
-  tags?: string[];
-  metaTitle?: string;
-  metaDescription?: string;
-  isReturnable?: boolean;
-  returnWindowDays?: number | null;
-};
+type OwnedProduct = NonNullable<
+  Awaited<ReturnType<ProductsRepository['findByVendorAndId']>>
+>;
 
 @Injectable()
 export class ProductsService {
@@ -83,7 +86,7 @@ export class ProductsService {
 
     return {
       message: 'Products fetched successfully',
-      data: await this.withProductsMedia(items),
+      data: this.withDraftFlag(await this.withProductsMedia(items)),
       meta: this.getMeta(filters.page, filters.limit, total),
     };
   }
@@ -170,27 +173,14 @@ export class ProductsService {
     this.validateReturnInvariant(isReturnable, returnWindowDays ?? undefined);
 
     if (existing.status === ProductStatus.ACTIVE) {
-      const pendingContent = this.mergePendingContent(existing, dto);
-
-      if (Object.keys(pendingContent).length === 0) {
-        await this.productsRepository.update(productId, {
-          pendingContent: Prisma.DbNull,
-          pendingContentReview: false,
-        });
-
-        return {
-          message: 'Product updated successfully',
-          data: await this.toVendorProductResponse(userId, productId),
-        };
-      }
-
-      await this.productsRepository.update(productId, {
-        pendingContent,
-        pendingContentReview: true,
-      });
-
+      const staged = await this.stageCatalog(existing, (draft) =>
+        this.applyScalarPatch(draft, dto),
+      );
       return {
-        message: 'Product content staged for review',
+        message:
+          staged === 'staged'
+            ? 'Product content staged for review'
+            : 'Product updated successfully',
         data: await this.toVendorProductResponse(userId, productId),
       };
     }
@@ -240,7 +230,7 @@ export class ProductsService {
     const product = await this.verifyProductOwnership(userId, productId);
     if (product.status === ProductStatus.ACTIVE) {
       throw new BadRequestException(
-        product.pendingContentReview
+        product.catalogDraft
           ? 'Live product content is already awaiting admin review; do not submit again'
           : 'Live products are not submitted; catalog edits go to content review automatically',
       );
@@ -271,6 +261,12 @@ export class ProductsService {
       throw new BadRequestException('Only active products can be unpublished');
     }
 
+    if (product.catalogDraft) {
+      throw new BadRequestException(
+        'Discard the catalog draft before unpublishing',
+      );
+    }
+
     await this.productsRepository.update(productId, {
       status: ProductStatus.INACTIVE,
     });
@@ -288,12 +284,59 @@ export class ProductsService {
     return { message: 'Product deleted successfully', data: null };
   }
 
+  async discardCatalogDraft(userId: string, productId: string) {
+    const product = await this.verifyProductOwnership(userId, productId);
+    if (!product.catalogDraft) {
+      throw new BadRequestException('Product has no catalog draft');
+    }
+
+    await this.productsRepository.clearCatalogDraft(productId);
+    return {
+      message: 'Catalog draft discarded',
+      data: await this.toVendorProductResponse(userId, productId),
+    };
+  }
+
   async addVariant(userId: string, productId: string, dto: CreateVariantDto) {
     const product = await this.verifyProductOwnership(userId, productId);
     this.ensureVendorCanMutateProduct(product.status);
     await this.validateUnits(dto.primaryUnitId, dto.baseUnitId);
     this.validatePriceInvariant(dto.price, dto.sellingPrice, dto.costPrice);
     this.validateCoverageInvariant(dto.coverageArea, dto.baseUnitId);
+
+    if (product.status === ProductStatus.ACTIVE) {
+      const taken = await this.productsRepository.findTakenSkus(
+        [dto.sku],
+        product.id,
+      );
+      if (
+        taken.length > 0 ||
+        product.variants.some((variant) => variant.sku === dto.sku)
+      ) {
+        throw new ConflictException('Variant SKU already exists');
+      }
+
+      await this.stageCatalog(product, (draft) => {
+        if (draft.variants.some((variant) => variant.sku === dto.sku)) {
+          throw new ConflictException('Variant SKU already exists');
+        }
+
+        const isDefault =
+          dto.isDefault ?? !draft.variants.some((variant) => variant.isActive);
+        const variants = isDefault
+          ? draft.variants.map((variant) => ({ ...variant, isDefault: false }))
+          : draft.variants;
+        return {
+          ...draft,
+          variants: [...variants, this.draftVariantFromCreate(dto, isDefault)],
+        };
+      });
+
+      return {
+        message: 'Variant added successfully',
+        data: await this.toVendorProductResponse(userId, productId),
+      };
+    }
 
     const existingSku = await this.productsRepository.findVariantBySku(dto.sku);
     if (existingSku) {
@@ -321,10 +364,6 @@ export class ProductsService {
       isDefault,
     });
 
-    if (product.status === ProductStatus.ACTIVE) {
-      await this.markPendingContentReview(productId);
-    }
-
     return {
       message: 'Variant added successfully',
       data: await this.toVendorProductResponse(userId, productId),
@@ -337,16 +376,22 @@ export class ProductsService {
     variantId: string,
     dto: UpdateVariantDto,
   ) {
+    const product = await this.verifyProductOwnership(userId, productId);
+    this.ensureVendorCanMutateProduct(product.status);
+
+    if (product.status === ProductStatus.ACTIVE) {
+      await this.updateActiveVariant(product, variantId, dto);
+      return {
+        message: 'Variant updated successfully',
+        data: await this.toVendorProductResponse(userId, productId),
+      };
+    }
+
     const variant = await this.verifyVariantOwnership(
       userId,
       productId,
       variantId,
     );
-    const product = await this.productsRepository.findById(productId);
-    if (!product) {
-      throw new NotFoundException('Product not found');
-    }
-    this.ensureVendorCanMutateProduct(product.status);
 
     if (dto.sku !== undefined) {
       const existingSku = await this.productsRepository.findVariantBySku(
@@ -391,10 +436,6 @@ export class ProductsService {
       nextBaseUnitId ?? undefined,
     );
 
-    const priceOnlyUpdate =
-      product.status === ProductStatus.ACTIVE &&
-      this.isPriceOnlyVariantUpdate(dto);
-
     await this.productsRepository.updateVariant(variantId, productId, {
       ...(dto.sku !== undefined && { sku: dto.sku }),
       ...(dto.name !== undefined && { name: dto.name }),
@@ -418,10 +459,6 @@ export class ProductsService {
       ...(dto.isDefault !== undefined && { isDefault: dto.isDefault }),
     });
 
-    if (product.status === ProductStatus.ACTIVE && !priceOnlyUpdate) {
-      await this.markPendingContentReview(productId);
-    }
-
     return {
       message: 'Variant updated successfully',
       data: await this.toVendorProductResponse(userId, productId),
@@ -430,7 +467,41 @@ export class ProductsService {
 
   async deleteVariant(userId: string, productId: string, variantId: string) {
     const product = await this.verifyProductOwnership(userId, productId);
-    this.ensureVendorCanFullyMutateProduct(product.status);
+    this.ensureVendorCanMutateProduct(product.status);
+
+    if (product.status === ProductStatus.ACTIVE) {
+      this.assertKnownVariant(product, variantId);
+      await this.stageCatalog(product, (draft) => {
+        const target = draft.variants.find(
+          (variant) => variant.id === variantId,
+        );
+        if (!target) {
+          throw new NotFoundException('Variant not found');
+        }
+        if (target.isDefault) {
+          throw new BadRequestException(
+            'Default variant cannot be deleted. Set another default first',
+          );
+        }
+
+        const variants = draft.variants.filter(
+          (variant) => variant.id !== variantId,
+        );
+        if (!variants.some((variant) => variant.isActive)) {
+          throw new BadRequestException(
+            'Product must keep at least one variant',
+          );
+        }
+
+        return { ...draft, variants };
+      });
+
+      return {
+        message: 'Variant deleted successfully',
+        data: await this.toVendorProductResponse(userId, productId),
+      };
+    }
+
     const variant = await this.verifyVariantOwnership(
       userId,
       productId,
@@ -463,17 +534,53 @@ export class ProductsService {
   ) {
     const product = await this.verifyProductOwnership(userId, productId);
     this.ensureVendorCanMutateProduct(product.status);
-    await this.verifyVariantOwnership(userId, productId, variantId);
+    const live = product.variants.find((variant) => variant.id === variantId);
 
-    await this.productsRepository.updateInventory(variantId, {
-      quantity: dto.quantity,
-      ...(dto.lowStockThreshold !== undefined && {
-        lowStockThreshold: dto.lowStockThreshold,
+    if (live) {
+      await this.productsRepository.updateInventory(variantId, {
+        quantity: dto.quantity,
+        ...(dto.lowStockThreshold !== undefined && {
+          lowStockThreshold: dto.lowStockThreshold,
+        }),
+        ...(dto.allowBackorder !== undefined && {
+          allowBackorder: dto.allowBackorder,
+        }),
+      });
+
+      return {
+        message: 'Inventory updated successfully',
+        data: await this.toVendorProductResponse(userId, productId),
+      };
+    }
+
+    if (product.status !== ProductStatus.ACTIVE) {
+      throw new NotFoundException('Variant not found');
+    }
+
+    this.assertKnownVariant(product, variantId);
+    await this.stageCatalog(product, (draft) => ({
+      ...draft,
+      variants: draft.variants.map((variant) => {
+        if (variant.id !== variantId) {
+          return variant;
+        }
+
+        const inventory = variant.inventory ?? {
+          quantity: 0,
+          lowStockThreshold: 5,
+          allowBackorder: false,
+        };
+        return {
+          ...variant,
+          inventory: {
+            quantity: dto.quantity,
+            lowStockThreshold:
+              dto.lowStockThreshold ?? inventory.lowStockThreshold,
+            allowBackorder: dto.allowBackorder ?? inventory.allowBackorder,
+          },
+        };
       }),
-      ...(dto.allowBackorder !== undefined && {
-        allowBackorder: dto.allowBackorder,
-      }),
-    });
+    }));
 
     return {
       message: 'Inventory updated successfully',
@@ -489,6 +596,25 @@ export class ProductsService {
   ) {
     const product = await this.verifyProductOwnership(userId, productId);
     this.ensureVendorCanMutateProduct(product.status);
+    if (product.status === ProductStatus.ACTIVE) {
+      if (dto.attributes.length > 0) {
+        await this.validateAttributePayload(dto.attributes);
+      }
+      this.assertKnownVariant(product, variantId);
+      await this.stageCatalog(product, (draft) => ({
+        ...draft,
+        variants: this.requireVariant(draft, variantId, (variant) => ({
+          ...variant,
+          attributes: dto.attributes,
+        })),
+      }));
+
+      return {
+        message: 'Variant attributes updated successfully',
+        data: await this.toVendorProductResponse(userId, productId),
+      };
+    }
+
     await this.verifyVariantOwnership(userId, productId, variantId);
     if (dto.attributes.length > 0) {
       await this.validateAttributePayload(dto.attributes);
@@ -498,10 +624,6 @@ export class ProductsService {
       variantId,
       dto.attributes,
     );
-
-    if (product.status === ProductStatus.ACTIVE) {
-      await this.markPendingContentReview(productId);
-    }
 
     return {
       message: 'Variant attributes updated successfully',
@@ -517,15 +639,39 @@ export class ProductsService {
   ) {
     const product = await this.verifyProductOwnership(userId, productId);
     this.ensureVendorCanMutateProduct(product.status);
+    if (product.status === ProductStatus.ACTIVE) {
+      this.assertKnownVariant(product, variantId);
+      await this.stageCatalog(product, (draft) => ({
+        ...draft,
+        variants: this.requireVariant(draft, variantId, (variant) => {
+          if (
+            !variant.attributes.some(
+              (attribute) => attribute.attributeId === attributeId,
+            )
+          ) {
+            throw new NotFoundException('Variant attribute not found');
+          }
+
+          return {
+            ...variant,
+            attributes: variant.attributes.filter(
+              (attribute) => attribute.attributeId !== attributeId,
+            ),
+          };
+        }),
+      }));
+
+      return {
+        message: 'Variant attribute removed successfully',
+        data: await this.toVendorProductResponse(userId, productId),
+      };
+    }
+
     await this.verifyVariantOwnership(userId, productId, variantId);
     await this.productsRepository.deleteVariantAttribute(
       variantId,
       attributeId,
     );
-
-    if (product.status === ProductStatus.ACTIVE) {
-      await this.markPendingContentReview(productId);
-    }
 
     return {
       message: 'Variant attribute removed successfully',
@@ -545,6 +691,24 @@ export class ProductsService {
     );
     this.ensureVendorCanMutateProduct(product.status);
 
+    if (product.status === ProductStatus.ACTIVE) {
+      const media = await this.mediaService.uploadUnlinkedVendorMedia(
+        actorUserId,
+        product.vendorId,
+        file,
+        false,
+      );
+      await this.stageCatalog(product, (draft) => ({
+        ...draft,
+        galleryMediaIds: [...draft.galleryMediaIds, media.id],
+      }));
+
+      return {
+        message: 'Media uploaded and linked successfully',
+        data: await this.toVendorProductResponse(vendorProfileId, productId),
+      };
+    }
+
     await this.mediaService.uploadVendorMediaForEntity(
       actorUserId,
       product.vendorId,
@@ -553,7 +717,7 @@ export class ProductsService {
       productId,
     );
 
-    await this.recordMediaWrite(productId, product.status);
+    await this.productsRepository.incrementVersion(productId);
 
     return {
       message: 'Media uploaded and linked successfully',
@@ -569,6 +733,19 @@ export class ProductsService {
     const product = await this.verifyProductOwnership(userId, productId);
     this.ensureVendorCanMutateProduct(product.status);
 
+    if (product.status === ProductStatus.ACTIVE) {
+      await this.assertOwnedMedia(product.vendorId, dto.mediaIds);
+      await this.stageCatalog(product, (draft) => ({
+        ...draft,
+        galleryMediaIds: this.appendMediaIds(draft.galleryMediaIds, dto.mediaIds),
+      }));
+
+      return {
+        message: 'Media linked successfully',
+        data: await this.toVendorProductResponse(userId, productId),
+      };
+    }
+
     await this.mediaService.linkMediaToEntity(
       { ownerType: MediaOwnerType.VENDOR, ownerId: product.vendorId },
       MediaEntityType.PRODUCT,
@@ -576,7 +753,7 @@ export class ProductsService {
       dto,
     );
 
-    await this.recordMediaWrite(productId, product.status);
+    await this.productsRepository.incrementVersion(productId);
 
     return {
       message: 'Media linked successfully',
@@ -592,13 +769,25 @@ export class ProductsService {
     const product = await this.verifyProductOwnership(userId, productId);
     this.ensureVendorCanMutateProduct(product.status);
 
+    if (product.status === ProductStatus.ACTIVE) {
+      await this.stageCatalog(product, (draft) => {
+        this.assertGalleryReorder(draft.galleryMediaIds, dto.mediaIds);
+        return { ...draft, galleryMediaIds: dto.mediaIds };
+      });
+
+      return {
+        message: 'Media links reordered successfully',
+        data: await this.toVendorProductResponse(userId, productId),
+      };
+    }
+
     await this.mediaService.reorderEntityMedia(
       MediaEntityType.PRODUCT,
       productId,
       dto,
     );
 
-    await this.recordMediaWrite(productId, product.status);
+    await this.productsRepository.incrementVersion(productId);
 
     return {
       message: 'Media links reordered successfully',
@@ -614,13 +803,31 @@ export class ProductsService {
     const product = await this.verifyProductOwnership(userId, productId);
     this.ensureVendorCanMutateProduct(product.status);
 
+    if (product.status === ProductStatus.ACTIVE) {
+      await this.stageCatalog(product, (draft) => {
+        if (!draft.galleryMediaIds.includes(mediaId)) {
+          throw new NotFoundException('Media link not found');
+        }
+
+        return {
+          ...draft,
+          galleryMediaIds: draft.galleryMediaIds.filter((id) => id !== mediaId),
+        };
+      });
+
+      return {
+        message: 'Media unlinked successfully',
+        data: await this.toVendorProductResponse(userId, productId),
+      };
+    }
+
     await this.mediaService.unlinkMediaFromEntity(
       MediaEntityType.PRODUCT,
       productId,
       mediaId,
     );
 
-    await this.recordMediaWrite(productId, product.status);
+    await this.productsRepository.incrementVersion(productId);
 
     return {
       message: 'Media unlinked successfully',
@@ -640,6 +847,24 @@ export class ProductsService {
     );
     this.ensureVendorCanMutateProduct(product.status);
 
+    if (product.status === ProductStatus.ACTIVE) {
+      const media = await this.mediaService.uploadUnlinkedVendorMedia(
+        actorUserId,
+        product.vendorId,
+        file,
+        true,
+      );
+      await this.stageCatalog(product, (draft) => ({
+        ...draft,
+        thumbnailMediaId: media.id,
+      }));
+
+      return {
+        message: 'Product thumbnail uploaded successfully',
+        data: await this.toVendorProductResponse(vendorProfileId, productId),
+      };
+    }
+
     await this.mediaService.uploadVendorMediaForEntityContext(
       actorUserId,
       product.vendorId,
@@ -649,7 +874,7 @@ export class ProductsService {
       MediaContext.THUMBNAIL,
     );
 
-    await this.recordMediaWrite(productId, product.status);
+    await this.productsRepository.incrementVersion(productId);
 
     return {
       message: 'Product thumbnail uploaded successfully',
@@ -665,6 +890,19 @@ export class ProductsService {
     const product = await this.verifyProductOwnership(userId, productId);
     this.ensureVendorCanMutateProduct(product.status);
 
+    if (product.status === ProductStatus.ACTIVE) {
+      await this.assertOwnedMedia(product.vendorId, [dto.mediaId]);
+      await this.stageCatalog(product, (draft) => ({
+        ...draft,
+        thumbnailMediaId: dto.mediaId,
+      }));
+
+      return {
+        message: 'Product thumbnail linked successfully',
+        data: await this.toVendorProductResponse(userId, productId),
+      };
+    }
+
     await this.mediaService.setEntityMediaContext(
       { ownerType: MediaOwnerType.VENDOR, ownerId: product.vendorId },
       MediaEntityType.PRODUCT,
@@ -673,7 +911,7 @@ export class ProductsService {
       dto.mediaId,
     );
 
-    await this.recordMediaWrite(productId, product.status);
+    await this.productsRepository.incrementVersion(productId);
 
     return {
       message: 'Product thumbnail linked successfully',
@@ -684,6 +922,21 @@ export class ProductsService {
   async deleteProductThumbnail(userId: string, productId: string) {
     const product = await this.verifyProductOwnership(userId, productId);
     this.ensureVendorCanMutateProduct(product.status);
+
+    if (product.status === ProductStatus.ACTIVE) {
+      await this.stageCatalog(product, (draft) => {
+        if (!draft.thumbnailMediaId) {
+          throw new NotFoundException('Product thumbnail not found');
+        }
+
+        return { ...draft, thumbnailMediaId: null };
+      });
+
+      return {
+        message: 'Product thumbnail removed successfully',
+        data: await this.toVendorProductResponse(userId, productId),
+      };
+    }
 
     const thumbnailCount = await this.mediaService.countContextLinks(
       MediaEntityType.PRODUCT,
@@ -700,7 +953,7 @@ export class ProductsService {
       MediaContext.THUMBNAIL,
     );
 
-    await this.recordMediaWrite(productId, product.status);
+    await this.productsRepository.incrementVersion(productId);
 
     return {
       message: 'Product thumbnail removed successfully',
@@ -720,8 +973,30 @@ export class ProductsService {
       productId,
     );
     this.ensureVendorCanMutateProduct(product.status);
-    await this.verifyVariantOwnership(vendorProfileId, productId, variantId);
 
+    if (product.status === ProductStatus.ACTIVE) {
+      this.assertKnownVariant(product, variantId);
+      const media = await this.mediaService.uploadUnlinkedVendorMedia(
+        actorUserId,
+        product.vendorId,
+        file,
+        false,
+      );
+      await this.stageCatalog(product, (draft) => ({
+        ...draft,
+        variants: this.requireVariant(draft, variantId, (variant) => ({
+          ...variant,
+          galleryMediaIds: [...variant.galleryMediaIds, media.id],
+        })),
+      }));
+
+      return {
+        message: 'Media uploaded and linked successfully',
+        data: await this.toVendorProductResponse(vendorProfileId, productId),
+      };
+    }
+
+    await this.verifyVariantOwnership(vendorProfileId, productId, variantId);
     await this.mediaService.uploadVendorMediaForEntity(
       actorUserId,
       product.vendorId,
@@ -729,8 +1004,7 @@ export class ProductsService {
       MediaEntityType.PRODUCT_VARIANT,
       variantId,
     );
-
-    await this.recordMediaWrite(productId, product.status);
+    await this.productsRepository.incrementVersion(productId);
 
     return {
       message: 'Media uploaded and linked successfully',
@@ -746,16 +1020,35 @@ export class ProductsService {
   ) {
     const product = await this.verifyProductOwnership(userId, productId);
     this.ensureVendorCanMutateProduct(product.status);
-    await this.verifyVariantOwnership(userId, productId, variantId);
 
+    if (product.status === ProductStatus.ACTIVE) {
+      this.assertKnownVariant(product, variantId);
+      await this.assertOwnedMedia(product.vendorId, dto.mediaIds);
+      await this.stageCatalog(product, (draft) => ({
+        ...draft,
+        variants: this.requireVariant(draft, variantId, (variant) => ({
+          ...variant,
+          galleryMediaIds: this.appendMediaIds(
+            variant.galleryMediaIds,
+            dto.mediaIds,
+          ),
+        })),
+      }));
+
+      return {
+        message: 'Media linked successfully',
+        data: await this.toVendorProductResponse(userId, productId),
+      };
+    }
+
+    await this.verifyVariantOwnership(userId, productId, variantId);
     await this.mediaService.linkMediaToEntity(
       { ownerType: MediaOwnerType.VENDOR, ownerId: product.vendorId },
       MediaEntityType.PRODUCT_VARIANT,
       variantId,
       dto,
     );
-
-    await this.recordMediaWrite(productId, product.status);
+    await this.productsRepository.incrementVersion(productId);
 
     return {
       message: 'Media linked successfully',
@@ -771,15 +1064,30 @@ export class ProductsService {
   ) {
     const product = await this.verifyProductOwnership(userId, productId);
     this.ensureVendorCanMutateProduct(product.status);
-    await this.verifyVariantOwnership(userId, productId, variantId);
 
+    if (product.status === ProductStatus.ACTIVE) {
+      this.assertKnownVariant(product, variantId);
+      await this.stageCatalog(product, (draft) => ({
+        ...draft,
+        variants: this.requireVariant(draft, variantId, (variant) => {
+          this.assertGalleryReorder(variant.galleryMediaIds, dto.mediaIds);
+          return { ...variant, galleryMediaIds: dto.mediaIds };
+        }),
+      }));
+
+      return {
+        message: 'Media links reordered successfully',
+        data: await this.toVendorProductResponse(userId, productId),
+      };
+    }
+
+    await this.verifyVariantOwnership(userId, productId, variantId);
     await this.mediaService.reorderEntityMedia(
       MediaEntityType.PRODUCT_VARIANT,
       variantId,
       dto,
     );
-
-    await this.recordMediaWrite(productId, product.status);
+    await this.productsRepository.incrementVersion(productId);
 
     return {
       message: 'Media links reordered successfully',
@@ -795,15 +1103,38 @@ export class ProductsService {
   ) {
     const product = await this.verifyProductOwnership(userId, productId);
     this.ensureVendorCanMutateProduct(product.status);
-    await this.verifyVariantOwnership(userId, productId, variantId);
 
+    if (product.status === ProductStatus.ACTIVE) {
+      this.assertKnownVariant(product, variantId);
+      await this.stageCatalog(product, (draft) => ({
+        ...draft,
+        variants: this.requireVariant(draft, variantId, (variant) => {
+          if (!variant.galleryMediaIds.includes(mediaId)) {
+            throw new NotFoundException('Media link not found');
+          }
+
+          return {
+            ...variant,
+            galleryMediaIds: variant.galleryMediaIds.filter(
+              (id) => id !== mediaId,
+            ),
+          };
+        }),
+      }));
+
+      return {
+        message: 'Media unlinked successfully',
+        data: await this.toVendorProductResponse(userId, productId),
+      };
+    }
+
+    await this.verifyVariantOwnership(userId, productId, variantId);
     await this.mediaService.unlinkMediaFromEntity(
       MediaEntityType.PRODUCT_VARIANT,
       variantId,
       mediaId,
     );
-
-    await this.recordMediaWrite(productId, product.status);
+    await this.productsRepository.incrementVersion(productId);
 
     return {
       message: 'Media unlinked successfully',
@@ -834,43 +1165,21 @@ export class ProductsService {
       });
     }
 
-    const existingIds = product.variants.map((variant) => variant.id);
+    const existing = this.plannerExisting(product);
+    const liveIds = product.variants.map((variant) => variant.id);
     const [conflictingSkus, variantIdsWithOrders] = await Promise.all([
       this.productsRepository.findConflictingSkus(
         dto.variants.map((variant) => variant.sku),
-        existingIds,
+        existing.map((variant) => variant.id),
+        product.id,
       ),
-      this.productsRepository.findVariantIdsWithOrders(existingIds),
+      this.productsRepository.findVariantIdsWithOrders(liveIds),
     ]);
 
     const plan = planVariantReplace({
       status: product.status,
       incoming: dto.variants,
-      existing: product.variants.map((variant) => ({
-        id: variant.id,
-        sku: variant.sku,
-        name: variant.name,
-        price: variant.price,
-        sellingPrice: variant.sellingPrice,
-        costPrice: variant.costPrice,
-        primaryUnitId: variant.primaryUnitId,
-        coverageArea: variant.coverageArea,
-        baseUnitId: variant.baseUnitId,
-        weightKg: variant.weightKg,
-        isDefault: variant.isDefault,
-        isActive: variant.isActive,
-        attributes: variant.attributes.map((attribute) => ({
-          attributeId: attribute.attributeId,
-          value: attribute.value,
-        })),
-        inventory: variant.inventory
-          ? {
-              quantity: variant.inventory.quantity,
-              lowStockThreshold: variant.inventory.lowStockThreshold,
-              allowBackorder: variant.inventory.allowBackorder,
-            }
-          : null,
-      })),
+      existing,
       variantIdsWithOrders,
       conflictingSkus,
     });
@@ -903,10 +1212,40 @@ export class ProductsService {
       };
     }
 
+    if (product.status === ProductStatus.ACTIVE) {
+      const idMap: Record<string, string> = {};
+      const livePrices = this.livePricesFromWrites(product.variants, plan.writes);
+      if (plan.review.pendingReview.length > 0) {
+        await this.stageCatalog(
+          product,
+          (draft) => this.applyVariantWrites(draft, plan.writes, idMap),
+          { expectedVersion: dto.version, livePrices },
+        );
+      } else if (livePrices.length > 0) {
+        await this.productsRepository.applyLivePrices({
+          productId,
+          expectedVersion: dto.version,
+          livePrices,
+        });
+      }
+
+      return {
+        message: 'Variants saved successfully',
+        data: {
+          product: await this.toVendorProductResponse(
+            vendorProfileId,
+            productId,
+          ),
+          idMap,
+          removed: plan.removed,
+          review: plan.review,
+        },
+      };
+    }
+
     const idMap = await this.productsRepository.replaceVariants({
       productId,
       expectedVersion: dto.version,
-      markPendingContentReview: plan.markPendingContentReview,
       writes: plan.writes,
       removals: plan.removals,
     });
@@ -935,7 +1274,11 @@ export class ProductsService {
     this.assertCurrentVersion(product.version, dto.version);
 
     const knownVariantIds = new Set(
-      product.variants.map((variant) => variant.id),
+      product.status === ProductStatus.ACTIVE && product.catalogDraft
+        ? this.readDraft(product.catalogDraft).variants.map(
+            (variant) => variant.id,
+          )
+        : product.variants.map((variant) => variant.id),
     );
     const variantEntries = Object.entries(dto.variants ?? {});
     const fieldErrors: BulkFieldError[] = [];
@@ -1033,6 +1376,56 @@ export class ProductsService {
       });
     }
 
+    if (product.status === ProductStatus.ACTIVE) {
+      const baseline = product.catalogDraft
+        ? this.readDraft(product.catalogDraft)
+        : await this.publishedDraft(product);
+      const pendingReview: string[] = [];
+      if (baseline.thumbnailMediaId !== dto.thumbnailMediaId) {
+        pendingReview.push('thumbnail');
+      }
+      if (!sameIds(baseline.galleryMediaIds, dto.gallery)) {
+        pendingReview.push('gallery');
+      }
+      for (const [variantId, mediaIds] of variantEntries) {
+        const current =
+          baseline.variants.find((variant) => variant.id === variantId)
+            ?.galleryMediaIds ?? [];
+        if (!sameIds(current, mediaIds)) {
+          pendingReview.push(`variants.${variantId}.gallery`);
+        }
+      }
+
+      if (pendingReview.length > 0) {
+        await this.stageCatalog(
+          product,
+          (draft) => ({
+            ...draft,
+            thumbnailMediaId: dto.thumbnailMediaId,
+            galleryMediaIds: dto.gallery,
+            variants: draft.variants.map((variant) => {
+              const next = dto.variants?.[variant.id];
+              return next
+                ? { ...variant, galleryMediaIds: next }
+                : variant;
+            }),
+          }),
+          { expectedVersion: dto.version },
+        );
+      }
+
+      return {
+        message: 'Product media saved successfully',
+        data: {
+          product: await this.toVendorProductResponse(
+            vendorProfileId,
+            productId,
+          ),
+          review: { live: [] as string[], pendingReview },
+        },
+      };
+    }
+
     const variantIds = variantEntries.map(([variantId]) => variantId);
     const [thumbnail, gallery, variantGalleries] = await Promise.all([
       this.mediaService.getEntityThumbnail(MediaEntityType.PRODUCT, productId),
@@ -1071,8 +1464,6 @@ export class ProductsService {
     await this.productsRepository.replaceProductMedia({
       productId,
       expectedVersion: dto.version,
-      markPendingContentReview:
-        product.status === ProductStatus.ACTIVE && pendingReview.length > 0,
       ...(thumbnailChanged && { thumbnailMediaId: dto.thumbnailMediaId }),
       gallery: galleryChanged ? dto.gallery : null,
       variantGalleries: variantGalleriesToWrite,
@@ -1176,7 +1567,7 @@ export class ProductsService {
 
     return {
       message: 'Products fetched successfully',
-      data: await this.withProductsMedia(items),
+      data: this.withDraftFlag(await this.withProductsMedia(items)),
       meta: this.getMeta(filters.page, filters.limit, total),
     };
   }
@@ -1288,62 +1679,54 @@ export class ProductsService {
       );
     }
 
-    if (!existing.pendingContentReview) {
-      throw new BadRequestException('Product has no pending content review');
+    if (!existing.catalogDraft) {
+      throw new BadRequestException('Product has no catalog draft');
     }
 
-    const pending = (existing.pendingContent ?? {}) as PendingProductContent;
-
-    if (pending.categoryId !== undefined) {
-      await this.validateActiveCategory(pending.categoryId);
-    }
-    if (pending.brandId !== undefined && pending.brandId !== null) {
-      await this.validateActiveBrand(pending.brandId);
-    }
-
-    const nextIsReturnable = pending.isReturnable ?? existing.isReturnable;
-    const nextReturnWindowDays =
-      pending.isReturnable === false
-        ? null
-        : (pending.returnWindowDays ?? existing.returnWindowDays);
+    const draft = this.readDraft(existing.catalogDraft);
+    await this.validateActiveCategory(draft.categoryId);
+    await this.validateActiveBrand(draft.brandId ?? undefined);
     this.validateReturnInvariant(
-      nextIsReturnable,
-      nextReturnWindowDays ?? undefined,
+      draft.isReturnable,
+      draft.returnWindowDays ?? undefined,
     );
 
-    const updateData: Prisma.ProductUncheckedUpdateInput = {
-      pendingContent: Prisma.DbNull,
-      pendingContentReview: false,
-      rejectionNote: null,
-    };
-
-    if (pending.name !== undefined) updateData.name = pending.name;
-    if (pending.description !== undefined) {
-      updateData.description = pending.description;
+    const active = draft.variants.filter((variant) => variant.isActive);
+    if (active.length === 0) {
+      throw new BadRequestException(
+        'Product must have at least one active variant',
+      );
     }
-    if (pending.shortDescription !== undefined) {
-      updateData.shortDescription = pending.shortDescription;
+    if (active.filter((variant) => variant.isDefault).length !== 1) {
+      throw new BadRequestException(
+        'Product must have exactly one active default variant',
+      );
     }
-    if (pending.categoryId !== undefined) {
-      updateData.categoryId = pending.categoryId;
-    }
-    if (pending.brandId !== undefined) updateData.brandId = pending.brandId;
-    if (pending.tags !== undefined) updateData.tags = pending.tags;
-    if (pending.metaTitle !== undefined)
-      updateData.metaTitle = pending.metaTitle;
-    if (pending.metaDescription !== undefined) {
-      updateData.metaDescription = pending.metaDescription;
-    }
-    if (pending.isReturnable !== undefined) {
-      updateData.isReturnable = pending.isReturnable;
-    }
-    if (pending.isReturnable === false) {
-      updateData.returnWindowDays = null;
-    } else if (pending.returnWindowDays !== undefined) {
-      updateData.returnWindowDays = pending.returnWindowDays;
+    if (!draft.thumbnailMediaId) {
+      throw new BadRequestException('Product must have a thumbnail image');
     }
 
-    await this.productsRepository.update(id, updateData);
+    let slug = existing.slug;
+    if (draft.name !== existing.name) {
+      slug = generateSlug(draft.name);
+      const taken = await this.productsRepository.findBySlug(slug, existing.id);
+      if (taken) {
+        throw new ConflictException('Product slug already exists');
+      }
+    }
+
+    await this.productsRepository.applyCatalogDraft({
+      productId: id,
+      slug,
+      draft,
+      liveVariantIds: existing.variants.map((variant) => variant.id),
+      deactivate: existing.variants
+        .filter(
+          (variant) =>
+            !draft.variants.some((next) => next.id === variant.id),
+        )
+        .map((variant) => ({ id: variant.id, sku: variant.sku })),
+    });
 
     this.securityAudit.log({
       actorUserId,
@@ -1375,15 +1758,11 @@ export class ProductsService {
       );
     }
 
-    if (!existing.pendingContentReview) {
-      throw new BadRequestException('Product has no pending content review');
+    if (!existing.catalogDraft) {
+      throw new BadRequestException('Product has no catalog draft');
     }
 
-    await this.productsRepository.update(id, {
-      pendingContent: Prisma.DbNull,
-      pendingContentReview: false,
-      rejectionNote: dto.rejectionNote,
-    });
+    await this.productsRepository.rejectCatalogDraft(id, dto.rejectionNote);
 
     this.securityAudit.log({
       actorUserId,
@@ -1636,111 +2015,555 @@ export class ProductsService {
     }
   }
 
-  private async markPendingContentReview(productId: string) {
-    await this.productsRepository.setPendingContentReview(productId);
-  }
-
-  private async recordMediaWrite(productId: string, status: ProductStatus) {
-    await this.productsRepository.incrementVersion(productId);
-    if (status === ProductStatus.ACTIVE) {
-      await this.markPendingContentReview(productId);
+  private readDraft(value: unknown) {
+    try {
+      return parseCatalogDraft(value);
+    } catch {
+      throw new BadRequestException('Catalog draft is invalid');
     }
   }
 
-  private mergePendingContent(
-    existing: {
-      name: string;
-      description: string;
-      shortDescription: string;
-      categoryId: string;
-      brandId: string | null;
-      tags: string[];
-      metaTitle: string;
-      metaDescription: string;
-      isReturnable: boolean;
-      returnWindowDays: number | null;
-      pendingContent: unknown;
-    },
-    dto: UpdateProductDto,
-  ): PendingProductContent {
-    const pending: PendingProductContent = {
-      ...((existing.pendingContent as PendingProductContent | null) ?? {}),
-    };
+  private async publishedDraft(product: OwnedProduct) {
+    const variantIds = product.variants.map((variant) => variant.id);
+    const [thumbnail, gallery, variantGalleries] = await Promise.all([
+      this.mediaService.getEntityThumbnail(MediaEntityType.PRODUCT, product.id),
+      this.mediaService.getEntityGallery(MediaEntityType.PRODUCT, product.id),
+      this.mediaService.getOrderedGalleryMediaIds(
+        MediaEntityType.PRODUCT_VARIANT,
+        variantIds,
+      ),
+    ]);
 
-    const setOrClear = <K extends keyof PendingProductContent>(
-      key: K,
-      next: PendingProductContent[K],
-      live: PendingProductContent[K],
-    ) => {
-      if (this.pendingValuesEqual(next, live)) {
-        delete pending[key];
-      } else {
-        pending[key] = next;
-      }
-    };
-
-    if (dto.name !== undefined) {
-      setOrClear('name', dto.name, existing.name);
-    }
-    if (dto.description !== undefined) {
-      setOrClear('description', dto.description, existing.description);
-    }
-    if (dto.shortDescription !== undefined) {
-      setOrClear(
-        'shortDescription',
-        dto.shortDescription,
-        existing.shortDescription,
-      );
-    }
-    if (dto.categoryId !== undefined) {
-      setOrClear('categoryId', dto.categoryId, existing.categoryId);
-    }
-    if (dto.brandId !== undefined) {
-      setOrClear('brandId', dto.brandId, existing.brandId);
-    }
-    if (dto.tags !== undefined) {
-      setOrClear('tags', normalizeProductTags(dto.tags), existing.tags);
-    }
-    if (dto.metaTitle !== undefined) {
-      setOrClear('metaTitle', dto.metaTitle, existing.metaTitle);
-    }
-    if (dto.metaDescription !== undefined) {
-      setOrClear(
-        'metaDescription',
-        dto.metaDescription,
-        existing.metaDescription,
-      );
-    }
-    if (dto.isReturnable !== undefined) {
-      setOrClear('isReturnable', dto.isReturnable, existing.isReturnable);
-    }
-    if (dto.isReturnable === false) {
-      setOrClear('returnWindowDays', null, existing.returnWindowDays);
-    } else if (dto.returnWindowDays !== undefined) {
-      setOrClear(
-        'returnWindowDays',
-        dto.returnWindowDays,
-        existing.returnWindowDays,
-      );
-    }
-
-    return pending;
+    return seedCatalogDraft({
+      name: product.name,
+      description: product.description,
+      shortDescription: product.shortDescription,
+      categoryId: product.categoryId,
+      brandId: product.brandId,
+      tags: product.tags,
+      metaTitle: product.metaTitle,
+      metaDescription: product.metaDescription,
+      isReturnable: product.isReturnable,
+      returnWindowDays: product.returnWindowDays,
+      thumbnailMediaId: thumbnail?.mediaId ?? null,
+      galleryMediaIds: gallery.map((link) => link.mediaId),
+      variants: product.variants.map((variant) => ({
+        id: variant.id,
+        sku: variant.sku,
+        name: variant.name,
+        price: variant.price,
+        sellingPrice: variant.sellingPrice,
+        costPrice: variant.costPrice,
+        primaryUnitId: variant.primaryUnitId,
+        coverageArea: variant.coverageArea,
+        baseUnitId: variant.baseUnitId,
+        weightKg: variant.weightKg,
+        isDefault: variant.isDefault,
+        isActive: variant.isActive,
+        attributes: variant.attributes.map((attribute) => ({
+          attributeId: attribute.attributeId,
+          value: attribute.value,
+        })),
+        galleryMediaIds: variantGalleries.get(variant.id) ?? [],
+        inventory: variant.inventory
+          ? {
+              quantity: variant.inventory.quantity,
+              lowStockThreshold: variant.inventory.lowStockThreshold,
+              allowBackorder: variant.inventory.allowBackorder,
+            }
+          : null,
+      })),
+    });
   }
 
-  private pendingValuesEqual(
-    left: PendingProductContent[keyof PendingProductContent],
-    right: PendingProductContent[keyof PendingProductContent],
+  private async stageCatalog(
+    product: OwnedProduct,
+    mutate: (draft: CatalogDraft) => CatalogDraft,
+    options?: { expectedVersion?: number; livePrices?: LivePriceWrite[] },
   ) {
-    if (Array.isArray(left) || Array.isArray(right)) {
-      const leftTags = Array.isArray(left) ? [...left].sort() : [];
-      const rightTags = Array.isArray(right) ? [...right].sort() : [];
-      return (
-        leftTags.length === rightTags.length &&
-        leftTags.every((value, index) => value === rightTags[index])
-      );
+    const published = await this.publishedDraft(product);
+    const current = product.catalogDraft
+      ? this.readDraft(product.catalogDraft)
+      : published;
+    const next = mutate(structuredClone(current));
+    const conflicts = draftSkuConflicts(
+      next,
+      product.variants.map((variant) => ({
+        id: variant.id,
+        sku: variant.sku,
+      })),
+      new Set(
+        await this.productsRepository.findTakenSkus(
+          [...new Set(next.variants.map((variant) => variant.sku))],
+          product.id,
+        ),
+      ),
+    );
+    if (conflicts.length > 0) {
+      throw new ConflictException('Variant SKU already exists');
     }
 
-    return left === right;
+    const clear = catalogMatchesPublished(next, published);
+    await this.productsRepository.saveCatalogDraft({
+      productId: product.id,
+      expectedVersion: options?.expectedVersion ?? product.version,
+      draft: clear ? null : next,
+      reservedSkus: clear
+        ? []
+        : skusToReserve(
+            next,
+            product.variants.map((variant) => variant.sku),
+          ),
+      livePrices: options?.livePrices ?? [],
+    });
+
+    return clear ? ('cleared' as const) : ('staged' as const);
+  }
+
+  private applyScalarPatch(draft: CatalogDraft, dto: UpdateProductDto) {
+    const isReturnable = dto.isReturnable ?? draft.isReturnable;
+    const returnWindowDays =
+      dto.isReturnable === false
+        ? null
+        : (dto.returnWindowDays ?? draft.returnWindowDays);
+
+    return {
+      ...draft,
+      ...(dto.name !== undefined && { name: dto.name }),
+      ...(dto.description !== undefined && { description: dto.description }),
+      ...(dto.shortDescription !== undefined && {
+        shortDescription: dto.shortDescription,
+      }),
+      ...(dto.categoryId !== undefined && { categoryId: dto.categoryId }),
+      ...(dto.brandId !== undefined && { brandId: dto.brandId }),
+      ...(dto.tags !== undefined && { tags: normalizeProductTags(dto.tags) }),
+      ...(dto.metaTitle !== undefined && { metaTitle: dto.metaTitle }),
+      ...(dto.metaDescription !== undefined && {
+        metaDescription: dto.metaDescription,
+      }),
+      isReturnable,
+      returnWindowDays,
+    };
+  }
+
+  private draftVariantFromCreate(
+    dto: CreateVariantDto,
+    isDefault: boolean,
+  ): CatalogDraftVariant {
+    return {
+      id: randomUUID(),
+      sku: dto.sku,
+      name: dto.name ?? null,
+      price: moneyToDraft(dto.price),
+      sellingPrice: moneyToDraft(dto.sellingPrice),
+      costPrice:
+        dto.costPrice === undefined ? null : moneyToDraft(dto.costPrice),
+      primaryUnitId: dto.primaryUnitId,
+      coverageArea: dto.coverageArea ?? null,
+      baseUnitId: dto.baseUnitId ?? null,
+      weightKg: dto.weightKg ?? null,
+      isDefault,
+      isActive: true,
+      attributes: [],
+      galleryMediaIds: [],
+      inventory: {
+        quantity: 0,
+        lowStockThreshold: 5,
+        allowBackorder: false,
+      },
+    };
+  }
+
+  private assertKnownVariant(product: OwnedProduct, variantId: string) {
+    const inLive = product.variants.some((variant) => variant.id === variantId);
+    const inDraft = product.catalogDraft
+      ? this.readDraft(product.catalogDraft).variants.some(
+          (variant) => variant.id === variantId,
+        )
+      : false;
+    if (!inLive && !inDraft) {
+      throw new NotFoundException('Variant not found');
+    }
+  }
+
+  private requireVariant(
+    draft: CatalogDraft,
+    variantId: string,
+    update: (variant: CatalogDraftVariant) => CatalogDraftVariant,
+  ) {
+    let found = false;
+    const variants = draft.variants.map((variant) => {
+      if (variant.id !== variantId) {
+        return variant;
+      }
+
+      found = true;
+      return update(variant);
+    });
+    if (!found) {
+      throw new NotFoundException('Variant not found');
+    }
+
+    return variants;
+  }
+
+  private async updateActiveVariant(
+    product: OwnedProduct,
+    variantId: string,
+    dto: UpdateVariantDto,
+  ) {
+    this.assertKnownVariant(product, variantId);
+    const live = product.variants.find((variant) => variant.id === variantId);
+    const priceOnly = Boolean(live) && this.isPriceOnlyVariantUpdate(dto);
+
+    if (dto.primaryUnitId !== undefined || dto.baseUnitId !== undefined) {
+      await this.validateUnits(dto.primaryUnitId, dto.baseUnitId);
+    }
+
+    if (priceOnly && live) {
+      const nextPrice = dto.price ?? Number(live.price);
+      const nextSellingPrice = dto.sellingPrice ?? Number(live.sellingPrice);
+      const nextCostPrice =
+        dto.costPrice !== undefined
+          ? dto.costPrice
+          : live.costPrice !== null
+            ? Number(live.costPrice)
+            : undefined;
+      this.validatePriceInvariant(nextPrice, nextSellingPrice, nextCostPrice);
+      await this.productsRepository.updateVariant(variantId, product.id, {
+        ...(dto.price !== undefined && { price: new Prisma.Decimal(dto.price) }),
+        ...(dto.sellingPrice !== undefined && {
+          sellingPrice: new Prisma.Decimal(dto.sellingPrice),
+        }),
+        ...(dto.costPrice !== undefined && {
+          costPrice: new Prisma.Decimal(dto.costPrice),
+        }),
+      });
+      return;
+    }
+
+    const livePrices =
+      live &&
+      (dto.price !== undefined ||
+        dto.sellingPrice !== undefined ||
+        dto.costPrice !== undefined)
+        ? [this.livePriceWrite(live, dto)]
+        : [];
+
+    await this.stageCatalog(
+      product,
+      (draft) => {
+        const current = draft.variants.find(
+          (variant) => variant.id === variantId,
+        );
+        if (!current) {
+          throw new NotFoundException('Variant not found');
+        }
+
+        const nextPrice = dto.price ?? Number(current.price);
+        const nextSellingPrice =
+          dto.sellingPrice ?? Number(current.sellingPrice);
+        const nextCostPrice =
+          dto.costPrice !== undefined
+            ? dto.costPrice
+            : current.costPrice !== null
+              ? Number(current.costPrice)
+              : undefined;
+        this.validatePriceInvariant(nextPrice, nextSellingPrice, nextCostPrice);
+        this.validateCoverageInvariant(
+          (dto.coverageArea !== undefined
+            ? dto.coverageArea
+            : (current.coverageArea ?? undefined)) ?? undefined,
+          dto.baseUnitId !== undefined
+            ? dto.baseUnitId
+            : (current.baseUnitId ?? undefined),
+        );
+
+        if (dto.isDefault === false && current.isDefault) {
+          const defaults = draft.variants.filter(
+            (variant) => variant.isActive && variant.isDefault,
+          );
+          if (defaults.length <= 1) {
+            throw new BadRequestException(
+              'Product must keep one active default variant',
+            );
+          }
+        }
+
+        const clearDefault = dto.isDefault === true;
+        return {
+          ...draft,
+          variants: draft.variants.map((variant) => {
+            if (variant.id !== variantId) {
+              return clearDefault ? { ...variant, isDefault: false } : variant;
+            }
+
+            return {
+              ...variant,
+              ...(dto.sku !== undefined && { sku: dto.sku }),
+              ...(dto.name !== undefined && { name: dto.name ?? null }),
+              ...(!live && dto.price !== undefined && {
+                price: moneyToDraft(dto.price),
+              }),
+              ...(!live && dto.sellingPrice !== undefined && {
+                sellingPrice: moneyToDraft(dto.sellingPrice),
+              }),
+              ...(!live && dto.costPrice !== undefined && {
+                costPrice: moneyToDraft(dto.costPrice),
+              }),
+              ...(dto.primaryUnitId !== undefined && {
+                primaryUnitId: dto.primaryUnitId,
+              }),
+              ...(dto.coverageArea !== undefined && {
+                coverageArea: dto.coverageArea,
+              }),
+              ...(dto.baseUnitId !== undefined && { baseUnitId: dto.baseUnitId }),
+              ...(dto.weightKg !== undefined && { weightKg: dto.weightKg }),
+              ...(dto.isDefault !== undefined && { isDefault: dto.isDefault }),
+            };
+          }),
+        };
+      },
+      { livePrices },
+    );
+  }
+
+  private livePriceWrite(
+    live: OwnedProduct['variants'][number],
+    dto: UpdateVariantDto,
+  ): LivePriceWrite {
+    return {
+      variantId: live.id,
+      price: moneyToDraft(dto.price ?? live.price),
+      sellingPrice: moneyToDraft(dto.sellingPrice ?? live.sellingPrice),
+      costPrice:
+        dto.costPrice !== undefined
+          ? moneyToDraft(dto.costPrice)
+          : live.costPrice === null
+            ? null
+            : moneyToDraft(live.costPrice),
+      inventory: null,
+    };
+  }
+
+  private plannerExisting(product: OwnedProduct) {
+    const liveById = new Map(
+      product.variants.map((variant) => [variant.id, variant]),
+    );
+    const working =
+      product.status === ProductStatus.ACTIVE && product.catalogDraft
+        ? this.readDraft(product.catalogDraft).variants
+        : null;
+    if (!working) {
+      return product.variants.map((variant) => this.liveSnapshot(variant));
+    }
+
+    return working.map((variant) => {
+      const live = liveById.get(variant.id);
+      if (!live) {
+        return {
+          id: variant.id,
+          sku: variant.sku,
+          name: variant.name,
+          price: new Prisma.Decimal(variant.price),
+          sellingPrice: new Prisma.Decimal(variant.sellingPrice),
+          costPrice:
+            variant.costPrice === null
+              ? null
+              : new Prisma.Decimal(variant.costPrice),
+          primaryUnitId: variant.primaryUnitId,
+          coverageArea: variant.coverageArea,
+          baseUnitId: variant.baseUnitId,
+          weightKg: variant.weightKg,
+          isDefault: variant.isDefault,
+          isActive: variant.isActive,
+          attributes: variant.attributes,
+          inventory: variant.inventory,
+        };
+      }
+
+      return {
+        ...this.liveSnapshot(live),
+        sku: variant.sku,
+        name: variant.name,
+        primaryUnitId: variant.primaryUnitId,
+        coverageArea: variant.coverageArea,
+        baseUnitId: variant.baseUnitId,
+        weightKg: variant.weightKg,
+        isDefault: variant.isDefault,
+        isActive: variant.isActive,
+        attributes: variant.attributes,
+      };
+    });
+  }
+
+  private liveSnapshot(variant: OwnedProduct['variants'][number]) {
+    return {
+      id: variant.id,
+      sku: variant.sku,
+      name: variant.name,
+      price: variant.price,
+      sellingPrice: variant.sellingPrice,
+      costPrice: variant.costPrice,
+      primaryUnitId: variant.primaryUnitId,
+      coverageArea: variant.coverageArea,
+      baseUnitId: variant.baseUnitId,
+      weightKg: variant.weightKg,
+      isDefault: variant.isDefault,
+      isActive: variant.isActive,
+      attributes: variant.attributes.map((attribute) => ({
+        attributeId: attribute.attributeId,
+        value: attribute.value,
+      })),
+      inventory: variant.inventory
+        ? {
+            quantity: variant.inventory.quantity,
+            lowStockThreshold: variant.inventory.lowStockThreshold,
+            allowBackorder: variant.inventory.allowBackorder,
+          }
+        : null,
+    };
+  }
+
+  private livePricesFromWrites(
+    liveVariants: OwnedProduct['variants'],
+    writes: PlannedVariantWrite[],
+  ) {
+    const liveById = new Map(liveVariants.map((variant) => [variant.id, variant]));
+    const prices: LivePriceWrite[] = [];
+    for (const write of writes) {
+      if (!write.existingId) {
+        continue;
+      }
+
+      const live = liveById.get(write.existingId);
+      if (!live) {
+        continue;
+      }
+
+      const price = moneyToDraft(write.price);
+      const sellingPrice = moneyToDraft(write.sellingPrice);
+      const costPrice =
+        write.costPrice === null ? null : moneyToDraft(write.costPrice);
+      const liveCost =
+        live.costPrice === null ? null : moneyToDraft(live.costPrice);
+      const priceChanged =
+        price !== moneyToDraft(live.price) ||
+        sellingPrice !== moneyToDraft(live.sellingPrice) ||
+        costPrice !== liveCost;
+      if (!priceChanged && !write.inventory) {
+        continue;
+      }
+
+      prices.push({
+        variantId: live.id,
+        price,
+        sellingPrice,
+        costPrice,
+        inventory: write.inventory,
+      });
+    }
+
+    return prices;
+  }
+
+  private applyVariantWrites(
+    draft: CatalogDraft,
+    writes: PlannedVariantWrite[],
+    idMap: Record<string, string>,
+  ): CatalogDraft {
+    const previous = new Map(draft.variants.map((variant) => [variant.id, variant]));
+    const variants = writes.map((write) => {
+      const earlier = write.existingId
+        ? previous.get(write.existingId)
+        : undefined;
+      const id = write.existingId ?? randomUUID();
+      if (write.clientKey && !write.existingId) {
+        idMap[write.clientKey] = id;
+      }
+
+      const inventory = write.inventory
+        ? {
+            quantity: write.inventory.quantity,
+            lowStockThreshold:
+              write.inventory.lowStockThreshold ??
+              earlier?.inventory?.lowStockThreshold ??
+              5,
+            allowBackorder:
+              write.inventory.allowBackorder ??
+              earlier?.inventory?.allowBackorder ??
+              false,
+          }
+        : (earlier?.inventory ?? {
+            quantity: 0,
+            lowStockThreshold: 5,
+            allowBackorder: false,
+          });
+
+      return {
+        id,
+        sku: write.sku,
+        name: write.name,
+        price: moneyToDraft(write.price),
+        sellingPrice: moneyToDraft(write.sellingPrice),
+        costPrice:
+          write.costPrice === null ? null : moneyToDraft(write.costPrice),
+        primaryUnitId: write.primaryUnitId,
+        coverageArea: write.coverageArea,
+        baseUnitId: write.baseUnitId,
+        weightKg: write.weightKg,
+        isDefault: write.isDefault,
+        isActive: write.isActive,
+        attributes: write.attributes,
+        galleryMediaIds: earlier?.galleryMediaIds ?? [],
+        inventory,
+      };
+    });
+
+    return { ...draft, variants };
+  }
+
+  private async assertOwnedMedia(vendorId: string, mediaIds: string[]) {
+    const owned = await this.mediaService.findOwnedMediaIds(
+      { ownerType: MediaOwnerType.VENDOR, ownerId: vendorId },
+      mediaIds,
+    );
+    if (owned.length !== new Set(mediaIds).size) {
+      throw new NotFoundException('One or more media records were not found');
+    }
+  }
+
+  private appendMediaIds(current: string[], incoming: string[]) {
+    const next = [...current];
+    for (const mediaId of incoming) {
+      if (!next.includes(mediaId)) {
+        next.push(mediaId);
+      }
+    }
+
+    return next;
+  }
+
+  private assertGalleryReorder(current: string[], mediaIds: string[]) {
+    if (new Set(mediaIds).size !== mediaIds.length) {
+      throw new BadRequestException('Duplicate media IDs are not allowed');
+    }
+
+    if (
+      current.length !== mediaIds.length ||
+      mediaIds.some((mediaId) => !current.includes(mediaId))
+    ) {
+      throw new BadRequestException(
+        'Reorder must include every gallery media ID exactly once',
+      );
+    }
+  }
+
+  private withDraftFlag<T extends { catalogDraft?: unknown }>(products: T[]) {
+    return products.map(({ catalogDraft, ...product }) => ({
+      ...product,
+      hasCatalogDraft: catalogDraft != null,
+    }));
   }
 
   private isPriceOnlyVariantUpdate(dto: UpdateVariantDto) {
@@ -1904,18 +2727,15 @@ export class ProductsService {
     return this.toEditorProduct(product);
   }
 
-  private async toEditorProduct<
-    T extends {
-      id: string;
-      variants?: { id: string; isActive: boolean; isDefault: boolean }[];
-    },
-  >(product: T) {
-    const withMedia = await this.withProductMedia(product);
+  private async toEditorProduct(product: OwnedProduct) {
+    const presented = await this.presentCatalog(product);
     return {
-      ...withMedia,
+      ...presented.working,
+      hasCatalogDraft: presented.hasCatalogDraft,
+      published: presented.published,
       submitBlockers: this.buildSubmitBlockers({
-        thumbnail: withMedia.thumbnail,
-        variants: product.variants,
+        thumbnail: presented.working.thumbnail,
+        variants: presented.working.variants,
       }),
     };
   }
@@ -1948,7 +2768,202 @@ export class ProductsService {
       throw new NotFoundException('Product not found');
     }
 
-    return this.withProductMedia(product);
+    const presented = await this.presentCatalog(product);
+    return {
+      ...presented.working,
+      hasCatalogDraft: presented.hasCatalogDraft,
+      published: presented.published,
+    };
+  }
+
+  private async presentCatalog(product: OwnedProduct) {
+    const { catalogDraft, ...rest } = product;
+    const publishedView = await this.withProductMedia(rest);
+    if (!catalogDraft) {
+      return {
+        hasCatalogDraft: false,
+        published: null,
+        working: publishedView,
+      };
+    }
+
+    const draft = this.readDraft(catalogDraft);
+    const working = await this.toWorkingCopy(product, publishedView, draft);
+    return {
+      hasCatalogDraft: true,
+      published: publishedView,
+      working,
+    };
+  }
+
+  private async toWorkingCopy(
+    product: OwnedProduct,
+    publishedView: object,
+    draft: CatalogDraft,
+  ) {
+    const base = publishedView as Omit<OwnedProduct, 'catalogDraft' | 'variants'> & {
+      media: unknown[];
+      thumbnail: unknown;
+    };
+    const liveById = new Map(
+      product.variants.map((variant) => [variant.id, variant]),
+    );
+    const unitIds = [
+      ...new Set(
+        draft.variants.flatMap((variant) =>
+          [variant.primaryUnitId, variant.baseUnitId].filter(
+            (id): id is string => Boolean(id),
+          ),
+        ),
+      ),
+    ];
+    const attributeIds = [
+      ...new Set(
+        draft.variants.flatMap((variant) =>
+          variant.attributes.map((attribute) => attribute.attributeId),
+        ),
+      ),
+    ];
+    const mediaIds = [
+      ...new Set(
+        [
+          draft.thumbnailMediaId,
+          ...draft.galleryMediaIds,
+          ...draft.variants.flatMap((variant) => variant.galleryMediaIds),
+        ].filter((id): id is string => Boolean(id)),
+      ),
+    ];
+    const [units, attributes, category, brand, previews] = await Promise.all([
+      this.productsRepository.findUnitsDetailed(unitIds),
+      this.productsRepository.findAttributeDetails(attributeIds),
+      draft.categoryId === product.categoryId
+        ? Promise.resolve(product.category)
+        : this.productsRepository.findCategorySummary(draft.categoryId),
+      draft.brandId === product.brandId
+        ? Promise.resolve(product.brand)
+        : draft.brandId
+          ? this.productsRepository.findBrandSummary(draft.brandId)
+          : Promise.resolve(null),
+      this.mediaService.previewMediaLinks(
+        mediaIds,
+        MediaEntityType.PRODUCT,
+        product.id,
+        MediaContext.GALLERY,
+      ),
+    ]);
+    const unitById = new Map(units.map((unit) => [unit.id, unit]));
+    const attributeById = new Map(
+      attributes.map((attribute) => [attribute.id, attribute]),
+    );
+    const previewById = new Map(previews.map((link) => [link.mediaId, link]));
+
+    const variants = draft.variants.map((variant) => {
+      const live = liveById.get(variant.id);
+      const media = variant.galleryMediaIds
+        .map((mediaId) => previewById.get(mediaId))
+        .filter((link) => link !== undefined)
+        .map((link, index) => ({
+          ...link,
+          entityType: MediaEntityType.PRODUCT_VARIANT,
+          entityId: variant.id,
+          context: MediaContext.GALLERY,
+          sortOrder: index,
+        }));
+      const attributesForVariant = variant.attributes.map((attribute) => ({
+        id: attribute.attributeId,
+        attributeId: attribute.attributeId,
+        value: attribute.value,
+        attribute: attributeById.get(attribute.attributeId) ?? {
+          id: attribute.attributeId,
+          name: '',
+          unit: null,
+        },
+      }));
+
+      if (live) {
+        return {
+          ...live,
+          sku: variant.sku,
+          name: variant.name,
+          primaryUnitId: variant.primaryUnitId,
+          primaryUnit: unitById.get(variant.primaryUnitId) ?? live.primaryUnit,
+          coverageArea: variant.coverageArea,
+          baseUnitId: variant.baseUnitId,
+          baseUnit: variant.baseUnitId
+            ? (unitById.get(variant.baseUnitId) ?? live.baseUnit)
+            : null,
+          weightKg: variant.weightKg,
+          isDefault: variant.isDefault,
+          isActive: variant.isActive,
+          attributes: attributesForVariant,
+          media,
+        };
+      }
+
+      return {
+        id: variant.id,
+        productId: product.id,
+        sku: variant.sku,
+        name: variant.name,
+        price: new Prisma.Decimal(variant.price),
+        sellingPrice: new Prisma.Decimal(variant.sellingPrice),
+        costPrice:
+          variant.costPrice === null
+            ? null
+            : new Prisma.Decimal(variant.costPrice),
+        primaryUnitId: variant.primaryUnitId,
+        primaryUnit: unitById.get(variant.primaryUnitId) ?? null,
+        coverageArea: variant.coverageArea,
+        baseUnitId: variant.baseUnitId,
+        baseUnit: variant.baseUnitId
+          ? (unitById.get(variant.baseUnitId) ?? null)
+          : null,
+        isDefault: variant.isDefault,
+        isActive: variant.isActive,
+        weightKg: variant.weightKg,
+        createdAt: product.updatedAt,
+        updatedAt: product.updatedAt,
+        attributes: attributesForVariant,
+        inventory: variant.inventory
+          ? { ...variant.inventory, updatedAt: product.updatedAt }
+          : null,
+        media,
+      };
+    });
+
+    const thumbnail = draft.thumbnailMediaId
+      ? (previewById.get(draft.thumbnailMediaId) ?? null)
+      : null;
+
+    return {
+      ...base,
+      name: draft.name,
+      description: draft.description,
+      shortDescription: draft.shortDescription,
+      categoryId: draft.categoryId,
+      category: category ?? base.category,
+      brandId: draft.brandId,
+      brand,
+      tags: draft.tags,
+      metaTitle: draft.metaTitle,
+      metaDescription: draft.metaDescription,
+      isReturnable: draft.isReturnable,
+      returnWindowDays: draft.returnWindowDays,
+      thumbnail: thumbnail
+        ? {
+            ...thumbnail,
+            entityType: MediaEntityType.PRODUCT,
+            entityId: product.id,
+            context: MediaContext.THUMBNAIL,
+            isPrimary: true,
+            sortOrder: 0,
+          }
+        : null,
+      media: draft.galleryMediaIds
+        .map((mediaId) => previewById.get(mediaId))
+        .filter((link) => link !== undefined),
+      variants,
+    };
   }
 
   private async withProductsMedia<T extends { id: string }>(products: T[]) {

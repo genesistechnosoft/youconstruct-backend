@@ -187,6 +187,20 @@ export class VendorProductsController {
     );
   }
 
+  @Delete(':id/catalog-draft')
+  @HttpCode(200)
+  @Permissions(PERMISSIONS.VENDOR.PRODUCTS_EDIT)
+  @ApiOperation({ summary: 'Discard a live product catalog draft' })
+  discardCatalogDraft(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.productsService.discardCatalogDraft(
+      requireVendorEntityId(user),
+      id,
+    );
+  }
+
   @Post(':id/thumbnail/upload')
   @HttpCode(200)
   @Permissions(

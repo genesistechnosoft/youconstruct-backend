@@ -17,7 +17,7 @@ export class ProductFiltersDto {
     return value;
   })
   @IsBoolean()
-  pendingContentReview?: boolean;
+  hasCatalogDraft?: boolean;
 
   @ApiPropertyOptional({ example: 1, default: 1 })
   @IsOptional()
