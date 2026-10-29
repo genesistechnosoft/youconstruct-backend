@@ -5,6 +5,18 @@ export type CatalogDraftAttribute = {
   value: string;
 };
 
+export type CatalogDraftSpec = {
+  attributeId: string;
+  value: string;
+  position: number;
+};
+
+export type CatalogDraftOption = {
+  attributeId: string;
+  position: number;
+  values: string[];
+};
+
 export type CatalogDraftInventory = {
   quantity: number;
   lowStockThreshold: number;
@@ -42,6 +54,8 @@ export type CatalogDraft = {
   returnWindowDays: number | null;
   thumbnailMediaId: string | null;
   galleryMediaIds: string[];
+  specs: CatalogDraftSpec[];
+  options: CatalogDraftOption[];
   variants: CatalogDraftVariant[];
 };
 
@@ -58,6 +72,8 @@ export type PublishedCatalogInput = {
   returnWindowDays: number | null;
   thumbnailMediaId: string | null;
   galleryMediaIds: string[];
+  specs: CatalogDraftSpec[];
+  options: CatalogDraftOption[];
   variants: Array<{
     id: string;
     sku: string;
@@ -100,6 +116,11 @@ export function seedCatalogDraft(source: PublishedCatalogInput): CatalogDraft {
     returnWindowDays: source.returnWindowDays,
     thumbnailMediaId: source.thumbnailMediaId,
     galleryMediaIds: [...source.galleryMediaIds],
+    specs: source.specs.map((spec) => ({ ...spec })),
+    options: source.options.map((option) => ({
+      ...option,
+      values: [...option.values],
+    })),
     variants: source.variants.map((variant) => ({
       id: variant.id,
       sku: variant.sku,
@@ -151,6 +172,10 @@ export function catalogMatchesPublished(
   }
 
   if (!sameIds(draft.galleryMediaIds, published.galleryMediaIds)) {
+    return false;
+  }
+
+  if (!sameSpecs(draft.specs, published.specs) || !sameOptions(draft.options, published.options)) {
     return false;
   }
 
@@ -265,6 +290,39 @@ function sameTags(left: string[], right: string[]) {
   return sortedLeft.every((tag, index) => tag === sortedRight[index]);
 }
 
+function sameSpecs(left: CatalogDraftSpec[], right: CatalogDraftSpec[]) {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  const sortedLeft = [...left].sort((a, b) => a.position - b.position);
+  const sortedRight = [...right].sort((a, b) => a.position - b.position);
+  return sortedLeft.every(
+    (spec, index) =>
+      spec.attributeId === sortedRight[index]?.attributeId &&
+      spec.value === sortedRight[index]?.value &&
+      spec.position === sortedRight[index]?.position,
+  );
+}
+
+function sameOptions(left: CatalogDraftOption[], right: CatalogDraftOption[]) {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  const sortedLeft = [...left].sort((a, b) => a.position - b.position);
+  const sortedRight = [...right].sort((a, b) => a.position - b.position);
+  return sortedLeft.every((option, index) => {
+    const other = sortedRight[index];
+    return (
+      option.attributeId === other?.attributeId &&
+      option.position === other?.position &&
+      option.values.length === other.values.length &&
+      option.values.every((value, valueIndex) => value === other.values[valueIndex])
+    );
+  });
+}
+
 function sameAttributes(
   left: CatalogDraftAttribute[],
   right: CatalogDraftAttribute[],
@@ -315,8 +373,31 @@ function isCatalogDraft(value: unknown): value is CatalogDraft {
       typeof value.thumbnailMediaId === 'string') &&
     Array.isArray(value.galleryMediaIds) &&
     value.galleryMediaIds.every((id) => typeof id === 'string') &&
+    Array.isArray(value.specs) &&
+    value.specs.every(isSpec) &&
+    Array.isArray(value.options) &&
+    value.options.every(isOption) &&
     Array.isArray(value.variants) &&
     value.variants.every(isCatalogDraftVariant)
+  );
+}
+
+function isSpec(value: unknown): value is CatalogDraftSpec {
+  return (
+    isRecord(value) &&
+    typeof value.attributeId === 'string' &&
+    typeof value.value === 'string' &&
+    typeof value.position === 'number'
+  );
+}
+
+function isOption(value: unknown): value is CatalogDraftOption {
+  return (
+    isRecord(value) &&
+    typeof value.attributeId === 'string' &&
+    typeof value.position === 'number' &&
+    Array.isArray(value.values) &&
+    value.values.every((entry) => typeof entry === 'string')
   );
 }
 

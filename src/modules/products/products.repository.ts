@@ -150,6 +150,30 @@ const ATTRIBUTE_DEFINITION_SELECT = {
   unit: true,
 } as const;
 
+const PRODUCT_SPEC_SELECT = {
+  attributeId: true,
+  value: true,
+  position: true,
+  attribute: {
+    select: ATTRIBUTE_DEFINITION_SELECT,
+  },
+} as const;
+
+const PRODUCT_OPTION_SELECT = {
+  attributeId: true,
+  position: true,
+  attribute: {
+    select: ATTRIBUTE_DEFINITION_SELECT,
+  },
+  values: {
+    orderBy: { position: 'asc' as const },
+    select: {
+      value: true,
+      position: true,
+    },
+  },
+} as const;
+
 const VARIANT_ATTRIBUTE_SELECT = {
   id: true,
   attributeId: true,
@@ -290,6 +314,14 @@ const publicProductDetailSelect = {
   vendor: {
     select: PUBLIC_VENDOR_CARD_SELECT,
   },
+  specs: {
+    orderBy: { position: 'asc' as const },
+    select: PRODUCT_SPEC_SELECT,
+  },
+  options: {
+    orderBy: { position: 'asc' as const },
+    select: PRODUCT_OPTION_SELECT,
+  },
   variants: {
     where: { isActive: true, deletedAt: null },
     orderBy: variantOrderBy,
@@ -307,6 +339,14 @@ const productDetailSelect = {
   },
   vendor: {
     select: VENDOR_SUMMARY_SELECT,
+  },
+  specs: {
+    orderBy: { position: 'asc' as const },
+    select: PRODUCT_SPEC_SELECT,
+  },
+  options: {
+    orderBy: { position: 'asc' as const },
+    select: PRODUCT_OPTION_SELECT,
   },
   variants: {
     where: { deletedAt: null },
@@ -353,6 +393,11 @@ export interface VariantAttributeInput {
   attributeId: string;
   value: string;
 }
+
+export type ProductFactWrite = {
+  specs: { attributeId: string; value: string; position: number }[];
+  options: { attributeId: string; position: number; values: string[] }[];
+};
 
 @Injectable()
 export class ProductsRepository {
@@ -1085,6 +1130,7 @@ export class ProductsRepository {
     expectedVersion: number;
     writes: PlannedVariantWrite[];
     removals: PlannedRemoval[];
+    facts: ProductFactWrite;
   }) {
     try {
       return await this.prisma.$transaction(
@@ -1202,6 +1248,8 @@ export class ProductsRepository {
               select: { id: true },
             });
           }
+
+          await replaceProductFacts(tx, input.productId, input.facts);
 
           return idMap;
         },
@@ -1544,6 +1592,10 @@ export class ProductsRepository {
             input.draft.galleryMediaIds,
           );
 
+          await replaceProductFacts(tx, input.productId, {
+            specs: input.draft.specs,
+            options: input.draft.options,
+          });
           await tx.catalogDraftSku.deleteMany({
             where: { productId: input.productId },
           });
@@ -1738,6 +1790,43 @@ function variantWriteData(
     isDefault: false,
     isActive: write.isActive,
   };
+}
+
+async function replaceProductFacts(
+  tx: Prisma.TransactionClient,
+  productId: string,
+  facts: ProductFactWrite,
+) {
+  await tx.productSpec.deleteMany({ where: { productId } });
+  await tx.productOption.deleteMany({ where: { productId } });
+
+  if (facts.specs.length > 0) {
+    await tx.productSpec.createMany({
+      data: facts.specs.map((spec) => ({
+        productId,
+        attributeId: spec.attributeId,
+        value: spec.value,
+        position: spec.position,
+      })),
+    });
+  }
+
+  for (const option of facts.options) {
+    await tx.productOption.create({
+      data: {
+        productId,
+        attributeId: option.attributeId,
+        position: option.position,
+        values: {
+          create: option.values.map((value, position) => ({
+            value,
+            position,
+          })),
+        },
+      },
+      select: { id: true },
+    });
+  }
 }
 
 async function replaceVariantAttributes(

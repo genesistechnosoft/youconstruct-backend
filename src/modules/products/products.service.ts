@@ -58,7 +58,7 @@ import { ReplaceProductMediaDto } from './dto/replace-product-media.dto';
 import { ReplaceVariantsDto } from './dto/replace-variants.dto';
 import { normalizeProductTags } from './product-tags.util';
 import { ProductsRepository } from './products.repository';
-import type { LivePriceWrite } from './products.repository';
+import type { LivePriceWrite, ProductFactWrite } from './products.repository';
 import { CategoriesService } from '../categories/categories.service';
 
 type OwnedProduct = NonNullable<
@@ -595,16 +595,17 @@ export class ProductsService {
   ) {
     const product = await this.verifyProductOwnership(userId, productId);
     this.ensureVendorCanMutateProduct(product.status);
+    const attributes = this.canonicalOptionAttributes(product, dto.attributes);
     if (product.status === ProductStatus.ACTIVE) {
-      if (dto.attributes.length > 0) {
-        await this.validateAttributePayload(dto.attributes);
+      if (attributes.length > 0) {
+        await this.validateAttributePayload(attributes);
       }
       this.assertKnownVariant(product, variantId);
       await this.stageCatalog(product, (draft) => ({
         ...draft,
         variants: this.requireVariant(draft, variantId, (variant) => ({
           ...variant,
-          attributes: dto.attributes,
+          attributes,
         })),
       }));
 
@@ -615,14 +616,11 @@ export class ProductsService {
     }
 
     await this.verifyVariantOwnership(userId, productId, variantId);
-    if (dto.attributes.length > 0) {
-      await this.validateAttributePayload(dto.attributes);
+    if (attributes.length > 0) {
+      await this.validateAttributePayload(attributes);
     }
 
-    await this.productsRepository.setVariantAttributes(
-      variantId,
-      dto.attributes,
-    );
+    await this.productsRepository.setVariantAttributes(variantId, attributes);
 
     return {
       message: 'Variant attributes updated successfully',
@@ -638,6 +636,7 @@ export class ProductsService {
   ) {
     const product = await this.verifyProductOwnership(userId, productId);
     this.ensureVendorCanMutateProduct(product.status);
+    this.assertOptionAttributes(product, [{ attributeId }]);
     if (product.status === ProductStatus.ACTIVE) {
       this.assertKnownVariant(product, variantId);
       await this.stageCatalog(product, (draft) => ({
@@ -1155,7 +1154,14 @@ export class ProductsService {
     this.ensureVendorCanMutateProduct(product.status);
     this.assertCurrentVersion(product.version, dto.version);
 
-    const missingRefs = await this.missingVariantReferences(dto);
+    const facts = this.normalizeProductFacts(dto);
+    const variants = this.normalizeVariantOptions(dto.variants, facts);
+    const missingRefs = await this.missingVariantReferences({
+      ...dto,
+      variants,
+      specs: facts.specs,
+      options: facts.options,
+    });
     if (missingRefs.length > 0) {
       throw new NotFoundException({
         message: 'One or more records were not found',
@@ -1168,7 +1174,7 @@ export class ProductsService {
     const liveIds = product.variants.map((variant) => variant.id);
     const [conflictingSkus, variantIdsWithOrders] = await Promise.all([
       this.productsRepository.findConflictingSkus(
-        dto.variants.map((variant) => variant.sku),
+        variants.map((variant) => variant.sku),
         existing.map((variant) => variant.id),
         product.id,
       ),
@@ -1177,7 +1183,7 @@ export class ProductsService {
 
     const plan = planVariantReplace({
       status: product.status,
-      incoming: dto.variants,
+      incoming: variants,
       existing,
       variantIdsWithOrders,
       conflictingSkus,
@@ -1214,10 +1220,14 @@ export class ProductsService {
     if (product.status === ProductStatus.ACTIVE) {
       const idMap: Record<string, string> = {};
       const livePrices = this.livePricesFromWrites(product.variants, plan.writes);
-      if (plan.review.pendingReview.length > 0) {
+      if (plan.review.pendingReview.length > 0 || this.factsDiffer(product, facts)) {
         await this.stageCatalog(
           product,
-          (draft) => this.applyVariantWrites(draft, plan.writes, idMap),
+          (draft) => ({
+            ...this.applyVariantWrites(draft, plan.writes, idMap),
+            specs: facts.specs,
+            options: facts.options,
+          }),
           { expectedVersion: dto.version, livePrices },
         );
       } else if (livePrices.length > 0) {
@@ -1247,6 +1257,7 @@ export class ProductsService {
       expectedVersion: dto.version,
       writes: plan.writes,
       removals: plan.removals,
+      facts,
     });
 
     return {
@@ -1971,11 +1982,13 @@ export class ProductsService {
       ),
     ];
     const attributeIds = [
-      ...new Set(
-        dto.variants.flatMap((variant) =>
+      ...new Set([
+        ...dto.specs.map((spec) => spec.attributeId),
+        ...dto.options.map((option) => option.attributeId),
+        ...dto.variants.flatMap((variant) =>
           variant.attributes.map((attribute) => attribute.attributeId),
         ),
-      ),
+      ]),
     ];
     const units = await this.productsRepository.findUnitsByIds(unitIds);
     const attributeRows =
@@ -2020,6 +2033,25 @@ export class ProductsService {
           });
         }
       });
+    });
+
+    dto.specs.forEach((spec, index) => {
+      if (!attributeSet.has(spec.attributeId)) {
+        details.push({
+          path: `specs[${index}].attributeId`,
+          code: 'ATTRIBUTE_NOT_FOUND',
+          message: 'Attribute not found',
+        });
+      }
+    });
+    dto.options.forEach((option, index) => {
+      if (!attributeSet.has(option.attributeId)) {
+        details.push({
+          path: `options[${index}].attributeId`,
+          code: 'ATTRIBUTE_NOT_FOUND',
+          message: 'Attribute not found',
+        });
+      }
     });
 
     return details;
@@ -2091,6 +2123,16 @@ export class ProductsService {
       returnWindowDays: product.returnWindowDays,
       thumbnailMediaId: thumbnail?.mediaId ?? null,
       galleryMediaIds: gallery.map((link) => link.mediaId),
+      specs: product.specs.map((spec) => ({
+        attributeId: spec.attributeId,
+        value: spec.value,
+        position: spec.position,
+      })),
+      options: product.options.map((option) => ({
+        attributeId: option.attributeId,
+        position: option.position,
+        values: option.values.map((value) => value.value),
+      })),
       variants: product.variants.map((variant) => ({
         id: variant.id,
         sku: variant.sku,
@@ -2693,6 +2735,164 @@ export class ProductsService {
     }
   }
 
+  private normalizeProductFacts(dto: ReplaceVariantsDto): ProductFactWrite {
+    const specIds = new Set<string>();
+    const optionIds = new Set<string>();
+    const specs = dto.specs.map((spec) => {
+      const value = spec.value.trim();
+      if (!value) {
+        throw new BadRequestException('Product spec value is empty');
+      }
+      if (specIds.has(spec.attributeId)) {
+        throw new BadRequestException('Duplicate spec attributes are not allowed');
+      }
+      specIds.add(spec.attributeId);
+      return {
+        attributeId: spec.attributeId,
+        value,
+        position: spec.position,
+      };
+    });
+
+    const options = dto.options.map((option) => {
+      if (optionIds.has(option.attributeId)) {
+        throw new BadRequestException('Duplicate option attributes are not allowed');
+      }
+      if (specIds.has(option.attributeId)) {
+        throw new BadRequestException(
+          'An attribute cannot be both a spec and an option',
+        );
+      }
+      optionIds.add(option.attributeId);
+      const seen = new Set<string>();
+      const values: string[] = [];
+      for (const raw of option.values) {
+        const value = raw.trim();
+        if (!value) {
+          throw new BadRequestException('Option value is empty');
+        }
+        const key = value.toLowerCase();
+        if (seen.has(key)) {
+          throw new BadRequestException('Duplicate option values are not allowed');
+        }
+        seen.add(key);
+        values.push(value);
+      }
+      return {
+        attributeId: option.attributeId,
+        position: option.position,
+        values,
+      };
+    });
+
+    return { specs, options };
+  }
+
+  private normalizeVariantOptions(
+    variants: ReplaceVariantsDto['variants'],
+    facts: ProductFactWrite,
+  ) {
+    const choices = new Map(
+      facts.options.map((option) => [option.attributeId, option.values]),
+    );
+    return variants.map((variant, index) => {
+      const seen = new Set<string>();
+      const attributes = variant.attributes.map((attribute) => {
+        const allowed = choices.get(attribute.attributeId);
+        if (!allowed) {
+          throw new BadRequestException(
+            `variants[${index}].attributes must be options on this product`,
+          );
+        }
+        if (seen.has(attribute.attributeId)) {
+          throw new BadRequestException('Duplicate attribute IDs are not allowed');
+        }
+        seen.add(attribute.attributeId);
+        const match = allowed.find(
+          (value) => value.toLowerCase() === attribute.value.trim().toLowerCase(),
+        );
+        if (!match) {
+          throw new BadRequestException(
+            `variants[${index}].attributes value is not one of the option choices`,
+          );
+        }
+        return { ...attribute, value: match };
+      });
+      return { ...variant, attributes };
+    });
+  }
+
+  private factsDiffer(product: OwnedProduct, facts: ProductFactWrite) {
+    const specs = product.specs.map((spec) => ({
+      attributeId: spec.attributeId,
+      value: spec.value,
+      position: spec.position,
+    }));
+    const options = product.options.map((option) => ({
+      attributeId: option.attributeId,
+      position: option.position,
+      values: option.values.map((value) => value.value),
+    }));
+    return (
+      JSON.stringify(specs) !== JSON.stringify(facts.specs) ||
+      JSON.stringify(options) !== JSON.stringify(facts.options)
+    );
+  }
+
+  private optionChoices(product: OwnedProduct) {
+    if (product.catalogDraft) {
+      return new Map(
+        this.readDraft(product.catalogDraft).options.map((option) => [
+          option.attributeId,
+          option.values,
+        ]),
+      );
+    }
+
+    return new Map(
+      product.options.map((option) => [
+        option.attributeId,
+        option.values.map((value) => value.value),
+      ]),
+    );
+  }
+
+  private assertOptionAttributes(
+    product: OwnedProduct,
+    attributes: { attributeId: string }[],
+  ) {
+    const choices = this.optionChoices(product);
+    if (attributes.some((attribute) => !choices.has(attribute.attributeId))) {
+      throw new BadRequestException(
+        'Attribute is not an option on this product',
+      );
+    }
+  }
+
+  private canonicalOptionAttributes(
+    product: OwnedProduct,
+    attributes: { attributeId: string; value: string }[],
+  ) {
+    const choices = this.optionChoices(product);
+    return attributes.map((attribute) => {
+      const allowed = choices.get(attribute.attributeId);
+      if (!allowed) {
+        throw new BadRequestException(
+          'Attribute is not an option on this product',
+        );
+      }
+      const match = allowed.find(
+        (value) => value.toLowerCase() === attribute.value.trim().toLowerCase(),
+      );
+      if (!match) {
+        throw new BadRequestException(
+          'Attribute value is not one of the option choices',
+        );
+      }
+      return { ...attribute, value: match };
+    });
+  }
+
   private async validateAttributePayload(
     attributes: { attributeId: string; value: string }[],
   ) {
@@ -2822,7 +3022,7 @@ export class ProductsService {
 
   private async presentCatalog(product: OwnedProduct) {
     const { catalogDraft, ...rest } = product;
-    const publishedView = await this.withProductMedia(rest);
+    const publishedView = this.shapeFacts(await this.withProductMedia(rest));
     if (!catalogDraft) {
       return {
         hasCatalogDraft: false,
@@ -2862,11 +3062,13 @@ export class ProductsService {
       ),
     ];
     const attributeIds = [
-      ...new Set(
-        draft.variants.flatMap((variant) =>
+      ...new Set([
+        ...draft.specs.map((spec) => spec.attributeId),
+        ...draft.options.map((option) => option.attributeId),
+        ...draft.variants.flatMap((variant) =>
           variant.attributes.map((attribute) => attribute.attributeId),
         ),
-      ),
+      ]),
     ];
     const mediaIds = [
       ...new Set(
@@ -2993,6 +3195,20 @@ export class ProductsService {
       metaDescription: draft.metaDescription,
       isReturnable: draft.isReturnable,
       returnWindowDays: draft.returnWindowDays,
+      specs: draft.specs.map((spec) => ({
+        attributeId: spec.attributeId,
+        name: attributeById.get(spec.attributeId)?.name ?? '',
+        unit: attributeById.get(spec.attributeId)?.unit ?? null,
+        value: spec.value,
+        position: spec.position,
+      })),
+      options: draft.options.map((option) => ({
+        attributeId: option.attributeId,
+        name: attributeById.get(option.attributeId)?.name ?? '',
+        unit: attributeById.get(option.attributeId)?.unit ?? null,
+        position: option.position,
+        values: option.values,
+      })),
       thumbnail: thumbnail
         ? {
             ...thumbnail,
@@ -3095,7 +3311,7 @@ export class ProductsService {
             withMedia.vendor as Parameters<ProductsService['toSellerCard']>[0],
           )
         : undefined;
-    return {
+    return this.shapeFacts({
       ...withMedia,
       ...(seller !== undefined ? { vendor: seller } : {}),
       variants: withMedia.variants.map(({ inventory, ...rest }) => {
@@ -3107,6 +3323,46 @@ export class ProductsService {
           stockQuantity: quantity <= 0 && !allowBackorder ? 0 : quantity,
         };
       }),
+    });
+  }
+
+  private shapeFacts<T extends object>(product: T) {
+    const record = product as T & {
+      specs?: Array<{
+        attributeId: string;
+        value: string;
+        position: number;
+        name?: string;
+        unit?: string | null;
+        attribute?: { name: string; unit: string | null } | null;
+      }>;
+      options?: Array<{
+        attributeId: string;
+        position: number;
+        name?: string;
+        unit?: string | null;
+        attribute?: { name: string; unit: string | null } | null;
+        values: Array<{ value: string } | string>;
+      }>;
+    };
+    return {
+      ...record,
+      specs: (record.specs ?? []).map((spec) => ({
+        attributeId: spec.attributeId,
+        name: spec.name ?? spec.attribute?.name ?? '',
+        unit: spec.unit ?? spec.attribute?.unit ?? null,
+        value: spec.value,
+        position: spec.position,
+      })),
+      options: (record.options ?? []).map((option) => ({
+        attributeId: option.attributeId,
+        name: option.name ?? option.attribute?.name ?? '',
+        unit: option.unit ?? option.attribute?.unit ?? null,
+        position: option.position,
+        values: option.values.map((value) =>
+          typeof value === 'string' ? value : value.value,
+        ),
+      })),
     };
   }
 

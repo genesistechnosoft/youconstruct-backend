@@ -120,11 +120,58 @@ export class BulkVariantDto {
   inventory?: BulkVariantInventoryDto;
 }
 
+export class ProductSpecDto {
+  @ApiProperty({ example: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890' })
+  @IsUUID()
+  attributeId!: string;
+
+  @ApiProperty({ example: 'OPC 53' })
+  @IsString()
+  @IsNotEmpty()
+  value!: string;
+
+  @ApiProperty({ example: 0 })
+  @IsInt()
+  @Min(0)
+  position!: number;
+}
+
+export class ProductOptionDto {
+  @ApiProperty({ example: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890' })
+  @IsUUID()
+  attributeId!: string;
+
+  @ApiProperty({ example: 0 })
+  @IsInt()
+  @Min(0)
+  position!: number;
+
+  @ApiProperty({ example: ['600x600', '800x800'], type: [String] })
+  @IsArray()
+  @ArrayMaxSize(30)
+  @IsString({ each: true })
+  values!: string[];
+}
+
 export class ReplaceVariantsDto {
   @ApiProperty({ example: 12 })
   @IsInt()
   @Min(0)
   version!: number;
+
+  @ApiProperty({ type: [ProductSpecDto] })
+  @IsArray()
+  @ArrayMaxSize(30)
+  @ValidateNested({ each: true })
+  @Type(() => ProductSpecDto)
+  specs!: ProductSpecDto[];
+
+  @ApiProperty({ type: [ProductOptionDto] })
+  @IsArray()
+  @ArrayMaxSize(3)
+  @ValidateNested({ each: true })
+  @Type(() => ProductOptionDto)
+  options!: ProductOptionDto[];
 
   @ApiProperty({ type: [BulkVariantDto] })
   @IsArray()

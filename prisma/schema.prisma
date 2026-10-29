@@ -1137,6 +1137,8 @@ model Product {
   variants           ProductVariant[]
   catalogDraftSkus   CatalogDraftSku[]
   slugRedirects      ProductSlugRedirect[]
+  specs              ProductSpec[]
+  options            ProductOption[]
   shippingOverride   ProductShippingOverride?
   productSuggestions ProductSuggestion[]      @relation("ProductSuggestions")
   wishlistItems      WishlistItem[]
@@ -1147,6 +1149,48 @@ model Product {
   @@index([vendorId, deletedAt])
   @@index([createdAt])
   @@map("products")
+}
+
+model ProductSpec {
+  id          String @id @default(uuid())
+  productId   String
+  attributeId String
+  value       String
+  position    Int
+
+  product   Product             @relation(fields: [productId], references: [id], onDelete: Cascade)
+  attribute AttributeDefinition @relation(fields: [attributeId], references: [id])
+
+  @@unique([productId, attributeId])
+  @@index([attributeId])
+  @@map("product_specs")
+}
+
+model ProductOption {
+  id          String @id @default(uuid())
+  productId   String
+  attributeId String
+  position    Int
+
+  product   Product              @relation(fields: [productId], references: [id], onDelete: Cascade)
+  attribute AttributeDefinition  @relation(fields: [attributeId], references: [id])
+  values    ProductOptionValue[]
+
+  @@unique([productId, attributeId])
+  @@index([attributeId])
+  @@map("product_options")
+}
+
+model ProductOptionValue {
+  id       String @id @default(uuid())
+  optionId String
+  value    String
+  position Int
+
+  option ProductOption @relation(fields: [optionId], references: [id], onDelete: Cascade)
+
+  @@index([optionId])
+  @@map("product_option_values")
 }
 
 model ProductSlugRedirect {
@@ -1177,6 +1221,8 @@ model AttributeDefinition {
   createdAt DateTime @default(now())
 
   variantAttributes VariantAttribute[]
+  productSpecs      ProductSpec[]
+  productOptions    ProductOption[]
 
   @@unique([name])
   @@map("attribute_definitions")
