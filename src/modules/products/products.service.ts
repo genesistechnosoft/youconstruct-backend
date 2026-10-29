@@ -122,10 +122,7 @@ export class ProductsService {
     );
 
     const slug = generateSlug(dto.name);
-    const existingSlug = await this.productsRepository.findBySlug(slug);
-    if (existingSlug) {
-      throw new ConflictException('Product slug already exists');
-    }
+    await this.assertSlugAvailable(slug);
 
     const created = await this.productsRepository.create({
       vendorId,
@@ -185,16 +182,18 @@ export class ProductsService {
       };
     }
 
+    const slugFollowsName =
+      existing.status === ProductStatus.DRAFT ||
+      existing.status === ProductStatus.PENDING_APPROVAL ||
+      existing.status === ProductStatus.REJECTED;
     let nextSlug: string | undefined;
-    if (dto.name !== undefined && dto.name !== existing.name) {
+    if (
+      slugFollowsName &&
+      dto.name !== undefined &&
+      dto.name !== existing.name
+    ) {
       nextSlug = generateSlug(dto.name);
-      const existingSlug = await this.productsRepository.findBySlug(
-        nextSlug,
-        productId,
-      );
-      if (existingSlug) {
-        throw new ConflictException('Product slug already exists');
-      }
+      await this.assertSlugAvailable(nextSlug, productId);
     }
 
     await this.productsRepository.update(productId, {
@@ -1547,10 +1546,13 @@ export class ProductsService {
   async getProductBySlug(slug: string) {
     const visibleCategoryIds =
       await this.categoriesService.getVisibleCategoryIds();
-    const product = await this.productsRepository.findPublicBySlug(
+    const direct = await this.productsRepository.findPublicBySlug(
       slug,
       visibleCategoryIds,
     );
+    const product =
+      direct ??
+      (await this.publicProductFromRedirect(slug, visibleCategoryIds));
     if (!product) {
       throw new NotFoundException('Product not found');
     }
@@ -1559,6 +1561,21 @@ export class ProductsService {
       message: 'Product fetched successfully',
       data: await this.toPublicProductDetail(product),
     };
+  }
+
+  private async publicProductFromRedirect(
+    slug: string,
+    visibleCategoryIds: string[],
+  ) {
+    const redirect = await this.productsRepository.findSlugRedirect(slug);
+    if (!redirect) {
+      return null;
+    }
+
+    return this.productsRepository.findPublicById(
+      redirect.productId,
+      visibleCategoryIds,
+    );
   }
 
   async getAllProducts(filters: AdminProductFiltersDto) {
@@ -1706,18 +1723,9 @@ export class ProductsService {
       throw new BadRequestException('Product must have a thumbnail image');
     }
 
-    let slug = existing.slug;
-    if (draft.name !== existing.name) {
-      slug = generateSlug(draft.name);
-      const taken = await this.productsRepository.findBySlug(slug, existing.id);
-      if (taken) {
-        throw new ConflictException('Product slug already exists');
-      }
-    }
-
     await this.productsRepository.applyCatalogDraft({
       productId: id,
-      slug,
+      slug: existing.slug,
       draft,
       liveVariantIds: existing.variants.map((variant) => variant.id),
       deactivate: existing.variants
@@ -1777,6 +1785,42 @@ export class ProductsService {
       message: 'Product content rejected successfully',
       data: await this.toAdminProductResponse(id),
     };
+  }
+
+  async changeProductSlug(id: string, rawSlug: string) {
+    const slug = generateSlug(rawSlug);
+    if (!slug) {
+      throw new BadRequestException('Product slug is empty');
+    }
+
+    const existing = await this.productsRepository.findById(id);
+    if (!existing) {
+      throw new NotFoundException('Product not found');
+    }
+
+    if (slug !== existing.slug) {
+      await this.productsRepository.changeSlug(id, existing.slug, slug);
+    }
+
+    return {
+      message: 'Product slug updated successfully',
+      data: await this.toAdminProductResponse(id),
+    };
+  }
+
+  private async assertSlugAvailable(slug: string, excludeProductId?: string) {
+    const taken = await this.productsRepository.findBySlug(
+      slug,
+      excludeProductId,
+    );
+    if (taken) {
+      throw new ConflictException('Product slug already exists');
+    }
+
+    const redirect = await this.productsRepository.findSlugRedirect(slug);
+    if (redirect && redirect.productId !== excludeProductId) {
+      throw new ConflictException('Product slug already exists');
+    }
   }
 
   private async getVendorId(vendorProfileId: string) {

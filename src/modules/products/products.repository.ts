@@ -587,6 +587,13 @@ export class ProductsRepository {
     });
   }
 
+  findSlugRedirect(slug: string) {
+    return this.prisma.productSlugRedirect.findUnique({
+      where: { slug },
+      select: { productId: true },
+    });
+  }
+
   findCategorySummary(id: string) {
     return this.prisma.category.findFirst({
       where: { id, deletedAt: null },
@@ -729,6 +736,7 @@ export class ProductsRepository {
           select: PRODUCT_REVIEW_SELECT,
         });
         await tx.catalogDraftSku.deleteMany({ where: { productId: id } });
+        await tx.productSlugRedirect.deleteMany({ where: { productId: id } });
 
         const variants = await tx.productVariant.findMany({
           where: { productId: id, deletedAt: null },
@@ -1068,9 +1076,7 @@ export class ProductsRepository {
         select: { sku: true },
       }),
     ]);
-    const taken = new Set(
-      [...rows, ...reserved].map((row) => row.sku),
-    );
+    const taken = new Set([...rows, ...reserved].map((row) => row.sku));
     return [...new Set(skus.filter((sku) => taken.has(sku)))];
   }
 
@@ -1569,6 +1575,46 @@ export class ProductsRepository {
     }
   }
 
+  async changeSlug(productId: string, currentSlug: string, nextSlug: string) {
+    try {
+      await this.prisma.$transaction(async (tx) => {
+        const takenProduct = await tx.product.findFirst({
+          where: {
+            slug: nextSlug,
+            deletedAt: null,
+            NOT: { id: productId },
+          },
+          select: { id: true },
+        });
+        if (takenProduct) {
+          throw new ConflictException('Product slug already exists');
+        }
+
+        const redirect = await tx.productSlugRedirect.findUnique({
+          where: { slug: nextSlug },
+          select: { productId: true },
+        });
+        if (redirect && redirect.productId !== productId) {
+          throw new ConflictException('Product slug already exists');
+        }
+        if (redirect) {
+          await tx.productSlugRedirect.delete({ where: { slug: nextSlug } });
+        }
+
+        await tx.productSlugRedirect.create({
+          data: { slug: currentSlug, productId },
+        });
+        await tx.product.update({
+          where: { id: productId },
+          data: { slug: nextSlug, version: { increment: 1 } },
+          select: { id: true },
+        });
+      });
+    } catch (error) {
+      this.throwKnownConflict(error);
+    }
+  }
+
   private bumpVersion(
     tx: Prisma.TransactionClient | PrismaService,
     productId: string,
@@ -1589,6 +1635,9 @@ export class ProductsRepository {
       const fields = Array.isArray(target) ? target.map(String) : [];
       if (fields.some((field) => field.toLowerCase().includes('sku'))) {
         throw new ConflictException('Variant SKU already exists');
+      }
+      if (fields.some((field) => field.toLowerCase().includes('slug'))) {
+        throw new ConflictException('Product slug already exists');
       }
     }
 

@@ -45,6 +45,7 @@ import { LinkThumbnailDto } from './dto/link-thumbnail.dto';
 import { ProductFiltersDto } from './dto/product-filters.dto';
 import { SearchTagsQueryDto } from './dto/search-tags-query.dto';
 import { RejectProductDto } from './dto/reject-product.dto';
+import { ChangeProductSlugDto } from './dto/change-product-slug.dto';
 import { SetAttributesDto } from './dto/set-attributes.dto';
 import { UpdateInventoryDto } from './dto/update-inventory.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
@@ -657,5 +658,15 @@ export class AdminProductsController {
     @Body() dto: RejectProductDto,
   ) {
     return this.productsService.rejectContentReview(id, user.userId, dto);
+  }
+
+  @Patch(':id/slug')
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Change a product public slug' })
+  changeProductSlug(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: ChangeProductSlugDto,
+  ) {
+    return this.productsService.changeProductSlug(id, dto.slug);
   }
 }
