@@ -206,6 +206,8 @@ export class VendorDashboardRepository {
         id: true,
         subOrderNumber: true,
         status: true,
+        fulfillmentStage: true,
+        fulfillmentSummary: true,
         total: true,
         createdAt: true,
         order: {

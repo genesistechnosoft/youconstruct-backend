@@ -8,8 +8,8 @@ import {
   MediaContext,
   MediaEntityType,
   DeliveryStatus,
+  FulfillmentStage,
   OrderRefundStatus,
-  OrderStatus,
   PaymentMethod,
   PaymentStatus,
   PlatformRole,
@@ -21,11 +21,7 @@ import {
   TransactionType,
 } from '../../../generated/prisma/client.js';
 import { PrismaService } from '../../prisma/prisma.service';
-import {
-  aggregateParentOrderStatus,
-  aggregateParentOrderStatusFromQty,
-  deriveSubOrderStatusFromQty,
-} from './order-status.util';
+import { persistOrderFulfillment } from './fulfillment';
 import { DEFAULT_PLATFORM_COMMISSION_RATE } from './order.constants';
 
 const ADDRESS_SELECT = {
@@ -93,7 +89,8 @@ const ORDER_PARENT_SELECT = {
   orderNumber: true,
   paymentMethod: true,
   paymentStatus: true,
-  status: true,
+  fulfillmentStage: true,
+  fulfillmentSummary: true,
   userId: true,
   couponId: true,
   coupon: { select: ORDER_COUPON_SELECT },
@@ -116,7 +113,8 @@ export const ORDER_DETAIL_SELECT = {
   userId: true,
   user: { select: ORDER_CUSTOMER_SELECT },
   addressId: true,
-  status: true,
+  fulfillmentStage: true,
+  fulfillmentSummary: true,
   paymentStatus: true,
   paymentMethod: true,
   subtotal: true,
@@ -149,6 +147,8 @@ export const ORDER_DETAIL_SELECT = {
       subOrderNumber: true,
       vendorId: true,
       status: true,
+      fulfillmentStage: true,
+      fulfillmentSummary: true,
       subtotal: true,
       discountAmount: true,
       shippingCharge: true,
@@ -235,6 +235,8 @@ const SUB_ORDER_LIST_SELECT = {
   subOrderNumber: true,
   vendorId: true,
   status: true,
+  fulfillmentStage: true,
+  fulfillmentSummary: true,
   subtotal: true,
   discountAmount: true,
   shippingCharge: true,
@@ -301,7 +303,8 @@ export const ORDER_LIST_SELECT = {
   id: true,
   orderNumber: true,
   userId: true,
-  status: true,
+  fulfillmentStage: true,
+  fulfillmentSummary: true,
   paymentStatus: true,
   paymentMethod: true,
   subtotal: true,
@@ -423,12 +426,15 @@ export class OrdersRepository {
     grandTotal: Prisma.Decimal;
     onlineAmount: Prisma.Decimal;
     offlineAmount: Prisma.Decimal;
-    orderStatus: OrderStatus;
+    fulfillmentStage: FulfillmentStage;
+    fulfillmentSummary: string;
     paymentStatus: PaymentStatus;
     subOrders: Array<{
       subOrderNumber: string;
       vendorId: string;
       status: SubOrderStatus;
+      fulfillmentStage: FulfillmentStage;
+      fulfillmentSummary: string;
       subtotal: Prisma.Decimal;
       discountAmount: Prisma.Decimal;
       shippingCharge: Prisma.Decimal;
@@ -484,7 +490,8 @@ export class OrdersRepository {
             orderNumber: input.orderNumber,
             userId: input.userId,
             addressId: input.address.id,
-            status: input.orderStatus,
+            fulfillmentStage: input.fulfillmentStage,
+            fulfillmentSummary: input.fulfillmentSummary,
             paymentStatus: input.paymentStatus,
             paymentMethod: input.paymentMethod,
             subtotal: input.subtotal,
@@ -510,6 +517,8 @@ export class OrdersRepository {
                 subOrderNumber: so.subOrderNumber,
                 vendorId: so.vendorId,
                 status: so.status,
+                fulfillmentStage: so.fulfillmentStage,
+                fulfillmentSummary: so.fulfillmentSummary,
                 subtotal: so.subtotal,
                 discountAmount: so.discountAmount,
                 shippingCharge: so.shippingCharge,
@@ -711,7 +720,7 @@ export class OrdersRepository {
     filters: {
       skip: number;
       take: number;
-      status?: OrderStatus;
+      fulfillmentStage?: FulfillmentStage;
       from?: Date;
       to?: Date;
     },
@@ -719,7 +728,9 @@ export class OrdersRepository {
     const where: Prisma.OrderWhereInput = {
       userId,
       deletedAt: null,
-      ...(filters.status ? { status: filters.status } : {}),
+      ...(filters.fulfillmentStage
+        ? { fulfillmentStage: filters.fulfillmentStage }
+        : {}),
       ...(filters.from || filters.to
         ? {
             createdAt: {
@@ -747,13 +758,15 @@ export class OrdersRepository {
   async listAdminOrders(filters: {
     skip: number;
     take: number;
-    status?: OrderStatus;
+    fulfillmentStage?: FulfillmentStage;
     from?: Date;
     to?: Date;
   }) {
     const where: Prisma.OrderWhereInput = {
       deletedAt: null,
-      ...(filters.status ? { status: filters.status } : {}),
+      ...(filters.fulfillmentStage
+        ? { fulfillmentStage: filters.fulfillmentStage }
+        : {}),
       ...(filters.from || filters.to
         ? {
             createdAt: {
@@ -784,6 +797,7 @@ export class OrdersRepository {
       skip: number;
       take: number;
       status?: SubOrderStatus;
+      fulfillmentStage?: FulfillmentStage;
       from?: Date;
       to?: Date;
     },
@@ -792,6 +806,9 @@ export class OrdersRepository {
       vendorId,
       order: { deletedAt: null },
       ...(filters.status ? { status: filters.status } : {}),
+      ...(filters.fulfillmentStage
+        ? { fulfillmentStage: filters.fulfillmentStage }
+        : {}),
       ...(filters.from || filters.to
         ? {
             createdAt: {
@@ -825,6 +842,7 @@ export class OrdersRepository {
     skip: number;
     take: number;
     status?: SubOrderStatus;
+    fulfillmentStage?: FulfillmentStage;
     vendorId?: string;
     from?: Date;
     to?: Date;
@@ -832,6 +850,9 @@ export class OrdersRepository {
     const where: Prisma.SubOrderWhereInput = {
       order: { deletedAt: null },
       ...(filters.status ? { status: filters.status } : {}),
+      ...(filters.fulfillmentStage
+        ? { fulfillmentStage: filters.fulfillmentStage }
+        : {}),
       ...(filters.vendorId ? { vendorId: filters.vendorId } : {}),
       ...(filters.from || filters.to
         ? {
@@ -930,81 +951,6 @@ export class OrdersRepository {
     });
   }
 
-  async recomputeParentOrderStatus(orderId: string) {
-    const subOrders = await this.prisma.subOrder.findMany({
-      where: { orderId },
-      select: { status: true },
-    });
-
-    const status = aggregateParentOrderStatus(subOrders.map((s) => s.status));
-
-    return this.prisma.order.update({
-      where: { id: orderId },
-      data: { status },
-      select: ORDER_DETAIL_SELECT,
-    });
-  }
-
-  async adminUpdateOrderStatus(
-    orderId: string,
-    status: OrderStatus,
-    note: string | undefined,
-    changedByUserId: string,
-  ) {
-    if (status === OrderStatus.CANCELLED || status === OrderStatus.REFUNDED) {
-      throw new BadRequestException(
-        'Use cancel/refund endpoints for CANCELLED or REFUNDED status',
-      );
-    }
-
-    return this.prisma.$transaction(async (tx) => {
-      const order = await tx.order.findFirst({
-        where: { id: orderId, deletedAt: null },
-        select: { id: true, subOrders: { select: { id: true, status: true } } },
-      });
-      if (!order) {
-        throw new NotFoundException('Order not found');
-      }
-
-      await tx.order.update({
-        where: { id: orderId },
-        data: { status },
-      });
-
-      // Map parent status loosely onto sub-orders when admin forces parent
-      const subStatus =
-        status === OrderStatus.DELIVERED
-          ? SubOrderStatus.DELIVERED
-          : status === OrderStatus.SHIPPED ||
-              status === OrderStatus.PARTIALLY_SHIPPED
-            ? SubOrderStatus.SHIPPED
-            : status === OrderStatus.PENDING_PAYMENT
-              ? SubOrderStatus.PENDING
-              : SubOrderStatus.CONFIRMED;
-
-      for (const so of order.subOrders) {
-        if (so.status === subStatus) continue;
-        await tx.subOrder.update({
-          where: { id: so.id },
-          data: { status: subStatus },
-        });
-        await tx.orderStatusHistory.create({
-          data: {
-            subOrderId: so.id,
-            status: subStatus,
-            changedByUserId,
-            note: note ?? `Admin set parent order to ${status}`,
-          },
-        });
-      }
-
-      return tx.order.findFirstOrThrow({
-        where: { id: orderId },
-        select: ORDER_DETAIL_SELECT,
-      });
-    });
-  }
-
   async findSubOrderForCancelRefund(subOrderId: string) {
     return this.prisma.subOrder.findFirst({
       where: { id: subOrderId, order: { deletedAt: null } },
@@ -1047,7 +993,7 @@ export class OrdersRepository {
             paymentMethod: true,
             paymentStatus: true,
             razorpayPaymentId: true,
-            status: true,
+            fulfillmentStage: true,
             createdAt: true,
             onlineAmount: true,
           },
@@ -1212,68 +1158,15 @@ export class OrdersRepository {
         await this.clawbackWalletForSubOrder(tx, so);
       }
 
-      const refreshed = await tx.subOrder.findUniqueOrThrow({
-        where: { id: so.id },
-        select: {
-          status: true,
-          items: {
-            select: { quantity: true, cancelledQuantity: true },
-          },
-          deliveries: {
-            select: {
-              status: true,
-              items: { select: { quantity: true } },
-            },
-          },
-        },
-      });
-      const derived =
-        input.targetStatus === SubOrderStatus.REFUNDED
-          ? SubOrderStatus.REFUNDED
-          : deriveSubOrderStatusFromQty({
-              status: refreshed.status,
-              orderedQty: refreshed.items.reduce((s, i) => s + i.quantity, 0),
-              cancelledQty: refreshed.items.reduce(
-                (s, i) => s + i.cancelledQuantity,
-                0,
-              ),
-              deliveredQty: refreshed.deliveries
-                .filter((d) => d.status === DeliveryStatus.DELIVERED)
-                .reduce(
-                  (s, d) =>
-                    s + d.items.reduce((line, i) => line + i.quantity, 0),
-                  0,
-                ),
-              dispatchedQty: refreshed.deliveries
-                .filter(
-                  (d) =>
-                    d.status === DeliveryStatus.SHIPPED ||
-                    d.status === DeliveryStatus.OUT_FOR_DELIVERY ||
-                    d.status === DeliveryStatus.DELIVERED,
-                )
-                .reduce(
-                  (s, d) =>
-                    s + d.items.reduce((line, i) => line + i.quantity, 0),
-                  0,
-                ),
-              allocatedQty: refreshed.deliveries
-                .filter((d) => d.status !== DeliveryStatus.CANCELLED)
-                .reduce(
-                  (s, d) =>
-                    s + d.items.reduce((line, i) => line + i.quantity, 0),
-                  0,
-                ),
-            });
-
       await tx.subOrder.update({
         where: { id: so.id },
-        data: { status: derived },
+        data: { status: input.targetStatus },
       });
 
       await tx.orderStatusHistory.create({
         data: {
           subOrderId: so.id,
-          status: derived,
+          status: input.targetStatus,
           changedByUserId: input.actorUserId,
           note: input.reason,
         },
@@ -1293,58 +1186,13 @@ export class OrdersRepository {
 
       const siblings = await tx.subOrder.findMany({
         where: { orderId: so.orderId },
-        select: {
-          status: true,
-          items: {
-            select: { quantity: true, cancelledQuantity: true },
-          },
-          deliveries: {
-            select: {
-              status: true,
-              items: { select: { quantity: true } },
-            },
-          },
-        },
+        select: { status: true },
       });
-      const parentStatus = aggregateParentOrderStatusFromQty(
-        siblings.map((sibling) => ({
-          status: sibling.status,
-          orderedQty: sibling.items.reduce((s, i) => s + i.quantity, 0),
-          cancelledQty: sibling.items.reduce(
-            (s, i) => s + i.cancelledQuantity,
-            0,
-          ),
-          deliveredQty: sibling.deliveries
-            .filter((d) => d.status === DeliveryStatus.DELIVERED)
-            .reduce(
-              (s, d) => s + d.items.reduce((line, i) => line + i.quantity, 0),
-              0,
-            ),
-          dispatchedQty: sibling.deliveries
-            .filter(
-              (d) =>
-                d.status === DeliveryStatus.SHIPPED ||
-                d.status === DeliveryStatus.OUT_FOR_DELIVERY ||
-                d.status === DeliveryStatus.DELIVERED,
-            )
-            .reduce(
-              (s, d) => s + d.items.reduce((line, i) => line + i.quantity, 0),
-              0,
-            ),
-          allocatedQty: sibling.deliveries
-            .filter((d) => d.status !== DeliveryStatus.CANCELLED)
-            .reduce(
-              (s, d) => s + d.items.reduce((line, i) => line + i.quantity, 0),
-              0,
-            ),
-        })),
-      );
 
       const paymentUpdate: {
-        status: OrderStatus;
         paymentStatus?: PaymentStatus;
         paymentTimeoutJobId?: null;
-      } = { status: parentStatus };
+      } = {};
 
       if (siblings.every((s) => s.status === SubOrderStatus.CANCELLED)) {
         const captured =
@@ -1367,14 +1215,17 @@ export class OrdersRepository {
         paymentUpdate.paymentStatus = PaymentStatus.REFUNDED;
       }
 
-      await tx.order.update({
-        where: { id: so.orderId },
-        data: paymentUpdate,
-      });
+      if (paymentUpdate.paymentStatus) {
+        await tx.order.update({
+          where: { id: so.orderId },
+          data: paymentUpdate,
+        });
+      }
 
+      const parent = await persistOrderFulfillment(tx, so.orderId);
       if (
         so.order.paymentStatus === PaymentStatus.PENDING &&
-        parentStatus === OrderStatus.CANCELLED
+        parent.stage === FulfillmentStage.CANCELLED
       ) {
         await this.releaseCouponUsagesForOrder(tx, so.orderId);
       }
@@ -1468,7 +1319,7 @@ export class OrdersRepository {
         where: {
           id: orderId,
           deletedAt: null,
-          status: OrderStatus.PENDING_PAYMENT,
+          fulfillmentStage: FulfillmentStage.PREPARING,
           paymentStatus: PaymentStatus.PENDING,
         },
         select: {
@@ -1478,7 +1329,7 @@ export class OrdersRepository {
             select: {
               id: true,
               status: true,
-              items: { select: { variantId: true, quantity: true } },
+              items: { select: { id: true, variantId: true, quantity: true } },
             },
           },
         },
@@ -1500,6 +1351,10 @@ export class OrdersRepository {
           await tx.productInventory.updateMany({
             where: { variantId: item.variantId },
             data: { quantity: { increment: item.quantity } },
+          });
+          await tx.orderItem.update({
+            where: { id: item.id },
+            data: { cancelledQuantity: item.quantity },
           });
         }
 
@@ -1531,11 +1386,11 @@ export class OrdersRepository {
       await tx.order.update({
         where: { id: order.id },
         data: {
-          status: OrderStatus.CANCELLED,
           paymentStatus: PaymentStatus.FAILED,
           paymentTimeoutJobId: null,
         },
       });
+      await persistOrderFulfillment(tx, order.id);
 
       return { orderId: order.id, userId: order.userId };
     });
@@ -1593,7 +1448,6 @@ export class OrdersRepository {
         where: { id: order.id },
         data: {
           paymentStatus: nextPaymentStatus,
-          status: OrderStatus.CONFIRMED,
           razorpayPaymentId: input.razorpayPaymentId,
           paymentTimeoutJobId: null,
         },

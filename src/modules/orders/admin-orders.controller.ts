@@ -18,7 +18,6 @@ import { PlatformRole, Roles } from '../../common/decorators/roles.decorator';
 import { PERMISSIONS } from '../rbac/permissions.constants';
 import { AdminRefundDto } from './dto/admin-refund.dto';
 import { AdminCancelSubOrderDto } from './dto/cancel-sub-order.dto';
-import { AdminUpdateOrderStatusDto } from './dto/admin-update-order-status.dto';
 import {
   ListOrdersQueryDto,
   ListSubOrdersQueryDto,
@@ -48,18 +47,6 @@ export class AdminOrdersController {
   @ApiOperation({ summary: 'Get order by id' })
   getOne(@Param('id', ParseUUIDPipe) id: string) {
     return this.ordersService.getAdminOrder(id);
-  }
-
-  @Patch(':id/status')
-  @HttpCode(200)
-  @Permissions(PERMISSIONS.ADMIN.ORDERS_MANAGE)
-  @ApiOperation({ summary: 'Admin override order status' })
-  updateStatus(
-    @CurrentUser() user: { userId: string },
-    @Param('id', ParseUUIDPipe) id: string,
-    @Body() dto: AdminUpdateOrderStatusDto,
-  ) {
-    return this.ordersService.adminUpdateOrderStatus(id, user.userId, dto);
   }
 
   @Post(':id/refund')

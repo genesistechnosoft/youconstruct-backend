@@ -1,16 +1,19 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { IsDateString, IsEnum, IsOptional, IsUUID } from 'class-validator';
 import {
-  OrderStatus,
+  FulfillmentStage,
   SubOrderStatus,
 } from '../../../../generated/prisma/client.js';
 import { PaginationQueryDto } from '../../../common/dto/pagination-query.dto';
 
 export class ListOrdersQueryDto extends PaginationQueryDto {
-  @ApiPropertyOptional({ enum: OrderStatus })
+  @ApiPropertyOptional({
+    enum: FulfillmentStage,
+    description: 'Filters the shipment-derived fulfillment stage',
+  })
   @IsOptional()
-  @IsEnum(OrderStatus)
-  status?: OrderStatus;
+  @IsEnum(FulfillmentStage)
+  status?: FulfillmentStage;
 
   @ApiPropertyOptional()
   @IsOptional()
@@ -28,6 +31,11 @@ export class ListSubOrdersQueryDto extends PaginationQueryDto {
   @IsOptional()
   @IsEnum(SubOrderStatus)
   status?: SubOrderStatus;
+
+  @ApiPropertyOptional({ enum: FulfillmentStage })
+  @IsOptional()
+  @IsEnum(FulfillmentStage)
+  fulfillmentStage?: FulfillmentStage;
 
   @ApiPropertyOptional()
   @IsOptional()

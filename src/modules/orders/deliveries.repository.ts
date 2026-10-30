@@ -7,17 +7,12 @@ import {
   DeliveryStatus,
   PaymentMethod,
   Prisma,
-  SubOrderStatus,
   TransactionReason,
   TransactionType,
 } from '../../../generated/prisma/client.js';
 import { PrismaService } from '../../prisma/prisma.service';
 import { roundMoney } from '../../common/utils/money.util';
-import {
-  aggregateParentOrderStatusFromQty,
-  deriveSubOrderStatusFromQty,
-  type SubOrderFulfillmentQty,
-} from './order-status.util';
+import { persistOrderFulfillment } from './fulfillment';
 import { ORDER_DETAIL_SELECT } from './orders.repository';
 
 const DELIVERY_SELECT = {
@@ -142,7 +137,7 @@ export class DeliveriesRepository {
           select: {
             id: true,
             userId: true,
-            status: true,
+            fulfillmentStage: true,
             paymentMethod: true,
             paymentStatus: true,
           },
@@ -518,102 +513,10 @@ export class DeliveriesRepository {
   ) {
     const so = await tx.subOrder.findUniqueOrThrow({
       where: { id: subOrderId },
-      select: {
-        id: true,
-        orderId: true,
-        status: true,
-        items: {
-          select: { quantity: true, cancelledQuantity: true },
-        },
-        deliveries: {
-          select: {
-            status: true,
-            items: { select: { quantity: true } },
-          },
-        },
-      },
+      select: { id: true, orderId: true },
     });
 
-    const qty = this.toFulfillmentQty(so);
-    const nextStatus = deriveSubOrderStatusFromQty(qty);
-    if (nextStatus !== so.status) {
-      await tx.subOrder.update({
-        where: { id: so.id },
-        data: { status: nextStatus },
-      });
-      await tx.orderStatusHistory.create({
-        data: {
-          subOrderId: so.id,
-          status: nextStatus,
-          note: 'Derived from deliveries',
-        },
-      });
-    }
-
-    const siblings = await tx.subOrder.findMany({
-      where: { orderId: so.orderId },
-      select: {
-        status: true,
-        items: {
-          select: { quantity: true, cancelledQuantity: true },
-        },
-        deliveries: {
-          select: {
-            status: true,
-            items: { select: { quantity: true } },
-          },
-        },
-      },
-    });
-    const parentStatus = aggregateParentOrderStatusFromQty(
-      siblings.map((sibling) => this.toFulfillmentQty(sibling)),
-    );
-    await tx.order.update({
-      where: { id: so.orderId },
-      data: { status: parentStatus },
-    });
-  }
-
-  toFulfillmentQty(so: {
-    status: SubOrderStatus;
-    items: Array<{ quantity: number; cancelledQuantity: number }>;
-    deliveries: Array<{
-      status: DeliveryStatus;
-      items: Array<{ quantity: number }>;
-    }>;
-  }): SubOrderFulfillmentQty {
-    const orderedQty = so.items.reduce((sum, item) => sum + item.quantity, 0);
-    const cancelledQty = so.items.reduce(
-      (sum, item) => sum + item.cancelledQuantity,
-      0,
-    );
-    let deliveredQty = 0;
-    let dispatchedQty = 0;
-    let allocatedQty = 0;
-    for (const delivery of so.deliveries) {
-      const qty = delivery.items.reduce((sum, item) => sum + item.quantity, 0);
-      if (ACTIVE_DELIVERY_STATUSES.includes(delivery.status)) {
-        allocatedQty += qty;
-      }
-      if (
-        delivery.status === DeliveryStatus.SHIPPED ||
-        delivery.status === DeliveryStatus.OUT_FOR_DELIVERY ||
-        delivery.status === DeliveryStatus.DELIVERED
-      ) {
-        dispatchedQty += qty;
-      }
-      if (delivery.status === DeliveryStatus.DELIVERED) {
-        deliveredQty += qty;
-      }
-    }
-    return {
-      status: so.status,
-      orderedQty,
-      cancelledQty,
-      deliveredQty,
-      dispatchedQty,
-      allocatedQty,
-    };
+    await persistOrderFulfillment(tx, so.orderId);
   }
 
   async findOrderDetail(orderId: string) {

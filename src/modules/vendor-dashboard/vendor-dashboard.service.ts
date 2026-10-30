@@ -158,6 +158,8 @@ export class VendorDashboardService {
           subOrderNumber: order.subOrderNumber,
           orderNumber: order.order.orderNumber,
           status: order.status,
+          fulfillmentStage: order.fulfillmentStage,
+          fulfillmentSummary: order.fulfillmentSummary,
           total: formatMoney(order.total),
           paymentStatus: order.order.paymentStatus,
           paymentMethod: order.order.paymentMethod,

@@ -11,12 +11,12 @@ import {
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import {
-  OrderStatus,
   PaymentMethod,
   PaymentStatus,
   PlatformRole,
   Prisma,
   SubOrderStatus,
+  DeliveryStatus,
   NotificationEventType,
   MediaAccessLevel,
 } from '../../../generated/prisma/client.js';
@@ -37,7 +37,6 @@ import { CouponsService } from '../coupons/coupons.service';
 import { RazorpayClient } from '../payments/razorpay.client';
 import { CancelRefundService } from './cancel-refund.service';
 import { AdminRefundDto } from './dto/admin-refund.dto';
-import { AdminUpdateOrderStatusDto } from './dto/admin-update-order-status.dto';
 import { CheckoutDto } from './dto/checkout.dto';
 import {
   ListOrdersQueryDto,
@@ -48,6 +47,12 @@ import {
   PAYMENT_TIMEOUT_JOB_PREFIX,
   PAYMENT_TIMEOUT_MS,
 } from './order.constants';
+import {
+  deriveFulfillment,
+  fulfillmentFromDeliveries,
+  lineFulfillmentQuantities,
+  sumFulfillmentCounts,
+} from './fulfillment';
 import {
   isAdminTransitionAllowed,
   isVendorTransitionAllowed,
@@ -250,7 +255,6 @@ export class OrdersService {
       freight,
     );
 
-    const orderStatus = OrderStatus.PENDING_PAYMENT;
     const paymentStatus = PaymentStatus.PENDING;
     const subOrderStatus = SubOrderStatus.PENDING;
 
@@ -285,6 +289,8 @@ export class OrdersService {
       subOrderNumber: string;
       vendorId: string;
       status: SubOrderStatus;
+      fulfillmentStage: ReturnType<typeof deriveFulfillment>['stage'];
+      fulfillmentSummary: string;
       subtotal: Prisma.Decimal;
       discountAmount: Prisma.Decimal;
       shippingCharge: Prisma.Decimal;
@@ -432,10 +438,20 @@ export class OrdersService {
               lineCharges: breakdown.lineCharges,
             };
 
+      const preparing = deriveFulfillment({
+        ordered: items.reduce((sum, item) => sum + item.quantity, 0),
+        cancelled: 0,
+        delivered: 0,
+        inTransit: 0,
+        outForDelivery: 0,
+      });
+
       subOrderPayloads.push({
         subOrderNumber: this.buildSubOrderNumber(dateStamp),
         vendorId: vendorGroup.vendorId,
         status: subOrderStatus,
+        fulfillmentStage: preparing.stage,
+        fulfillmentSummary: preparing.summary,
         subtotal,
         discountAmount: vendorDiscount,
         shippingCharge,
@@ -465,6 +481,18 @@ export class OrdersService {
       );
     }
 
+    const parentFulfillment = sumFulfillmentCounts(
+      subOrderPayloads.map((subOrder) =>
+        deriveFulfillment({
+          ordered: subOrder.items.reduce((sum, item) => sum + item.quantity, 0),
+          cancelled: 0,
+          delivered: 0,
+          inTransit: 0,
+          outForDelivery: 0,
+        }),
+      ),
+    );
+
     let order:
       | NonNullable<
           Awaited<ReturnType<OrdersRepository['createCheckoutOrder']>>
@@ -486,7 +514,8 @@ export class OrdersService {
           grandTotal,
           onlineAmount: orderOnline,
           offlineAmount: orderOffline,
-          orderStatus,
+          fulfillmentStage: parentFulfillment.stage,
+          fulfillmentSummary: parentFulfillment.summary,
           paymentStatus,
           subOrders: subOrderPayloads,
           inventoryDecrements,
@@ -575,7 +604,7 @@ export class OrdersService {
       {
         skip,
         take,
-        status: query.status,
+        fulfillmentStage: query.status,
         from: query.from ? new Date(query.from) : undefined,
         to: query.to ? new Date(query.to) : undefined,
       },
@@ -612,6 +641,7 @@ export class OrdersService {
         skip,
         take,
         status: query.status,
+        fulfillmentStage: query.fulfillmentStage,
         from: query.from ? new Date(query.from) : undefined,
         to: query.to ? new Date(query.to) : undefined,
       },
@@ -667,8 +697,10 @@ export class OrdersService {
       note: dto.note,
     });
 
-    const order =
-      await this.ordersRepository.recomputeParentOrderStatus(orderId);
+    const order = await this.ordersRepository.findOrderById(orderId);
+    if (!order) {
+      throw new NotFoundException('Order not found');
+    }
     const refreshed = await this.ordersRepository.findSubOrderForVendor(
       subOrderId,
       vendorId,
@@ -690,7 +722,7 @@ export class OrdersService {
     const { items, total } = await this.ordersRepository.listAdminOrders({
       skip,
       take,
-      status: query.status,
+      fulfillmentStage: query.status,
       from: query.from ? new Date(query.from) : undefined,
       to: query.to ? new Date(query.to) : undefined,
     });
@@ -713,62 +745,6 @@ export class OrdersService {
     };
   }
 
-  async adminUpdateOrderStatus(
-    orderId: string,
-    adminUserId: string,
-    dto: AdminUpdateOrderStatusDto,
-  ) {
-    if (dto.status === OrderStatus.REFUNDED) {
-      return this.cancelRefundService.adminRefundOrder({
-        orderId,
-        actorUserId: adminUserId,
-        note: dto.note,
-      });
-    }
-
-    if (dto.status === OrderStatus.CANCELLED) {
-      const existing = await this.ordersRepository.findOrderById(orderId);
-      if (!existing) {
-        throw new NotFoundException('Order not found');
-      }
-
-      const reason = dto.note?.trim() || 'Cancelled by admin';
-      for (const so of existing.subOrders) {
-        if (
-          so.status === SubOrderStatus.CANCELLED ||
-          so.status === SubOrderStatus.REFUNDED
-        ) {
-          continue;
-        }
-        await this.cancelRefundService.cancelSubOrder({
-          subOrderId: so.id,
-          orderId,
-          actorUserId: adminUserId,
-          actorRole: PlatformRole.ADMIN,
-          audience: 'admin',
-          reason,
-        });
-      }
-
-      const refreshed = await this.ordersRepository.findOrderById(orderId);
-      return {
-        message: 'Order cancelled successfully',
-        data: this.serializeOrder(refreshed!, 'admin'),
-      };
-    }
-
-    const order = await this.ordersRepository.adminUpdateOrderStatus(
-      orderId,
-      dto.status,
-      dto.note,
-      adminUserId,
-    );
-    return {
-      message: 'Order status updated',
-      data: this.serializeOrder(order, 'admin'),
-    };
-  }
-
   async listAdminSubOrders(query: ListSubOrdersQueryDto) {
     const page = query.page ?? 1;
     const limit = query.limit ?? 20;
@@ -777,6 +753,7 @@ export class OrdersService {
       skip,
       take,
       status: query.status,
+      fulfillmentStage: query.fulfillmentStage,
       vendorId: query.vendorId,
       from: query.from ? new Date(query.from) : undefined,
       to: query.to ? new Date(query.to) : undefined,
@@ -831,8 +808,10 @@ export class OrdersService {
       note: dto.note,
     });
 
-    const order =
-      await this.ordersRepository.recomputeParentOrderStatus(orderId);
+    const order = await this.ordersRepository.findOrderById(orderId);
+    if (!order) {
+      throw new NotFoundException('Order not found');
+    }
     const refreshed = await this.ordersRepository.findSubOrderById(subOrderId);
 
     return {
@@ -1046,6 +1025,14 @@ export class OrdersService {
 
     this.attachCustomer(serialized, audience);
     this.attachCoupon(serialized);
+    serialized.fulfillment = sumFulfillmentCounts(
+      subOrders.map((subOrder) =>
+        fulfillmentFromDeliveries({
+          items: this.fulfillmentItems(subOrder.items),
+          deliveries: this.fulfillmentDeliveries(subOrder.deliveries),
+        }),
+      ),
+    );
 
     return serialized;
   }
@@ -1103,7 +1090,19 @@ export class OrdersService {
             : undefined,
         itemShippingCharge: formatMoney(item.itemShippingCharge),
         total: formatMoney(item.total),
+        ...lineFulfillmentQuantities(
+          {
+            id: typeof item.id === 'string' ? item.id : undefined,
+            quantity: Number(item.quantity ?? 0),
+            cancelledQuantity: Number(item.cancelledQuantity ?? 0),
+          },
+          this.fulfillmentDeliveries(so.deliveries),
+        ),
       })),
+      fulfillment: fulfillmentFromDeliveries({
+        items: this.fulfillmentItems(so.items),
+        deliveries: this.fulfillmentDeliveries(so.deliveries),
+      }),
       deliveries: Array.isArray(so.deliveries)
         ? (so.deliveries as Array<Record<string, unknown>>).map((d) =>
             this.serializeDelivery(d, audience),
@@ -1130,6 +1129,37 @@ export class OrdersService {
     }
 
     return serialized;
+  }
+
+  private fulfillmentItems(items: unknown) {
+    if (!Array.isArray(items)) return [];
+    return items.map((item) => {
+      const row = item as {
+        quantity?: number;
+        cancelledQuantity?: number;
+      };
+      return {
+        quantity: Number(row.quantity ?? 0),
+        cancelledQuantity: Number(row.cancelledQuantity ?? 0),
+      };
+    });
+  }
+
+  private fulfillmentDeliveries(deliveries: unknown) {
+    if (!Array.isArray(deliveries)) return [];
+    return deliveries.map((delivery) => {
+      const row = delivery as {
+        status: DeliveryStatus;
+        items?: Array<{ quantity?: number; orderItemId?: string }>;
+      };
+      return {
+        status: row.status,
+        items: (row.items ?? []).map((line) => ({
+          quantity: Number(line.quantity ?? 0),
+          orderItemId: line.orderItemId,
+        })),
+      };
+    });
   }
 
   private attachCustomer(

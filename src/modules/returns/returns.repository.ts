@@ -99,7 +99,8 @@ const RETURN_DETAIL_SELECT = {
     select: {
       id: true,
       orderNumber: true,
-      status: true,
+      fulfillmentStage: true,
+      fulfillmentSummary: true,
       paymentMethod: true,
       paymentStatus: true,
       razorpayPaymentId: true,

@@ -797,7 +797,8 @@ export class ReturnsService {
     if (mode !== 'detail' || !this.isDetail(request)) {
       return card;
     }
-    card.status = request.order.status;
+    card.fulfillmentStage = request.order.fulfillmentStage;
+    card.fulfillmentSummary = request.order.fulfillmentSummary;
     card.paymentStatus = request.order.paymentStatus;
     if (audience !== 'customer') {
       card.razorpayPaymentId = request.order.razorpayPaymentId;
