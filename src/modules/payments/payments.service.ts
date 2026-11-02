@@ -5,7 +5,6 @@ import {
   Logger,
   forwardRef,
 } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import { DOMAIN_ERROR_CODES } from '../../common/errors/domain-error-code';
 import { domainBadRequest } from '../../common/errors/domain-exception';
 import { OrdersService } from '../orders/orders.service';
@@ -20,17 +19,14 @@ export class PaymentsService {
     private readonly razorpayClient: RazorpayClient,
     @Inject(forwardRef(() => OrdersService))
     private readonly ordersService: OrdersService,
-    private readonly config: ConfigService,
   ) {}
 
   async verifyPayment(userId: string, dto: VerifyPaymentDto) {
-    const valid =
-      this.isNonProdTestCapture(dto) ||
-      this.razorpayClient.verifyPaymentSignature({
-        razorpayOrderId: dto.razorpayOrderId,
-        razorpayPaymentId: dto.razorpayPaymentId,
-        razorpaySignature: dto.razorpaySignature,
-      });
+    const valid = this.razorpayClient.verifyPaymentSignature({
+      razorpayOrderId: dto.razorpayOrderId,
+      razorpayPaymentId: dto.razorpayPaymentId,
+      razorpaySignature: dto.razorpaySignature,
+    });
     if (!valid) {
       throw domainBadRequest(
         DOMAIN_ERROR_CODES.PAYMENT_SIGNATURE_INVALID,
@@ -116,13 +112,5 @@ export class PaymentsService {
       message: 'Webhook processed',
       data: { received: true },
     };
-  }
-
-  private isNonProdTestCapture(dto: VerifyPaymentDto): boolean {
-    const nodeEnv = this.config.get<string>('NODE_ENV') ?? 'development';
-    if (nodeEnv === 'production') {
-      return false;
-    }
-    return dto.razorpayPaymentId.startsWith('pay_test_');
   }
 }

@@ -1,5 +1,6 @@
 import {
   DeliveryStatus,
+  PaymentStatus,
   SubOrderStatus,
 } from '../../../generated/prisma/client.js';
 
@@ -117,23 +118,56 @@ export function isDeliveryDispatched(status: DeliveryStatus): boolean {
   return DISPATCHED_DELIVERY_STATUSES.includes(status);
 }
 
+const PACKING_PAYMENTS: PaymentStatus[] = [
+  PaymentStatus.PAID,
+  PaymentStatus.PARTIALLY_PAID,
+  PaymentStatus.PARTIALLY_REFUNDED,
+];
+
+export function paymentAllowsPacking(
+  status: PaymentStatus | null | undefined,
+): boolean {
+  return status != null && PACKING_PAYMENTS.includes(status);
+}
+
+export function customerCancelState(input: {
+  orderCreatedAt: Date;
+  windowHours: number;
+  hasDispatchedDelivery: boolean;
+  subOrderStatus: SubOrderStatus;
+}): { allowed: boolean; blockedReason: string | null } {
+  if (
+    input.subOrderStatus === SubOrderStatus.CANCELLED ||
+    input.subOrderStatus === SubOrderStatus.REFUNDED
+  ) {
+    return {
+      allowed: false,
+      blockedReason: 'This seller is already closed.',
+    };
+  }
+  if (input.hasDispatchedDelivery) {
+    return {
+      allowed: false,
+      blockedReason: 'A shipment has already left.',
+    };
+  }
+  const deadline = new Date(
+    input.orderCreatedAt.getTime() + input.windowHours * 60 * 60 * 1000,
+  );
+  if (Date.now() >= deadline.getTime()) {
+    return {
+      allowed: false,
+      blockedReason: 'The cancellation window has passed.',
+    };
+  }
+  return { allowed: true, blockedReason: null };
+}
+
 export function isCustomerCancelAllowed(input: {
   orderCreatedAt: Date;
   windowHours: number;
   hasDispatchedDelivery: boolean;
   subOrderStatus: SubOrderStatus;
 }): boolean {
-  if (
-    input.subOrderStatus === SubOrderStatus.CANCELLED ||
-    input.subOrderStatus === SubOrderStatus.REFUNDED
-  ) {
-    return false;
-  }
-  if (input.hasDispatchedDelivery) {
-    return false;
-  }
-  const deadline = new Date(
-    input.orderCreatedAt.getTime() + input.windowHours * 60 * 60 * 1000,
-  );
-  return Date.now() < deadline.getTime();
+  return customerCancelState(input).allowed;
 }

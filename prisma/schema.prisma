@@ -161,6 +161,7 @@ enum PaymentStatus {
   PAID
   FAILED
   REFUNDED
+  PARTIALLY_REFUNDED
 }
 
 enum PaymentMethod {
@@ -174,6 +175,11 @@ enum DeliveryStatus {
   OUT_FOR_DELIVERY
   DELIVERED
   CANCELLED
+}
+
+enum DeliveryCancelResolution {
+  REATTEMPT
+  REFUND
 }
 
 enum ReturnStatus {
@@ -1485,6 +1491,7 @@ model Delivery {
   deliveryNumber          String         @unique
   subOrderId              String
   status                  DeliveryStatus @default(DRAFT)
+  cancelResolution        DeliveryCancelResolution?
   trackingNumber          String?
   courierName             String?
   shippingLabelUrl        String?

@@ -99,10 +99,15 @@ export function deriveFulfillment(input: {
   }
 
   if (inTransit >= owed) {
+    const shippedOnly = Math.max(0, inTransit - outForDelivery);
+    const summary =
+      shippedOnly > 0 && outForDelivery > 0
+        ? `${shippedOnly} shipped · ${outForDelivery} out for delivery.`
+        : `${itemsLabel(owed)} on the way.`;
     return {
       ...counts,
       stage: FulfillmentStage.SHIPPED,
-      summary: `${itemsLabel(owed)} on the way.`,
+      summary,
     };
   }
 

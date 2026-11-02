@@ -6,8 +6,12 @@ import {
   IsString,
   Length,
   MaxLength,
+  ValidateIf,
 } from 'class-validator';
-import { DeliveryStatus } from '../../../../generated/prisma/client.js';
+import {
+  DeliveryCancelResolution,
+  DeliveryStatus,
+} from '../../../../generated/prisma/client.js';
 
 export class UpdateDeliveryStatusDto {
   @ApiProperty({ enum: DeliveryStatus })
@@ -43,15 +47,31 @@ export class UpdateDeliveryStatusDto {
   @IsString()
   @MaxLength(1000)
   customerRemarks?: string;
-}
 
-export class AdminUpdateDeliveryStatusDto extends UpdateDeliveryStatusDto {
-  @ApiProperty({ description: 'Required audited override reason' })
+  @ApiPropertyOptional({
+    enum: DeliveryCancelResolution,
+    description: 'Required when status is CANCELLED',
+  })
+  @IsOptional()
+  @IsEnum(DeliveryCancelResolution)
+  resolution?: DeliveryCancelResolution;
+
+  @ApiPropertyOptional({
+    description:
+      'Required for every admin status change, and for a vendor when status is CANCELLED',
+  })
+  @ValidateIf(
+    (dto: UpdateDeliveryStatusDto) =>
+      dto.constructor.name === 'AdminUpdateDeliveryStatusDto' ||
+      dto.status === DeliveryStatus.CANCELLED,
+  )
   @IsString()
   @IsNotEmpty()
   @MaxLength(1000)
-  reason!: string;
+  reason?: string;
 }
+
+export class AdminUpdateDeliveryStatusDto extends UpdateDeliveryStatusDto {}
 
 export class DeliveryRemarksDto {
   @ApiPropertyOptional()

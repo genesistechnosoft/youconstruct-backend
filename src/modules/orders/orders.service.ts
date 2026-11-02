@@ -55,7 +55,10 @@ import {
 } from './fulfillment';
 import {
   isAdminTransitionAllowed,
+  isDeliveryDispatched,
   isVendorTransitionAllowed,
+  paymentAllowsPacking,
+  customerCancelState,
 } from './order-status.util';
 import { CategoriesService } from '../categories/categories.service';
 import { OrdersRepository } from './orders.repository';
@@ -610,9 +613,12 @@ export class OrdersService {
       },
     );
 
+    const windowHours = await this.customerCancelWindowHours();
     return {
       message: 'Orders fetched successfully',
-      data: items.map((o) => this.serializeOrder(o, 'customer')),
+      data: items.map((o) =>
+        this.attachCustomerCancel(this.serializeOrder(o, 'customer'), windowHours),
+      ),
       meta: paginationMeta(page, limit, total),
     };
   }
@@ -625,9 +631,13 @@ export class OrdersService {
     if (!order) {
       throw new NotFoundException('Order not found');
     }
+    const windowHours = await this.customerCancelWindowHours();
     return {
       message: 'Order fetched successfully',
-      data: this.serializeOrder(order, 'customer'),
+      data: this.attachCustomerCancel(
+        this.serializeOrder(order, 'customer'),
+        windowHours,
+      ),
     };
   }
 
@@ -686,6 +696,17 @@ export class OrdersService {
       throw domainBadRequest(
         DOMAIN_ERROR_CODES.INVALID_STATUS_TRANSITION,
         `Cannot transition from ${so.status} to ${dto.status}`,
+      );
+    }
+
+    if (
+      (dto.status === SubOrderStatus.CONFIRMED ||
+        dto.status === SubOrderStatus.PROCESSING) &&
+      !paymentAllowsPacking(so.order.paymentStatus)
+    ) {
+      throw domainBadRequest(
+        DOMAIN_ERROR_CODES.INVALID_STATUS_TRANSITION,
+        'Packing starts after payment is captured',
       );
     }
 
@@ -797,6 +818,17 @@ export class OrdersService {
       throw domainBadRequest(
         DOMAIN_ERROR_CODES.INVALID_STATUS_TRANSITION,
         `Cannot transition from ${so.status} to ${dto.status}`,
+      );
+    }
+
+    if (
+      (dto.status === SubOrderStatus.CONFIRMED ||
+        dto.status === SubOrderStatus.PROCESSING) &&
+      !paymentAllowsPacking(so.order.paymentStatus)
+    ) {
+      throw domainBadRequest(
+        DOMAIN_ERROR_CODES.INVALID_STATUS_TRANSITION,
+        'Packing starts after payment is captured',
       );
     }
 
@@ -978,6 +1010,45 @@ export class OrdersService {
   private buildSubOrderNumber(dateStamp: string): string {
     const short = Math.random().toString(36).slice(2, 6).toUpperCase();
     return `YC-${dateStamp}-V-${short}`;
+  }
+
+  private async customerCancelWindowHours(): Promise<number> {
+    const hours = await this.platformSettings.getNumber(
+      'commerce',
+      'customerCancelWindowHours',
+    );
+    return hours > 0 ? hours : 24;
+  }
+
+  private attachCustomerCancel(
+    order: Record<string, unknown>,
+    windowHours: number,
+  ): Record<string, unknown> {
+    const createdAt = new Date(String(order.createdAt ?? ''));
+    const subOrders = order.subOrders;
+    if (!Array.isArray(subOrders)) {
+      return order;
+    }
+    for (const subOrder of subOrders) {
+      if (!subOrder || typeof subOrder !== 'object') {
+        continue;
+      }
+      const row = subOrder as Record<string, unknown>;
+      const deliveries = Array.isArray(row.deliveries) ? row.deliveries : [];
+      row.cancel = customerCancelState({
+        orderCreatedAt: createdAt,
+        windowHours,
+        hasDispatchedDelivery: deliveries.some((delivery) => {
+          if (!delivery || typeof delivery !== 'object') {
+            return false;
+          }
+          const status = (delivery as { status?: DeliveryStatus }).status;
+          return status ? isDeliveryDispatched(status) : false;
+        }),
+        subOrderStatus: row.status as SubOrderStatus,
+      });
+    }
+    return order;
   }
 
   private serializeOrder(

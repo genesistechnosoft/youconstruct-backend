@@ -16,6 +16,7 @@ import {
 } from '../../../generated/prisma/client.js';
 import { PrismaService } from '../../prisma/prisma.service';
 import { roundMoney } from '../../common/utils/money.util';
+import { persistOrderPayment } from '../orders/payment-status';
 
 const RETURN_CUSTOMER_SELECT = {
   id: true,
@@ -433,19 +434,25 @@ export class ReturnsRepository {
     status: OrderRefundStatus;
     reason: string;
   }) {
-    return this.prisma.orderRefund.create({
-      data: {
-        orderId: input.orderId,
-        subOrderId: input.subOrderId,
-        returnRequestId: input.returnRequestId,
-        amount: input.amount,
-        status: input.status,
-        reason: input.reason,
-        initiatedByUserId: input.actorUserId,
-        razorpayRefundId: input.razorpayRefundId,
-        providerPayload: input.providerPayload,
-      },
-      select: { id: true, status: true, razorpayRefundId: true },
+    return this.prisma.$transaction(async (tx) => {
+      const refund = await tx.orderRefund.create({
+        data: {
+          orderId: input.orderId,
+          subOrderId: input.subOrderId,
+          returnRequestId: input.returnRequestId,
+          amount: input.amount,
+          status: input.status,
+          reason: input.reason,
+          initiatedByUserId: input.actorUserId,
+          razorpayRefundId: input.razorpayRefundId,
+          providerPayload: input.providerPayload,
+        },
+        select: { id: true, status: true, razorpayRefundId: true },
+      });
+      if (input.status === OrderRefundStatus.COMPLETED) {
+        await persistOrderPayment(tx, input.orderId);
+      }
+      return refund;
     });
   }
 

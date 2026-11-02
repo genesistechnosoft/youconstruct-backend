@@ -48,16 +48,7 @@ export class RazorpayClient implements OnModuleInit {
         currency: order.currency,
       };
     } catch (error) {
-      const nodeEnv =
-        this.configService.get<string>('NODE_ENV') ?? 'development';
-      if (nodeEnv === 'production') {
-        throw error;
-      }
-      return {
-        id: `order_test_${input.receipt}`,
-        amount: input.amountPaise,
-        currency: 'INR',
-      };
+      throw new Error(this.razorpayErrorMessage(error));
     }
   }
 
@@ -66,38 +57,48 @@ export class RazorpayClient implements OnModuleInit {
     amountPaise: number;
     notes?: Record<string, string>;
   }) {
-    if (this.isNonProdTestPayment(input.paymentId)) {
-      return {
-        id: `rfnd_test_${input.paymentId}_${Date.now()}`,
+    try {
+      const refund = await this.client.payments.refund(input.paymentId, {
         amount: input.amountPaise,
-        status: 'processed',
-        payload: {
-          stub: true,
-          paymentId: input.paymentId,
-          notes: input.notes ?? null,
-        },
+        notes: input.notes,
+      });
+      return {
+        id: String(refund.id),
+        amount: Number(refund.amount),
+        status: String(refund.status ?? ''),
+        payload: refund as unknown as Record<string, unknown>,
       };
+    } catch (error) {
+      throw new Error(this.razorpayErrorMessage(error));
     }
-
-    const refund = await this.client.payments.refund(input.paymentId, {
-      amount: input.amountPaise,
-      notes: input.notes,
-    });
-
-    return {
-      id: String(refund.id),
-      amount: Number(refund.amount),
-      status: String(refund.status ?? ''),
-      payload: refund as unknown as Record<string, unknown>,
-    };
   }
 
-  private isNonProdTestPayment(paymentId: string): boolean {
-    const nodeEnv = this.configService.get<string>('NODE_ENV') ?? 'development';
-    if (nodeEnv === 'production') {
-      return false;
+  private razorpayErrorMessage(error: unknown): string {
+    if (error && typeof error === 'object') {
+      const body = error as {
+        message?: string;
+        description?: string;
+        error?: { description?: string; reason?: string };
+      };
+      const description = body.error?.description ?? body.description;
+      const reason = body.error?.reason;
+      if (description && reason) {
+        return `${description} (${reason})`;
+      }
+      if (description) {
+        return description;
+      }
+      if (reason) {
+        return reason;
+      }
+      if (body.message) {
+        return body.message;
+      }
     }
-    return paymentId.startsWith('pay_test_');
+    if (error instanceof Error && error.message) {
+      return error.message;
+    }
+    return 'Razorpay request failed';
   }
 
   verifyPaymentSignature(input: {

@@ -1,7 +1,9 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import {
+  DeliveryCancelResolution,
   DeliveryStatus,
   NotificationEventType,
+  PlatformRole,
   SubOrderStatus,
 } from '../../../generated/prisma/client.js';
 import { COMMERCE_OTP_PURPOSES } from '../../common/otp/commerce-otp.constants';
@@ -11,6 +13,10 @@ import { domainBadRequest } from '../../common/errors/domain-exception';
 import { formatMoney } from '../../common/utils/money.util';
 import { NotificationEmitterService } from '../notifications/notification-emitter.service';
 import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
+import {
+  CancelRefundService,
+  type DeliveryRefundCapture,
+} from './cancel-refund.service';
 import { DeliveriesRepository } from './deliveries.repository';
 import { CreateDeliveryDto } from './dto/create-delivery.dto';
 import {
@@ -27,6 +33,7 @@ import {
 export class DeliveriesService {
   constructor(
     private readonly deliveriesRepository: DeliveriesRepository,
+    private readonly cancelRefundService: CancelRefundService,
     private readonly commerceOtp: CommerceOtpService,
     private readonly platformSettings: PlatformSettingsService,
     private readonly notifications: NotificationEmitterService,
@@ -119,26 +126,13 @@ export class DeliveriesService {
       await this.verifyDeliveryOtp(deliveryId, dto.otp);
     }
 
-    const updated = await this.deliveriesRepository.transitionDelivery({
+    return this.changeStatus({
+      delivery,
       deliveryId,
-      fromStatus: delivery.status,
-      toStatus: dto.status,
       actorUserId: userId,
-      trackingNumber: dto.trackingNumber,
-      courierName: dto.courierName,
-      vendorRemarks: dto.vendorRemarks,
-      customerRemarks: dto.customerRemarks,
+      actorRole: PlatformRole.VENDOR,
+      dto,
     });
-
-    if (dto.status === DeliveryStatus.OUT_FOR_DELIVERY) {
-      await this.sendDeliveryOtp(deliveryId);
-    }
-    this.emitStatusNotifications(delivery.subOrder, dto.status, deliveryId);
-
-    return {
-      message: 'Delivery status updated',
-      data: this.serialize(updated),
-    };
   }
 
   async resendVendorOtp(
@@ -198,32 +192,138 @@ export class DeliveriesService {
         `Cannot transition delivery from ${delivery.status} to ${dto.status}`,
       );
     }
-    if (!dto.reason.trim()) {
+    if (!dto.reason?.trim()) {
       throw domainBadRequest(
         DOMAIN_ERROR_CODES.INVALID_STATUS_TRANSITION,
         'Override reason is required',
       );
     }
 
-    const updated = await this.deliveriesRepository.transitionDelivery({
+    return this.changeStatus({
+      delivery,
       deliveryId,
-      fromStatus: delivery.status,
-      toStatus: dto.status,
       actorUserId: adminUserId,
-      trackingNumber: dto.trackingNumber,
-      courierName: dto.courierName,
-      vendorRemarks: dto.vendorRemarks,
-      customerRemarks: dto.customerRemarks,
-      overriddenByUserId: adminUserId,
-      overrideReason: dto.reason,
+      actorRole: PlatformRole.ADMIN,
+      dto,
+      override: true,
+    });
+  }
+
+  private async changeStatus(input: {
+    delivery: {
+      status: DeliveryStatus;
+      deliveryNumber: string;
+      subOrder: {
+        order: { userId: string };
+        orderId: string;
+        id?: string;
+        subOrderNumber: string;
+      };
+    };
+    deliveryId: string;
+    actorUserId: string;
+    actorRole: PlatformRole;
+    dto: UpdateDeliveryStatusDto;
+    override?: boolean;
+  }) {
+    const reason = input.dto.reason?.trim() ?? '';
+    if (input.dto.status === DeliveryStatus.CANCELLED) {
+      if (!input.dto.resolution) {
+        throw domainBadRequest(
+          DOMAIN_ERROR_CODES.INVALID_STATUS_TRANSITION,
+          'Choose whether to ship this box again or refund the customer',
+        );
+      }
+      if (!reason) {
+        throw domainBadRequest(
+          DOMAIN_ERROR_CODES.INVALID_STATUS_TRANSITION,
+          'A reason is required to cancel a delivery',
+        );
+      }
+    }
+
+    const refund =
+      input.dto.status === DeliveryStatus.CANCELLED &&
+      input.dto.resolution === DeliveryCancelResolution.REFUND
+        ? await this.cancelRefundService.captureDeliveryRefund({
+            deliveryId: input.deliveryId,
+            actorUserId: input.actorUserId,
+            reason,
+          })
+        : undefined;
+
+    const updated = await this.deliveriesRepository.transitionDelivery({
+      deliveryId: input.deliveryId,
+      fromStatus: input.delivery.status,
+      toStatus: input.dto.status,
+      actorUserId: input.actorUserId,
+      actorRole: input.actorRole,
+      trackingNumber: input.dto.trackingNumber,
+      courierName: input.dto.courierName,
+      vendorRemarks:
+        input.actorRole === PlatformRole.VENDOR &&
+        input.dto.status === DeliveryStatus.CANCELLED
+          ? reason
+          : input.dto.vendorRemarks,
+      customerRemarks: input.dto.customerRemarks,
+      ...(input.override
+        ? {
+            overriddenByUserId: input.actorUserId,
+            overrideReason: reason,
+          }
+        : {}),
+      resolution: input.dto.resolution,
+      reason,
+      refund,
     });
 
-    this.emitStatusNotifications(delivery.subOrder, dto.status, deliveryId);
+    if (input.dto.status === DeliveryStatus.OUT_FOR_DELIVERY) {
+      await this.sendDeliveryOtp(input.deliveryId);
+    }
+    if (input.dto.status === DeliveryStatus.CANCELLED && input.dto.resolution) {
+      this.emitCancellationNotification(
+        input.delivery.subOrder,
+        input.deliveryId,
+        input.delivery.deliveryNumber,
+        input.dto.resolution,
+        refund,
+      );
+    } else {
+      this.emitStatusNotifications(
+        input.delivery.subOrder,
+        input.dto.status,
+        input.deliveryId,
+        input.delivery.deliveryNumber,
+      );
+    }
 
     return {
-      message: 'Delivery status updated',
+      message: this.cancellationMessage(
+        input.dto.status,
+        input.dto.resolution,
+        input.delivery.deliveryNumber,
+        refund,
+      ),
       data: this.serialize(updated),
     };
+  }
+
+  private cancellationMessage(
+    status: DeliveryStatus,
+    resolution: DeliveryCancelResolution | undefined,
+    deliveryNumber: string,
+    refund?: DeliveryRefundCapture,
+  ) {
+    if (status !== DeliveryStatus.CANCELLED) {
+      return 'Delivery status updated';
+    }
+    if (resolution === DeliveryCancelResolution.REATTEMPT) {
+      return `${deliveryNumber} was cancelled and will be shipped again`;
+    }
+    if (refund?.createRefund) {
+      return `Refunded ₹${formatMoney(refund.refundAmount)} for ${deliveryNumber}`;
+    }
+    return `${deliveryNumber} was cancelled`;
   }
 
   private async sendDeliveryOtp(deliveryId: string) {
@@ -303,14 +403,10 @@ export class DeliveriesService {
   }
 
   private assertSubOrderOpen(status: SubOrderStatus) {
-    if (
-      status === SubOrderStatus.CANCELLED ||
-      status === SubOrderStatus.REFUNDED ||
-      status === SubOrderStatus.PENDING
-    ) {
+    if (status !== SubOrderStatus.PROCESSING) {
       throw domainBadRequest(
         DOMAIN_ERROR_CODES.DELIVERY_QTY_INVALID,
-        'Deliveries can only be created for confirmed sub-orders',
+        'Deliveries can only be created after packing has started',
       );
     }
   }
@@ -337,13 +433,14 @@ export class DeliveriesService {
     },
     status: DeliveryStatus,
     deliveryId: string,
+    deliveryNumber: string,
   ) {
     if (status === DeliveryStatus.SHIPPED) {
       this.notifications.emit({
         userId: subOrder.order.userId,
         eventType: NotificationEventType.ORDER_SHIPPED,
-        title: 'Order shipped',
-        body: `Sub-order ${subOrder.subOrderNumber} has been shipped`,
+        title: 'Shipment shipped',
+        body: `${deliveryNumber} has shipped`,
         data: {
           orderId: subOrder.orderId,
           subOrderId: subOrder.id,
@@ -355,8 +452,8 @@ export class DeliveriesService {
       this.notifications.emit({
         userId: subOrder.order.userId,
         eventType: NotificationEventType.ORDER_DELIVERED,
-        title: 'Order delivered',
-        body: `Sub-order ${subOrder.subOrderNumber} has a confirmed delivery`,
+        title: 'Shipment delivered',
+        body: `${deliveryNumber} was delivered`,
         data: {
           orderId: subOrder.orderId,
           subOrderId: subOrder.id,
@@ -364,6 +461,45 @@ export class DeliveriesService {
         },
       });
     }
+  }
+
+  private emitCancellationNotification(
+    subOrder: {
+      order: { userId: string };
+      orderId: string;
+      id?: string;
+    },
+    deliveryId: string,
+    deliveryNumber: string,
+    resolution: DeliveryCancelResolution,
+    refund?: DeliveryRefundCapture,
+  ) {
+    const refunded = Boolean(refund?.createRefund);
+    const title =
+      resolution === DeliveryCancelResolution.REATTEMPT
+        ? 'Shipment will be sent again'
+        : refunded
+          ? 'Shipment refunded'
+          : 'Shipment cancelled';
+    const body =
+      resolution === DeliveryCancelResolution.REATTEMPT
+        ? `${deliveryNumber} was cancelled and will be shipped again`
+        : refunded
+          ? `${deliveryNumber} was cancelled. ₹${formatMoney(refund!.refundAmount)} was refunded`
+          : `${deliveryNumber} was cancelled`;
+    this.notifications.emit({
+      userId: subOrder.order.userId,
+      eventType: refunded
+        ? NotificationEventType.ORDER_REFUNDED
+        : NotificationEventType.ORDER_CANCELLED,
+      title,
+      body,
+      data: {
+        orderId: subOrder.orderId,
+        subOrderId: subOrder.id,
+        deliveryId,
+      },
+    });
   }
 
   private buildDeliveryNumber(): string {

@@ -4,15 +4,23 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import {
+  DeliveryCancelResolution,
   DeliveryStatus,
+  FulfillmentStage,
+  OrderRefundStatus,
   PaymentMethod,
+  PaymentStatus,
+  PlatformRole,
   Prisma,
+  RestockStatus,
+  SubOrderStatus,
   TransactionReason,
   TransactionType,
 } from '../../../generated/prisma/client.js';
 import { PrismaService } from '../../prisma/prisma.service';
 import { roundMoney } from '../../common/utils/money.util';
 import { persistOrderFulfillment } from './fulfillment';
+import { persistOrderPayment } from './payment-status';
 import { ORDER_DETAIL_SELECT } from './orders.repository';
 
 const DELIVERY_SELECT = {
@@ -20,6 +28,7 @@ const DELIVERY_SELECT = {
   deliveryNumber: true,
   subOrderId: true,
   status: true,
+  cancelResolution: true,
   trackingNumber: true,
   courierName: true,
   shippingLabelUrl: true,
@@ -224,19 +233,85 @@ export class DeliveriesRepository {
     });
   }
 
+  findCancellationContext(deliveryId: string) {
+    return this.prisma.delivery.findUnique({
+      where: { id: deliveryId },
+      select: {
+        id: true,
+        deliveryNumber: true,
+        status: true,
+        items: {
+          select: { orderItemId: true, quantity: true },
+        },
+        subOrder: {
+          select: {
+            id: true,
+            orderId: true,
+            subtotal: true,
+            discountAmount: true,
+            onlineMerchandiseAmount: true,
+            onlineShippingAmount: true,
+            items: {
+              select: { id: true, quantity: true, total: true },
+            },
+            deliveries: {
+              select: { id: true, status: true },
+            },
+            order: {
+              select: {
+                id: true,
+                paymentStatus: true,
+                razorpayPaymentId: true,
+                onlineAmount: true,
+              },
+            },
+          },
+        },
+      },
+    });
+  }
+
   async transitionDelivery(input: {
     deliveryId: string;
     fromStatus: DeliveryStatus;
     toStatus: DeliveryStatus;
     actorUserId: string;
+    actorRole?: PlatformRole | null;
     trackingNumber?: string;
     courierName?: string;
     vendorRemarks?: string;
     customerRemarks?: string;
     overriddenByUserId?: string;
     overrideReason?: string;
+    resolution?: DeliveryCancelResolution;
+    reason?: string;
+    refund?: {
+      createRefund: boolean;
+      refundAmount: Prisma.Decimal;
+      razorpayRefundId?: string | null;
+      providerPayload?: Prisma.InputJsonValue;
+    };
   }) {
     return this.prisma.$transaction(async (tx) => {
+      if (
+        input.toStatus === DeliveryStatus.CANCELLED &&
+        !input.resolution
+      ) {
+        throw new ConflictException(
+          'Delivery cancel requires a resolution',
+        );
+      }
+      const prior = await tx.delivery.findUnique({
+        where: { id: input.deliveryId },
+        select: {
+          subOrder: {
+            select: {
+              orderId: true,
+              order: { select: { paymentStatus: true } },
+            },
+          },
+        },
+      });
       const updated = await tx.delivery.updateMany({
         where: { id: input.deliveryId, status: input.fromStatus },
         data: {
@@ -266,6 +341,9 @@ export class DeliveriesRepository {
           ...(input.toStatus === DeliveryStatus.DELIVERED
             ? { deliveredAt: new Date() }
             : {}),
+          ...(input.toStatus === DeliveryStatus.CANCELLED && input.resolution
+            ? { cancelResolution: input.resolution }
+            : {}),
         },
       });
       if (updated.count !== 1) {
@@ -275,12 +353,41 @@ export class DeliveriesRepository {
       if (input.toStatus === DeliveryStatus.DELIVERED) {
         await this.settleDelivered(tx, input.deliveryId);
       }
+      if (
+        input.toStatus === DeliveryStatus.CANCELLED &&
+        input.resolution === DeliveryCancelResolution.REFUND
+      ) {
+        await this.cancelDeliveryUnits(tx, input.deliveryId);
+        await this.recordRefundCancellation(tx, input);
+      }
+      if (
+        input.toStatus === DeliveryStatus.CANCELLED &&
+        input.resolution === DeliveryCancelResolution.REATTEMPT
+      ) {
+        await this.recordReattempt(tx, input);
+      }
 
       const delivery = await tx.delivery.findUniqueOrThrow({
         where: { id: input.deliveryId },
         select: { subOrderId: true },
       });
       await this.recomputeFulfillment(tx, delivery.subOrderId);
+
+      if (
+        input.toStatus === DeliveryStatus.CANCELLED &&
+        input.resolution === DeliveryCancelResolution.REFUND &&
+        prior?.subOrder.order.paymentStatus === PaymentStatus.PENDING
+      ) {
+        const order = await tx.order.findUnique({
+          where: { id: prior.subOrder.orderId },
+          select: { fulfillmentStage: true },
+        });
+        if (order?.fulfillmentStage === FulfillmentStage.CANCELLED) {
+          await tx.couponUsage.deleteMany({
+            where: { orderId: prior.subOrder.orderId },
+          });
+        }
+      }
 
       return tx.delivery.findUniqueOrThrow({
         where: { id: input.deliveryId },
@@ -517,6 +624,178 @@ export class DeliveriesRepository {
     });
 
     await persistOrderFulfillment(tx, so.orderId);
+    await persistOrderPayment(tx, so.orderId);
+  }
+
+  private async recordReattempt(
+    tx: Prisma.TransactionClient,
+    input: {
+      deliveryId: string;
+      actorUserId: string;
+      reason?: string;
+    },
+  ) {
+    const delivery = await tx.delivery.findUniqueOrThrow({
+      where: { id: input.deliveryId },
+      select: { subOrder: { select: { id: true, status: true } } },
+    });
+    await tx.orderStatusHistory.create({
+      data: {
+        subOrderId: delivery.subOrder.id,
+        status: delivery.subOrder.status,
+        changedByUserId: input.actorUserId,
+        note: `Will ship again. ${input.reason ?? ''}`.trim(),
+      },
+    });
+  }
+
+  private async recordRefundCancellation(
+    tx: Prisma.TransactionClient,
+    input: {
+      deliveryId: string;
+      actorUserId: string;
+      actorRole?: PlatformRole | null;
+      reason?: string;
+      refund?: {
+        createRefund: boolean;
+        refundAmount: Prisma.Decimal;
+        razorpayRefundId?: string | null;
+        providerPayload?: Prisma.InputJsonValue;
+      };
+    },
+  ) {
+    const delivery = await tx.delivery.findUniqueOrThrow({
+      where: { id: input.deliveryId },
+      select: {
+        subOrder: {
+          select: {
+            id: true,
+            orderId: true,
+            status: true,
+          },
+        },
+      },
+    });
+    const so = delivery.subOrder;
+    const amount = input.refund?.refundAmount ?? new Prisma.Decimal(0);
+    const createRefund = Boolean(
+      input.refund?.createRefund && amount.greaterThan(0),
+    );
+    let refundId: string | undefined;
+    if (createRefund && input.refund) {
+      const refund = await tx.orderRefund.create({
+        data: {
+          orderId: so.orderId,
+          subOrderId: so.id,
+          amount,
+          status: OrderRefundStatus.COMPLETED,
+          reason: input.reason ?? 'Delivery refund',
+          initiatedByUserId: input.actorUserId,
+          razorpayRefundId: input.refund.razorpayRefundId ?? null,
+          providerPayload: input.refund.providerPayload,
+        },
+        select: { id: true },
+      });
+      refundId = refund.id;
+    }
+
+    await tx.orderCancellation.create({
+      data: {
+        orderId: so.orderId,
+        subOrderId: so.id,
+        actorUserId: input.actorUserId,
+        actorRole: input.actorRole ?? null,
+        reason: input.reason ?? 'Delivery cancelled',
+        restockStatus: RestockStatus.COMPLETED,
+        refundId: refundId ?? null,
+      },
+    });
+
+    const items = await tx.orderItem.findMany({
+      where: { subOrderId: so.id },
+      select: { quantity: true, cancelledQuantity: true },
+    });
+    const boxes = await tx.delivery.findMany({
+      where: { subOrderId: so.id },
+      select: {
+        status: true,
+        items: { select: { quantity: true } },
+      },
+    });
+    const ordered = items.reduce((sum, item) => sum + item.quantity, 0);
+    const cancelled = items.reduce(
+      (sum, item) => sum + item.cancelledQuantity,
+      0,
+    );
+    const delivered = boxes
+      .filter((box) => box.status === DeliveryStatus.DELIVERED)
+      .reduce(
+        (sum, box) =>
+          sum + box.items.reduce((lineSum, line) => lineSum + line.quantity, 0),
+        0,
+      );
+    const stillToDeliver = ordered - cancelled - delivered > 0;
+    const nextStatus =
+      stillToDeliver || delivered > 0
+        ? SubOrderStatus.PROCESSING
+        : createRefund
+          ? SubOrderStatus.REFUNDED
+          : SubOrderStatus.CANCELLED;
+    const closed =
+      so.status === SubOrderStatus.CANCELLED ||
+      so.status === SubOrderStatus.REFUNDED;
+    if (!closed && so.status !== nextStatus) {
+      await tx.subOrder.update({
+        where: { id: so.id },
+        data: { status: nextStatus },
+      });
+    }
+    await tx.orderStatusHistory.create({
+      data: {
+        subOrderId: so.id,
+        status: closed ? so.status : nextStatus,
+        changedByUserId: input.actorUserId,
+        note: createRefund
+          ? `Refunded. ${input.reason ?? ''}`.trim()
+          : `Cancelled. ${input.reason ?? ''}`.trim(),
+      },
+    });
+  }
+
+  private async cancelDeliveryUnits(
+    tx: Prisma.TransactionClient,
+    deliveryId: string,
+  ) {
+    const lines = await tx.deliveryItem.findMany({
+      where: { deliveryId },
+      select: {
+        quantity: true,
+        orderItem: {
+          select: {
+            id: true,
+            variantId: true,
+            quantity: true,
+            cancelledQuantity: true,
+          },
+        },
+      },
+    });
+
+    for (const line of lines) {
+      const room = line.orderItem.quantity - line.orderItem.cancelledQuantity;
+      const quantity = Math.min(line.quantity, Math.max(0, room));
+      if (quantity <= 0) {
+        continue;
+      }
+      await tx.orderItem.update({
+        where: { id: line.orderItem.id },
+        data: { cancelledQuantity: { increment: quantity } },
+      });
+      await tx.productInventory.updateMany({
+        where: { variantId: line.orderItem.variantId },
+        data: { quantity: { increment: quantity } },
+      });
+    }
   }
 
   async findOrderDetail(orderId: string) {

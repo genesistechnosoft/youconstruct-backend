@@ -6,6 +6,7 @@ import {
   forwardRef,
 } from '@nestjs/common';
 import {
+  DeliveryStatus,
   NotificationEventType,
   OrderRefundStatus,
   PaymentStatus,
@@ -26,8 +27,16 @@ import {
   isCustomerCancelAllowed,
   isDeliveryDispatched,
 } from './order-status.util';
+import { DeliveriesRepository } from './deliveries.repository';
 import { OrdersRepository } from './orders.repository';
 import { OrdersService } from './orders.service';
+
+export type DeliveryRefundCapture = {
+  createRefund: boolean;
+  refundAmount: Prisma.Decimal;
+  razorpayRefundId: string | null;
+  providerPayload?: Prisma.InputJsonValue;
+};
 
 type CancelAudience = 'customer' | 'vendor' | 'admin' | 'system';
 type CancelSubOrderRow = NonNullable<
@@ -40,6 +49,7 @@ export class CancelRefundService {
 
   constructor(
     private readonly ordersRepository: OrdersRepository,
+    private readonly deliveriesRepository: DeliveriesRepository,
     private readonly platformSettings: PlatformSettingsService,
     @Inject(forwardRef(() => RazorpayClient))
     private readonly razorpayClient: RazorpayClient,
@@ -223,6 +233,8 @@ export class CancelRefundService {
       );
     }
 
+    let refundedAny = false;
+
     for (const target of refundable) {
       const so = await this.ordersRepository.findSubOrderForCancelRefund(
         target.id,
@@ -240,63 +252,36 @@ export class CancelRefundService {
       }
 
       const captured = this.isCaptured(so);
-      if (!captured && so.order.paymentMethod !== undefined) {
-        if (
-          so.order.paymentStatus !== PaymentStatus.PAID &&
-          so.order.paymentStatus !== PaymentStatus.PARTIALLY_PAID
-        ) {
-          await this.ordersRepository.applySubOrderCancelOrRefund({
-            subOrderId: so.id,
-            actorUserId: input.actorUserId,
-            actorRole: PlatformRole.ADMIN,
-            reason: input.note ?? 'Admin refund',
-            targetStatus: SubOrderStatus.CANCELLED,
-            restock: true,
-            clawbackWallet: false,
-            createRefund: true,
-            refundAmount: new Prisma.Decimal(0),
-            refundStatus: OrderRefundStatus.COMPLETED,
-          });
-          continue;
-        }
-      }
-
-      if (captured) {
-        await this.refundSubOrderInternal({
-          so,
-          actorUserId: input.actorUserId,
-          actorRole: PlatformRole.ADMIN,
-          reason: input.note ?? 'Admin refund',
-          fromCancel: false,
-          audience: 'admin',
-        });
-      } else {
+      if (!captured) {
         await this.ordersRepository.applySubOrderCancelOrRefund({
           subOrderId: so.id,
           actorUserId: input.actorUserId,
           actorRole: PlatformRole.ADMIN,
-          reason: input.note ?? 'Admin refund',
-          targetStatus: SubOrderStatus.REFUNDED,
+          reason: input.note ?? 'Admin cancel',
+          targetStatus: SubOrderStatus.CANCELLED,
           restock: true,
           clawbackWallet: false,
-          createRefund: true,
-          refundAmount: this.computeOnlineRefund(so),
-          refundStatus: OrderRefundStatus.COMPLETED,
+          createRefund: false,
         });
-
-        this.notifications.emit({
-          userId: so.order.userId,
-          eventType: NotificationEventType.ORDER_REFUNDED,
-          title: 'Order refunded',
-          body: input.note ?? 'Your order has been refunded',
-          data: { orderId: so.orderId, subOrderId: so.id },
-        });
+        continue;
       }
+
+      refundedAny = true;
+      await this.refundSubOrderInternal({
+        so,
+        actorUserId: input.actorUserId,
+        actorRole: PlatformRole.ADMIN,
+        reason: input.note ?? 'Admin refund',
+        fromCancel: false,
+        audience: 'admin',
+      });
     }
 
     const refreshed = await this.ordersRepository.findOrderById(input.orderId);
     return {
-      message: 'Refund completed successfully',
+      message: refundedAny
+        ? 'Refund completed successfully'
+        : 'Order cancelled',
       data: this.ordersService.serializeOrderForAudience(refreshed!, 'admin'),
     };
   }
@@ -439,11 +424,123 @@ export class CancelRefundService {
     };
   }
 
+  async captureDeliveryRefund(input: {
+    deliveryId: string;
+    actorUserId: string;
+    reason: string;
+  }): Promise<DeliveryRefundCapture> {
+    const delivery = await this.deliveriesRepository.findCancellationContext(
+      input.deliveryId,
+    );
+    if (!delivery) {
+      throw new NotFoundException('Delivery not found');
+    }
+    const none: DeliveryRefundCapture = {
+      createRefund: false,
+      refundAmount: new Prisma.Decimal(0),
+      razorpayRefundId: null,
+    };
+    const order = delivery.subOrder.order;
+    const captured =
+      Boolean(order.razorpayPaymentId) &&
+      (order.paymentStatus === PaymentStatus.PAID ||
+        order.paymentStatus === PaymentStatus.PARTIALLY_PAID ||
+        order.paymentStatus === PaymentStatus.PARTIALLY_REFUNDED);
+    if (!captured || !order.razorpayPaymentId) {
+      return none;
+    }
+
+    const refundAmount = await this.deliveryRefundAmount(delivery);
+    if (refundAmount.lessThanOrEqualTo(0)) {
+      return none;
+    }
+
+    const amountPaise = toPaise(refundAmount);
+    try {
+      const refund = await this.razorpayClient.createRefund({
+        paymentId: order.razorpayPaymentId,
+        amountPaise,
+        notes: {
+          orderId: delivery.subOrder.orderId,
+          subOrderId: delivery.subOrder.id,
+          deliveryId: delivery.id,
+          reason: input.reason.slice(0, 100),
+        },
+      });
+      return {
+        createRefund: true,
+        refundAmount,
+        razorpayRefundId: refund.id,
+        providerPayload: refund.payload as Prisma.InputJsonValue,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Refund failed';
+      await this.ordersRepository.markRefundFailed({
+        orderId: delivery.subOrder.orderId,
+        subOrderId: delivery.subOrder.id,
+        actorUserId: input.actorUserId,
+        amount: refundAmount,
+        reason: message,
+      });
+      throw domainBadRequest(
+        DOMAIN_ERROR_CODES.REFUND_NOT_ALLOWED,
+        `Razorpay refund failed: ${message}`,
+      );
+    }
+  }
+
+  private async deliveryRefundAmount(delivery: {
+    id: string;
+    items: Array<{ orderItemId: string; quantity: number }>;
+    subOrder: {
+      orderId: string;
+      subtotal: Prisma.Decimal;
+      discountAmount: Prisma.Decimal;
+      onlineMerchandiseAmount: Prisma.Decimal;
+      onlineShippingAmount: Prisma.Decimal;
+      items: Array<{ id: string; quantity: number; total: Prisma.Decimal }>;
+      deliveries: Array<{ id: string; status: DeliveryStatus }>;
+      order: { onlineAmount: Prisma.Decimal };
+    };
+  }): Promise<Prisma.Decimal> {
+    const so = delivery.subOrder;
+    const merchNet = Prisma.Decimal.max(
+      so.subtotal.sub(so.discountAmount),
+      new Prisma.Decimal(0),
+    );
+    let slice = new Prisma.Decimal(0);
+    for (const line of delivery.items) {
+      const item = so.items.find((row) => row.id === line.orderItemId);
+      if (!item || item.quantity <= 0) {
+        continue;
+      }
+      slice = slice.add(item.total.div(item.quantity).mul(line.quantity));
+    }
+    const merchRefund = merchNet.greaterThan(0)
+      ? roundMoney(slice.div(merchNet).mul(so.onlineMerchandiseAmount))
+      : new Prisma.Decimal(0);
+    const otherDispatched = so.deliveries.some(
+      (box) => box.id !== delivery.id && isDeliveryDispatched(box.status),
+    );
+    const freight = otherDispatched
+      ? new Prisma.Decimal(0)
+      : so.onlineShippingAmount;
+    const already = await this.ordersRepository.sumCompletedRefunds(
+      so.orderId,
+    );
+    const cap = Prisma.Decimal.max(
+      so.order.onlineAmount.sub(already),
+      new Prisma.Decimal(0),
+    );
+    return Prisma.Decimal.min(merchRefund.add(freight), cap);
+  }
+
   private isCaptured(so: CancelSubOrderRow): boolean {
     return (
       Boolean(so.order.razorpayPaymentId) &&
       (so.order.paymentStatus === PaymentStatus.PAID ||
-        so.order.paymentStatus === PaymentStatus.PARTIALLY_PAID)
+        so.order.paymentStatus === PaymentStatus.PARTIALLY_PAID ||
+        so.order.paymentStatus === PaymentStatus.PARTIALLY_REFUNDED)
     );
   }
 

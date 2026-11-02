@@ -22,6 +22,7 @@ import {
 } from '../../../generated/prisma/client.js';
 import { PrismaService } from '../../prisma/prisma.service';
 import { persistOrderFulfillment } from './fulfillment';
+import { persistOrderPayment } from './payment-status';
 import { DEFAULT_PLATFORM_COMMISSION_RATE } from './order.constants';
 
 const ADDRESS_SELECT = {
@@ -192,6 +193,7 @@ export const ORDER_DETAIL_SELECT = {
           id: true,
           deliveryNumber: true,
           status: true,
+          cancelResolution: true,
           trackingNumber: true,
           courierName: true,
           shippingLabelUrl: true,
@@ -279,6 +281,7 @@ const SUB_ORDER_LIST_SELECT = {
       id: true,
       deliveryNumber: true,
       status: true,
+      cancelResolution: true,
       shippedAt: true,
       deliveredAt: true,
       trackingNumber: true,
@@ -1158,15 +1161,30 @@ export class OrdersRepository {
         await this.clawbackWalletForSubOrder(tx, so);
       }
 
-      await tx.subOrder.update({
-        where: { id: so.id },
-        data: { status: input.targetStatus },
-      });
+      const deliveredUnits = [...deliveredByItem.values()].reduce(
+        (sum, qty) => sum + qty,
+        0,
+      );
+      const refundedCaptured =
+        input.createRefund &&
+        (input.refundAmount?.greaterThan(0) ?? false);
+      const nextStatus =
+        deliveredUnits > 0
+          ? SubOrderStatus.PROCESSING
+          : refundedCaptured
+            ? SubOrderStatus.REFUNDED
+            : SubOrderStatus.CANCELLED;
 
+      if (so.status !== nextStatus) {
+        await tx.subOrder.update({
+          where: { id: so.id },
+          data: { status: nextStatus },
+        });
+      }
       await tx.orderStatusHistory.create({
         data: {
           subOrderId: so.id,
-          status: input.targetStatus,
+          status: nextStatus,
           changedByUserId: input.actorUserId,
           note: input.reason,
         },
@@ -1184,45 +1202,8 @@ export class OrdersRepository {
         },
       });
 
-      const siblings = await tx.subOrder.findMany({
-        where: { orderId: so.orderId },
-        select: { status: true },
-      });
-
-      const paymentUpdate: {
-        paymentStatus?: PaymentStatus;
-        paymentTimeoutJobId?: null;
-      } = {};
-
-      if (siblings.every((s) => s.status === SubOrderStatus.CANCELLED)) {
-        const captured =
-          so.order.paymentStatus === PaymentStatus.PAID ||
-          so.order.paymentStatus === PaymentStatus.PARTIALLY_PAID;
-        paymentUpdate.paymentStatus = captured
-          ? PaymentStatus.REFUNDED
-          : PaymentStatus.FAILED;
-        paymentUpdate.paymentTimeoutJobId = null;
-      } else if (siblings.every((s) => s.status === SubOrderStatus.REFUNDED)) {
-        paymentUpdate.paymentStatus = PaymentStatus.REFUNDED;
-      } else if (
-        siblings.some((s) => s.status === SubOrderStatus.REFUNDED) &&
-        !siblings.some(
-          (s) =>
-            s.status !== SubOrderStatus.CANCELLED &&
-            s.status !== SubOrderStatus.REFUNDED,
-        )
-      ) {
-        paymentUpdate.paymentStatus = PaymentStatus.REFUNDED;
-      }
-
-      if (paymentUpdate.paymentStatus) {
-        await tx.order.update({
-          where: { id: so.orderId },
-          data: paymentUpdate,
-        });
-      }
-
       const parent = await persistOrderFulfillment(tx, so.orderId);
+      await persistOrderPayment(tx, so.orderId);
       if (
         so.order.paymentStatus === PaymentStatus.PENDING &&
         parent.stage === FulfillmentStage.CANCELLED
@@ -1385,12 +1366,10 @@ export class OrdersRepository {
 
       await tx.order.update({
         where: { id: order.id },
-        data: {
-          paymentStatus: PaymentStatus.FAILED,
-          paymentTimeoutJobId: null,
-        },
+        data: { paymentTimeoutJobId: null },
       });
       await persistOrderFulfillment(tx, order.id);
+      await persistOrderPayment(tx, order.id);
 
       return { orderId: order.id, userId: order.userId };
     });
@@ -1439,19 +1418,14 @@ export class OrdersRepository {
         };
       }
 
-      const nextPaymentStatus =
-        order.paymentMethod === PaymentMethod.COD
-          ? PaymentStatus.PARTIALLY_PAID
-          : PaymentStatus.PAID;
-
       await tx.order.update({
         where: { id: order.id },
         data: {
-          paymentStatus: nextPaymentStatus,
           razorpayPaymentId: input.razorpayPaymentId,
           paymentTimeoutJobId: null,
         },
       });
+      await persistOrderPayment(tx, order.id);
 
       for (const so of order.subOrders) {
         if (so.status === SubOrderStatus.PENDING) {

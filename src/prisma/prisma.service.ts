@@ -9,6 +9,7 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import { PrismaClient } from '../../generated/prisma/client.js';
 
+
 type PrismaQueryEvent = {
   duration: number;
   target: string;
@@ -86,4 +87,5 @@ export class PrismaService
     return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
   }
 }
+
 
