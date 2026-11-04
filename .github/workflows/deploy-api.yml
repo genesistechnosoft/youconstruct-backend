@@ -100,7 +100,17 @@ jobs:
             pm2 startOrReload ecosystem.config.js --update-env
             pm2 save
 
-            sleep 3
-            curl -sf "http://127.0.0.1:3000/api/v1/health" >/dev/null
+            for i in $(seq 1 30); do
+              if curl -sf "http://127.0.0.1:3000/api/v1/health" >/dev/null; then
+                echo "API healthy after ${i}s"
+                break
+              fi
+              if [ "$i" -eq 30 ]; then
+                echo "API health check failed"
+                pm2 logs youconstruct-api --lines 80 --nostream || true
+                exit 1
+              fi
+              sleep 1
+            done
 
             ls -1dt "$APP_ROOT/releases"/*/ 2>/dev/null | tail -n +3 | xargs -r rm -rf
