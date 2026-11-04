@@ -90,6 +90,10 @@ jobs:
             cp "$RELEASE/ecosystem.config.js" "$APP_ROOT/ecosystem.config.js"
 
             cd "$RELEASE"
+            set -a
+            # shellcheck disable=SC1091
+            . ./.env
+            set +a
             ./node_modules/.bin/prisma migrate deploy
 
             cd "$APP_ROOT"
