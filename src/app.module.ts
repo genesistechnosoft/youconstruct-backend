@@ -11,7 +11,6 @@ import { OwnerOnlyGuard } from './common/guards/owner-only.guard';
 import { PermissionsGuard } from './common/guards/permissions.guard';
 import { RolesGuard } from './common/guards/roles.guard';
 import { ImpersonationAuditInterceptor } from './common/interceptors/impersonation-audit.interceptor';
-import { KeepAliveService } from './common/keep-alive/keep-alive.service';
 import { RedisThrottlerStorage } from './common/throttling/redis-throttler.storage';
 import { AuthModule } from './modules/auth/auth.module';
 import { AttributesModule } from './modules/attributes/attributes.module';
@@ -94,7 +93,6 @@ import { CommerceOtpModule } from './common/otp/commerce-otp.module';
   ],
   controllers: [AppController],
   providers: [
-    KeepAliveService,
     {
       provide: APP_GUARD,
       useClass: ThrottlerGuard,

@@ -1,0 +1,104 @@
+name: Deploy API
+
+on:
+  push:
+    branches: [production]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-api-production
+  cancel-in-progress: false
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.15.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate Prisma client
+        run: pnpm exec prisma generate
+        env:
+          DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Pack release
+        run: |
+          set -euo pipefail
+          tar -czf release.tar.gz \
+            dist \
+            node_modules \
+            package.json \
+            pnpm-lock.yaml \
+            prisma \
+            prisma.config.ts \
+            generated \
+            ecosystem.config.js
+
+      - name: Upload release to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.SSH_PORT || 22 }}
+          source: release.tar.gz
+          target: /var/www/0b81a939-b91e-4464-b67c-a465d1d160f2/public_html/releases/${{ github.sha }}/
+
+      - name: Activate release and reload PM2
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.SSH_PORT || 22 }}
+          script: |
+            set -euo pipefail
+
+            export NVM_DIR="$HOME/.nvm"
+            # shellcheck disable=SC1091
+            [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+
+            APP_ROOT="/var/www/0b81a939-b91e-4464-b67c-a465d1d160f2/public_html"
+            RELEASE="$APP_ROOT/releases/${{ github.sha }}"
+
+            test -f "$RELEASE/release.tar.gz"
+            tar -xzf "$RELEASE/release.tar.gz" -C "$RELEASE"
+            rm -f "$RELEASE/release.tar.gz"
+            test -f "$RELEASE/dist/src/main.js"
+            test -f "$APP_ROOT/shared/.env"
+
+            ln -sfn "$RELEASE" "$APP_ROOT/current"
+            cp "$APP_ROOT/shared/.env" "$RELEASE/.env"
+            cp "$RELEASE/ecosystem.config.js" "$APP_ROOT/ecosystem.config.js"
+
+            cd "$RELEASE"
+            ./node_modules/.bin/prisma migrate deploy
+
+            cd "$APP_ROOT"
+            pm2 startOrReload ecosystem.config.js --update-env
+            pm2 save
+
+            sleep 3
+            curl -sf "http://127.0.0.1:3000/api/v1/health" >/dev/null
+
+            ls -1dt "$APP_ROOT/releases"/*/ 2>/dev/null | tail -n +3 | xargs -r rm -rf
