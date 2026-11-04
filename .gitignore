@@ -63,3 +63,4 @@ plan.md
 .cursor/plans
 .kiro
 youconstruct.dump
+.env_prod

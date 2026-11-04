@@ -984,12 +984,12 @@ async function main() {
   await seedCategories();
   await seedPlatformSettings();
   await seedPermissions();
-  const platformAdminRole = await seedPlatformAdminRole();
-  await seedSupportAgentRole();
-  await seedSuperAdmin(passwordHash);
-  await seedPlatformAdminStaff(passwordHash, platformAdminRole.id);
-  const { vendorProfile } = await seedApprovedVendor(passwordHash);
-  await seedVendorStaff(passwordHash, vendorProfile.id);
+  // const platformAdminRole = await seedPlatformAdminRole();
+  // await seedSupportAgentRole();
+  // await seedSuperAdmin(passwordHash);
+  // await seedPlatformAdminStaff(passwordHash, platformAdminRole.id);
+  // const { vendorProfile } = await seedApprovedVendor(passwordHash);
+  // await seedVendorStaff(passwordHash, vendorProfile.id);
 
   console.log(`Default password for seeded users: ${password}`);
 }
