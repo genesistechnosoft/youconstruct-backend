@@ -4,6 +4,14 @@ on:
   push:
     branches: [production]
   workflow_dispatch:
+    inputs:
+      action:
+        description: Deploy a new build, or roll back to the saved previous copy
+        type: choice
+        options:
+          - deploy
+          - rollback
+        default: deploy
 
 concurrency:
   group: deploy-api-production
@@ -11,6 +19,7 @@ concurrency:
 
 jobs:
   build-and-deploy:
+    if: github.event_name == 'push' || inputs.action == 'deploy'
     runs-on: ubuntu-latest
     environment: production
     timeout-minutes: 30
@@ -39,9 +48,17 @@ jobs:
       - name: Build
         run: pnpm run build
 
-      - name: Pack release
+      - name: Pack app
         run: |
           set -euo pipefail
+          node -e '
+            const fs = require("fs");
+            const pkgPath = "package.json";
+            const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8"));
+            pkg.scripts = pkg.scripts || {};
+            pkg.scripts.start = "node dist/src/main.js";
+            fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + "\n");
+          '
           tar -czf release.tar.gz \
             dist \
             node_modules \
@@ -49,10 +66,21 @@ jobs:
             pnpm-lock.yaml \
             prisma \
             prisma.config.ts \
-            generated \
-            ecosystem.config.js
+            generated
 
-      - name: Upload release to server
+      - name: Prepare upload directory
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.SSH_PORT || 22 }}
+          script: |
+            set -euo pipefail
+            rm -rf "$HOME/api-upload"
+            mkdir -p "$HOME/api-upload"
+
+      - name: Upload app to server
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.SSH_HOST }}
@@ -60,9 +88,9 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: ${{ secrets.SSH_PORT || 22 }}
           source: release.tar.gz
-          target: /var/www/0b81a939-b91e-4464-b67c-a465d1d160f2/public_html/releases/${{ github.sha }}/
+          target: api-upload/
 
-      - name: Activate release and reload PM2
+      - name: Publish app and restart
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ secrets.SSH_HOST }}
@@ -72,45 +100,101 @@ jobs:
           script: |
             set -euo pipefail
 
-            export NVM_DIR="$HOME/.nvm"
-            # shellcheck disable=SC1091
-            [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+            APP_ROOT="$HOME/public_html"
+            STAGE="$HOME/api-upload"
+            PREV="$HOME/previous"
 
-            APP_ROOT="/var/www/0b81a939-b91e-4464-b67c-a465d1d160f2/public_html"
-            RELEASE="$APP_ROOT/releases/${{ github.sha }}"
+            test -f "$STAGE/release.tar.gz"
+            test -f "$APP_ROOT/.env"
 
-            test -f "$RELEASE/release.tar.gz"
-            tar -xzf "$RELEASE/release.tar.gz" -C "$RELEASE"
-            rm -f "$RELEASE/release.tar.gz"
-            test -f "$RELEASE/dist/src/main.js"
-            test -f "$APP_ROOT/shared/.env"
+            tar -xzf "$STAGE/release.tar.gz" -C "$STAGE"
+            rm -f "$STAGE/release.tar.gz"
+            test -f "$STAGE/dist/src/main.js"
+            test -f "$STAGE/package.json"
 
-            ln -sfn "$RELEASE" "$APP_ROOT/current"
-            cp "$APP_ROOT/shared/.env" "$RELEASE/.env"
-            cp "$RELEASE/ecosystem.config.js" "$APP_ROOT/ecosystem.config.js"
+            if [ -f "$APP_ROOT/dist/src/main.js" ]; then
+              rm -rf "$PREV"
+              mkdir -p "$PREV"
+              rsync -a \
+                --exclude .htaccess \
+                --exclude error_pages \
+                --exclude .env \
+                --exclude releases \
+                --exclude current \
+                --exclude shared \
+                --exclude ecosystem.config.js \
+                "$APP_ROOT"/ "$PREV"/
+              echo "Saved live app to $PREV"
+            else
+              echo "No live app yet; skipping previous snapshot"
+            fi
 
-            cd "$RELEASE"
+            rsync -a --delete \
+              --exclude .htaccess \
+              --exclude error_pages \
+              --exclude .env \
+              "$STAGE"/ "$APP_ROOT"/
+            rm -rf "$STAGE"
+
+            cd "$APP_ROOT"
             set -a
             # shellcheck disable=SC1091
             . ./.env
             set +a
             ./node_modules/.bin/prisma migrate deploy
 
-            cd "$APP_ROOT"
-            pm2 startOrReload ecosystem.config.js --update-env
-            pm2 save
+            fuser -k 3000/tcp || true
 
             for i in $(seq 1 30); do
               if curl -sf "http://127.0.0.1:3000/api/v1/health" >/dev/null; then
                 echo "API healthy after ${i}s"
-                break
-              fi
-              if [ "$i" -eq 30 ]; then
-                echo "API health check failed"
-                pm2 logs youconstruct-api --lines 80 --nostream || true
-                exit 1
+                exit 0
               fi
               sleep 1
             done
 
-            ls -1dt "$APP_ROOT/releases"/*/ 2>/dev/null | tail -n +3 | xargs -r rm -rf
+            echo "API did not become healthy on port 3000"
+            exit 1
+
+  rollback:
+    if: github.event_name == 'workflow_dispatch' && inputs.action == 'rollback'
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 10
+
+    steps:
+      - name: Restore previous app
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.SSH_PORT || 22 }}
+          script: |
+            set -euo pipefail
+
+            APP_ROOT="$HOME/public_html"
+            PREV="$HOME/previous"
+
+            test -f "$PREV/dist/src/main.js"
+            test -f "$PREV/package.json"
+            test -f "$APP_ROOT/.env"
+
+            rsync -a --delete \
+              --exclude .htaccess \
+              --exclude error_pages \
+              --exclude .env \
+              "$PREV"/ "$APP_ROOT"/
+
+            fuser -k 3000/tcp || true
+
+            for i in $(seq 1 30); do
+              if curl -sf "http://127.0.0.1:3000/api/v1/health" >/dev/null; then
+                echo "API rolled back and healthy after ${i}s"
+                exit 0
+              fi
+              sleep 1
+            done
+
+            echo "API did not become healthy on port 3000 after rollback"
+            exit 1
