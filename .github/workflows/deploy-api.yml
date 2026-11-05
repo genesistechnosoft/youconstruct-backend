@@ -100,6 +100,10 @@ jobs:
           script: |
             set -euo pipefail
 
+            export NVM_DIR="$HOME/.nvm"
+            # shellcheck disable=SC1091
+            [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+
             APP_ROOT="$HOME/public_html"
             STAGE="$HOME/api-upload"
             PREV="$HOME/previous"
@@ -172,6 +176,10 @@ jobs:
           port: ${{ secrets.SSH_PORT || 22 }}
           script: |
             set -euo pipefail
+
+            export NVM_DIR="$HOME/.nvm"
+            # shellcheck disable=SC1091
+            [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
 
             APP_ROOT="$HOME/public_html"
             PREV="$HOME/previous"
