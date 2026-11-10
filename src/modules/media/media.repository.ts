@@ -12,6 +12,7 @@ import {
   MediaProcessingJobStatus,
   MediaProcessingStatus,
   Prisma,
+  ProfessionalOnboardingStatus,
 } from '../../../generated/prisma/client.js';
 import { paginate } from '../../common/utils/pagination.util';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -95,6 +96,18 @@ export class MediaRepository {
     return this.prisma.vendorProfile.findFirst({
       where: { id: vendorId, isApproved: true, deletedAt: null },
       select: { id: true, membership: { select: { id: true } } },
+    });
+  }
+
+  findApprovedProfessionalById(professionalId: string) {
+    return this.prisma.professionalProfile.findFirst({
+      where: {
+        id: professionalId,
+        isApproved: true,
+        deletedAt: null,
+        onboardingStatus: { not: ProfessionalOnboardingStatus.SUSPENDED },
+      },
+      select: { id: true },
     });
   }
 
@@ -535,6 +548,55 @@ export class MediaRepository {
       where: { entityType, entityId, context, deletedAt: null },
       orderBy: { sortOrder: Prisma.SortOrder.asc },
       select: MEDIA_LINK_SELECT,
+    });
+  }
+
+  countEntityLinks(entityType: MediaEntityType, entityId: string) {
+    return this.prisma.mediaLink.count({
+      where: { entityType, entityId, deletedAt: null },
+    });
+  }
+
+  /**
+   * 3-way ownership check: media belongs to professionalId AND is linked
+   * to projectId. Used before deleting a project photo.
+   */
+  findProjectPhotoLink(
+    professionalId: string,
+    projectId: string,
+    mediaId: string,
+  ) {
+    return this.prisma.mediaLink.findFirst({
+      where: {
+        mediaId,
+        entityType: MediaEntityType.PROFESSIONAL_PROJECT,
+        entityId: projectId,
+        deletedAt: null,
+        media: {
+          ownerId: professionalId,
+          ownerType: MediaOwnerType.PROFESSIONAL,
+          deletedAt: null,
+        },
+      },
+      select: { id: true },
+    });
+  }
+
+  findAllMediaForEntity(entityType: MediaEntityType, entityId: string) {
+    return this.prisma.mediaLink.findMany({
+      where: { entityType, entityId },
+      select: {
+        id: true,
+        mediaId: true,
+        media: {
+          select: {
+            id: true,
+            originalKey: true,
+            optimizedKey: true,
+            thumbnailKey: true,
+          },
+        },
+      },
     });
   }
 

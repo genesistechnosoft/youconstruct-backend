@@ -99,7 +99,11 @@ export class PlatformSettingsService {
 
   async getString(namespace: string, key: string): Promise<string> {
     const value = await this.getValue(namespace, key);
-    return typeof value === 'string' ? value : String(value ?? '');
+    if (typeof value === 'string') return value;
+    if (typeof value === 'number' || typeof value === 'boolean') {
+      return String(value);
+    }
+    return '';
   }
 
   async getDecimal(namespace: string, key: string): Promise<Prisma.Decimal> {
@@ -142,6 +146,16 @@ export class PlatformSettingsService {
         if (typeof value !== 'number' || !Number.isFinite(value)) {
           throw new BadRequestException(
             'Setting value must be a finite number',
+          );
+        }
+        if (definition.min !== undefined && value < definition.min) {
+          throw new BadRequestException(
+            `Setting value must be at least ${definition.min}`,
+          );
+        }
+        if (definition.max !== undefined && value > definition.max) {
+          throw new BadRequestException(
+            `Setting value must be at most ${definition.max}`,
           );
         }
         return value;

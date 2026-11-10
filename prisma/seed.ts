@@ -908,6 +908,81 @@ async function seedVendorStaff(passwordHash: string, vendorProfileId: string) {
   return staffUser;
 }
 
+const PROFESSIONAL_CATEGORIES = [
+  {
+    name: 'Architect',
+    slug: 'architect',
+    description: 'Licensed architects for residential and commercial design.',
+    sortOrder: 1,
+  },
+  {
+    name: 'Interior Designer',
+    slug: 'interior-designer',
+    description: 'Interior design and space planning professionals.',
+    sortOrder: 2,
+  },
+  {
+    name: 'Structural Engineer',
+    slug: 'structural-engineer',
+    description: 'Structural engineers for safe building construction.',
+    sortOrder: 3,
+  },
+  {
+    name: 'Civil Contractor',
+    slug: 'civil-contractor',
+    description: 'General contractors for civil construction work.',
+    sortOrder: 4,
+  },
+  {
+    name: 'Plumber',
+    slug: 'plumber',
+    description: 'Plumbing installation and repair services.',
+    sortOrder: 5,
+  },
+  {
+    name: 'Electrician',
+    slug: 'electrician',
+    description: 'Electrical wiring and installation services.',
+    sortOrder: 6,
+  },
+  {
+    name: 'Painter',
+    slug: 'painter',
+    description: 'Residential and commercial painting services.',
+    sortOrder: 7,
+  },
+  {
+    name: 'Vastu Consultant',
+    slug: 'vastu-consultant',
+    description: 'Vastu shastra consultants for traditional space design.',
+    sortOrder: 8,
+  },
+];
+
+async function seedProfessionalCategories() {
+  for (const category of PROFESSIONAL_CATEGORIES) {
+    await prisma.professionalCategory.upsert({
+      where: { slug: category.slug },
+      update: {
+        name: category.name,
+        description: category.description,
+        sortOrder: category.sortOrder,
+        isActive: true,
+        deletedAt: null,
+      },
+      create: {
+        name: category.name,
+        slug: category.slug,
+        description: category.description,
+        sortOrder: category.sortOrder,
+        isActive: true,
+      },
+    });
+  }
+
+  console.log(`Seeded ${PROFESSIONAL_CATEGORIES.length} professional categories`);
+}
+
 async function seedPlatformAdminStaff(
   passwordHash: string,
   platformAdminRoleId: string,
@@ -984,6 +1059,7 @@ async function main() {
   await seedCategories();
   await seedPlatformSettings();
   await seedPermissions();
+  await seedProfessionalCategories();
   // const platformAdminRole = await seedPlatformAdminRole();
   // await seedSupportAgentRole();
   // await seedSuperAdmin(passwordHash);

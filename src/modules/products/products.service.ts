@@ -735,7 +735,10 @@ export class ProductsService {
       await this.assertOwnedMedia(product.vendorId, dto.mediaIds);
       await this.stageCatalog(product, (draft) => ({
         ...draft,
-        galleryMediaIds: this.appendMediaIds(draft.galleryMediaIds, dto.mediaIds),
+        galleryMediaIds: this.appendMediaIds(
+          draft.galleryMediaIds,
+          dto.mediaIds,
+        ),
       }));
 
       return {
@@ -1219,8 +1222,14 @@ export class ProductsService {
 
     if (product.status === ProductStatus.ACTIVE) {
       const idMap: Record<string, string> = {};
-      const livePrices = this.livePricesFromWrites(product.variants, plan.writes);
-      if (plan.review.pendingReview.length > 0 || this.factsDiffer(product, facts)) {
+      const livePrices = this.livePricesFromWrites(
+        product.variants,
+        plan.writes,
+      );
+      if (
+        plan.review.pendingReview.length > 0 ||
+        this.factsDiffer(product, facts)
+      ) {
         await this.stageCatalog(
           product,
           (draft) => ({
@@ -1415,9 +1424,7 @@ export class ProductsService {
             galleryMediaIds: dto.gallery,
             variants: draft.variants.map((variant) => {
               const next = dto.variants?.[variant.id];
-              return next
-                ? { ...variant, galleryMediaIds: next }
-                : variant;
+              return next ? { ...variant, galleryMediaIds: next } : variant;
             }),
           }),
           { expectedVersion: dto.version },
@@ -1741,8 +1748,7 @@ export class ProductsService {
       liveVariantIds: existing.variants.map((variant) => variant.id),
       deactivate: existing.variants
         .filter(
-          (variant) =>
-            !draft.variants.some((next) => next.id === variant.id),
+          (variant) => !draft.variants.some((next) => next.id === variant.id),
         )
         .map((variant) => ({ id: variant.id, sku: variant.sku })),
     });
@@ -2317,7 +2323,9 @@ export class ProductsService {
             : undefined;
       this.validatePriceInvariant(nextPrice, nextSellingPrice, nextCostPrice);
       await this.productsRepository.updateVariant(variantId, product.id, {
-        ...(dto.price !== undefined && { price: new Prisma.Decimal(dto.price) }),
+        ...(dto.price !== undefined && {
+          price: new Prisma.Decimal(dto.price),
+        }),
         ...(dto.sellingPrice !== undefined && {
           sellingPrice: new Prisma.Decimal(dto.sellingPrice),
         }),
@@ -2388,22 +2396,27 @@ export class ProductsService {
               ...variant,
               ...(dto.sku !== undefined && { sku: dto.sku }),
               ...(dto.name !== undefined && { name: dto.name ?? null }),
-              ...(!live && dto.price !== undefined && {
-                price: moneyToDraft(dto.price),
-              }),
-              ...(!live && dto.sellingPrice !== undefined && {
-                sellingPrice: moneyToDraft(dto.sellingPrice),
-              }),
-              ...(!live && dto.costPrice !== undefined && {
-                costPrice: moneyToDraft(dto.costPrice),
-              }),
+              ...(!live &&
+                dto.price !== undefined && {
+                  price: moneyToDraft(dto.price),
+                }),
+              ...(!live &&
+                dto.sellingPrice !== undefined && {
+                  sellingPrice: moneyToDraft(dto.sellingPrice),
+                }),
+              ...(!live &&
+                dto.costPrice !== undefined && {
+                  costPrice: moneyToDraft(dto.costPrice),
+                }),
               ...(dto.primaryUnitId !== undefined && {
                 primaryUnitId: dto.primaryUnitId,
               }),
               ...(dto.coverageArea !== undefined && {
                 coverageArea: dto.coverageArea,
               }),
-              ...(dto.baseUnitId !== undefined && { baseUnitId: dto.baseUnitId }),
+              ...(dto.baseUnitId !== undefined && {
+                baseUnitId: dto.baseUnitId,
+              }),
               ...(dto.weightKg !== undefined && { weightKg: dto.weightKg }),
               ...(dto.isDefault !== undefined && { isDefault: dto.isDefault }),
             };
@@ -2515,7 +2528,9 @@ export class ProductsService {
     liveVariants: OwnedProduct['variants'],
     writes: PlannedVariantWrite[],
   ) {
-    const liveById = new Map(liveVariants.map((variant) => [variant.id, variant]));
+    const liveById = new Map(
+      liveVariants.map((variant) => [variant.id, variant]),
+    );
     const prices: LivePriceWrite[] = [];
     for (const write of writes) {
       if (!write.existingId) {
@@ -2558,7 +2573,9 @@ export class ProductsService {
     writes: PlannedVariantWrite[],
     idMap: Record<string, string>,
   ): CatalogDraft {
-    const previous = new Map(draft.variants.map((variant) => [variant.id, variant]));
+    const previous = new Map(
+      draft.variants.map((variant) => [variant.id, variant]),
+    );
     const variants = writes.map((write) => {
       const earlier = write.existingId
         ? previous.get(write.existingId)
@@ -2744,7 +2761,9 @@ export class ProductsService {
         throw new BadRequestException('Product spec value is empty');
       }
       if (specIds.has(spec.attributeId)) {
-        throw new BadRequestException('Duplicate spec attributes are not allowed');
+        throw new BadRequestException(
+          'Duplicate spec attributes are not allowed',
+        );
       }
       specIds.add(spec.attributeId);
       return {
@@ -2756,7 +2775,9 @@ export class ProductsService {
 
     const options = dto.options.map((option) => {
       if (optionIds.has(option.attributeId)) {
-        throw new BadRequestException('Duplicate option attributes are not allowed');
+        throw new BadRequestException(
+          'Duplicate option attributes are not allowed',
+        );
       }
       if (specIds.has(option.attributeId)) {
         throw new BadRequestException(
@@ -2773,7 +2794,9 @@ export class ProductsService {
         }
         const key = value.toLowerCase();
         if (seen.has(key)) {
-          throw new BadRequestException('Duplicate option values are not allowed');
+          throw new BadRequestException(
+            'Duplicate option values are not allowed',
+          );
         }
         seen.add(key);
         values.push(value);
@@ -2805,11 +2828,14 @@ export class ProductsService {
           );
         }
         if (seen.has(attribute.attributeId)) {
-          throw new BadRequestException('Duplicate attribute IDs are not allowed');
+          throw new BadRequestException(
+            'Duplicate attribute IDs are not allowed',
+          );
         }
         seen.add(attribute.attributeId);
         const match = allowed.find(
-          (value) => value.toLowerCase() === attribute.value.trim().toLowerCase(),
+          (value) =>
+            value.toLowerCase() === attribute.value.trim().toLowerCase(),
         );
         if (!match) {
           throw new BadRequestException(
@@ -3045,7 +3071,10 @@ export class ProductsService {
     publishedView: object,
     draft: CatalogDraft,
   ) {
-    const base = publishedView as Omit<OwnedProduct, 'catalogDraft' | 'variants'> & {
+    const base = publishedView as Omit<
+      OwnedProduct,
+      'catalogDraft' | 'variants'
+    > & {
       media: unknown[];
       thumbnail: unknown;
     };

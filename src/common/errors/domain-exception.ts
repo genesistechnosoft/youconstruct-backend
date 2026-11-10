@@ -43,3 +43,7 @@ export function domainForbidden(error: DomainErrorCode, message: string) {
 export function domainConflict(error: DomainErrorCode, message: string) {
   return new DomainException(HttpStatus.CONFLICT, error, message);
 }
+
+export function domainNotFound(error: DomainErrorCode, message: string) {
+  return new DomainException(HttpStatus.NOT_FOUND, error, message);
+}

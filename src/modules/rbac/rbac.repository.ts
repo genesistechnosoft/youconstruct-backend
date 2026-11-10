@@ -112,7 +112,7 @@ export class RbacRepository {
       select: {
         id: true,
         isApproved: true,
-        isActive: true,
+        onboardingStatus: true,
         deletedAt: true,
       },
     });

@@ -21,6 +21,8 @@ import {
   MediaProcessingStatus,
 } from '../../../generated/prisma/client.js';
 import { paginationMeta } from '../../common/utils/pagination.util';
+import { domainBadRequest } from '../../common/errors/domain-exception';
+import { DOMAIN_ERROR_CODES } from '../../common/errors/domain-error-code';
 import { MEDIA_PROCESSING_QUEUE } from '../../queue/queue.constants';
 import { StorageService } from '../../storage/storage.service';
 import { VendorStoreService } from '../vendor-store/vendor-store.service';
@@ -490,6 +492,78 @@ export class MediaService {
     };
   }
 
+  /**
+   * Upload a photo and link it to a professional project.
+   * Requires the professional profile to be approved.
+   */
+  async uploadProfessionalProjectPhoto(
+    actorUserId: string,
+    professionalId: string,
+    projectId: string,
+    file: Express.Multer.File | undefined,
+    maxPhotos: number,
+  ) {
+    await this.getApprovedProfessionalOwner(professionalId);
+
+    const existingCount = await this.mediaRepository.countEntityLinks(
+      MediaEntityType.PROFESSIONAL_PROJECT,
+      projectId,
+    );
+    if (existingCount >= maxPhotos) {
+      throw domainBadRequest(
+        DOMAIN_ERROR_CODES.PHOTO_LIMIT_REACHED,
+        `Projects may have a maximum of ${maxPhotos} photos`,
+      );
+    }
+
+    const media = await this.uploadMedia({
+      userId: actorUserId,
+      owner: {
+        ownerType: MediaOwnerType.PROFESSIONAL,
+        ownerId: professionalId,
+      },
+      file,
+      accessLevel: MediaAccessLevel.PUBLIC,
+      keyPrefix: `professionals/${professionalId}/projects/${projectId}`,
+      allowedFileTypes: [MediaFileType.IMAGE],
+    });
+
+    await this.linkMediaToEntity(
+      { ownerType: MediaOwnerType.PROFESSIONAL, ownerId: professionalId },
+      MediaEntityType.PROFESSIONAL_PROJECT,
+      projectId,
+      { mediaIds: [media.id] },
+    );
+
+    return {
+      message: 'Photo uploaded and linked successfully',
+      data: await this.withUrls(media),
+    };
+  }
+
+  /**
+   * Delete a photo from a professional project.
+   * Three-way ownership check: professional owns the media AND the media is
+   * linked to the specific project. Returns 404 for cross-project or
+   * cross-tenant attempts.
+   */
+  async deleteProfessionalProjectPhoto(
+    professionalId: string,
+    projectId: string,
+    mediaId: string,
+  ) {
+    await this.getApprovedProfessionalOwner(professionalId);
+    const link = await this.mediaRepository.findProjectPhotoLink(
+      professionalId,
+      projectId,
+      mediaId,
+    );
+    if (!link) throw new NotFoundException('Photo not found');
+
+    await this.mediaRepository.softDeleteMedia(mediaId);
+    return { message: 'Photo deleted successfully' };
+  }
+
   async uploadAdminEntityMedia(
     actorUserId: string,
     file: Express.Multer.File | undefined,
@@ -643,13 +717,15 @@ export class MediaService {
       links.map((link) => this.withMediaLinkUrls(link)),
     );
 
-    const map = new Map<string, (typeof withUrls)[number] | null>();
+    const map = new Map<string, any>();
     for (const entityId of entityIds) {
       map.set(entityId, null);
     }
     for (const link of withUrls) {
-      if (!map.get(link.entityId)) {
-        map.set(link.entityId, link);
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+      const eid = link['entityId'] as string;
+      if (!map.get(eid)) {
+        map.set(eid, link);
       }
     }
 
@@ -772,9 +848,11 @@ export class MediaService {
 
     const map = new Map<string, typeof withUrls>();
     for (const link of withUrls) {
-      const existing = map.get(link.entityId) ?? [];
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+      const eid = link['entityId'] as string;
+      const existing = map.get(eid) ?? [];
       existing.push(link);
-      map.set(link.entityId, existing);
+      map.set(eid, existing);
     }
 
     return map;
@@ -1101,6 +1179,18 @@ export class MediaService {
     return { ownerType: MediaOwnerType.VENDOR, ownerId: vendor.id };
   }
 
+  private async getApprovedProfessionalOwner(
+    professionalId: string,
+  ): Promise<MediaOwner> {
+    const professional =
+      await this.mediaRepository.findApprovedProfessionalById(professionalId);
+    if (!professional) {
+      throw new ForbiddenException('Approved professional profile required');
+    }
+
+    return { ownerType: MediaOwnerType.PROFESSIONAL, ownerId: professional.id };
+  }
+
   private async validateFolderParent(owner: MediaOwner, folderId?: string) {
     if (!folderId) {
       return;
@@ -1245,6 +1335,27 @@ export class MediaService {
 
   private toDisplayName(originalName: string) {
     return originalName.replace(/\.[^/.]+$/, '');
+  }
+
+  /**
+   * Hard-purge all storage objects and soft-delete media records linked to a
+   * given entity. Called by the delayed BullMQ job after a project is REMOVED.
+   */
+  async purgeEntityMedia(
+    entityType: MediaEntityType,
+    entityId: string,
+  ): Promise<void> {
+    const links = await this.mediaRepository.findAllMediaForEntity(
+      entityType,
+      entityId,
+    );
+
+    for (const link of links) {
+      if (link.media) {
+        await this.deleteStoredObjects(link.media);
+        await this.mediaRepository.softDeleteMedia(link.mediaId);
+      }
+    }
   }
 
   private async softDeleteUnlinkedMedia(mediaIds: string[]) {

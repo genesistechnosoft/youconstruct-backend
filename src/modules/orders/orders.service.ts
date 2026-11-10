@@ -617,7 +617,10 @@ export class OrdersService {
     return {
       message: 'Orders fetched successfully',
       data: items.map((o) =>
-        this.attachCustomerCancel(this.serializeOrder(o, 'customer'), windowHours),
+        this.attachCustomerCancel(
+          this.serializeOrder(o, 'customer'),
+          windowHours,
+        ),
       ),
       meta: paginationMeta(page, limit, total),
     };
@@ -1024,7 +1027,11 @@ export class OrdersService {
     order: Record<string, unknown>,
     windowHours: number,
   ): Record<string, unknown> {
-    const createdAt = new Date(String(order.createdAt ?? ''));
+    const createdAt = new Date(
+      typeof order.createdAt === 'string' || order.createdAt instanceof Date
+        ? order.createdAt
+        : '',
+    );
     const subOrders = order.subOrders;
     if (!Array.isArray(subOrders)) {
       return order;

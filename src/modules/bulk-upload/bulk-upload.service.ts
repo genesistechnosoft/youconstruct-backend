@@ -15,25 +15,8 @@ import {
 import { paginationMeta } from '../../common/utils/pagination.util';
 import { BULK_PRODUCT_UPLOAD_QUEUE } from '../../queue/queue.constants';
 import { BulkUploadRepository } from './bulk-upload.repository';
-import { parseCsv, CSV_COLUMNS } from './csv-parser.util';
+import { parseCsv } from './csv-parser.util';
 import type { ListBulkUploadsQueryDto } from './dto/list-bulk-uploads-query.dto';
-
-type ValidatedRow = {
-  name: string;
-  categoryId: string;
-  brandId: string | null;
-  description: string;
-  shortDescription: string;
-  sku: string;
-  price: Prisma.Decimal;
-  sellingPrice: Prisma.Decimal;
-  costPrice: Prisma.Decimal | null;
-  primaryUnitId: string;
-  quantity: number;
-  tags: string[];
-  metaTitle: string;
-  metaDescription: string;
-};
 
 @Injectable()
 export class BulkUploadService {
@@ -260,7 +243,6 @@ export class BulkUploadService {
       let sellingPrice = new Prisma.Decimal(0);
       let costPrice: Prisma.Decimal | null = null;
       let quantity = 0;
-      let primaryUnitId = '';
 
       if (priceStr && !errors.includes('price is required')) {
         try {
@@ -321,8 +303,6 @@ export class BulkUploadService {
             errors.push(
               `unit with code "${primaryUnitCode}" not found or inactive`,
             );
-          } else {
-            primaryUnitId = unit.id;
           }
         }
 

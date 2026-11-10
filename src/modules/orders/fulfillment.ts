@@ -61,9 +61,7 @@ export function deriveFulfillment(input: {
       ...counts,
       stage: FulfillmentStage.CANCELLED,
       summary:
-        cancelled === 0
-          ? 'No items.'
-          : `${itemsLabel(cancelled)} cancelled.`,
+        cancelled === 0 ? 'No items.' : `${itemsLabel(cancelled)} cancelled.`,
     };
   }
 
@@ -194,7 +192,11 @@ export function fulfillmentFromDeliveries(input: {
 export function lineFulfillmentQuantities(
   item: ItemQty,
   deliveries: DeliveryQty[],
-): { preparingQuantity: number; inTransitQuantity: number; deliveredQuantity: number } {
+): {
+  preparingQuantity: number;
+  inTransitQuantity: number;
+  deliveredQuantity: number;
+} {
   let deliveredQuantity = 0;
   let inTransitQuantity = 0;
   for (const delivery of deliveries) {
@@ -213,7 +215,10 @@ export function lineFulfillmentQuantities(
   return {
     preparingQuantity: Math.max(
       0,
-      item.quantity - item.cancelledQuantity - deliveredQuantity - inTransitQuantity,
+      item.quantity -
+        item.cancelledQuantity -
+        deliveredQuantity -
+        inTransitQuantity,
     ),
     inTransitQuantity,
     deliveredQuantity,

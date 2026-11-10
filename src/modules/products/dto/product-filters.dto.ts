@@ -11,10 +11,10 @@ export class ProductFiltersDto {
 
   @ApiPropertyOptional({ example: true })
   @IsOptional()
-  @Transform(({ value }) => {
+  @Transform(({ value }: { value: unknown }) => {
     if (value === 'true' || value === true) return true;
     if (value === 'false' || value === false) return false;
-    return value;
+    return value as boolean | undefined;
   })
   @IsBoolean()
   hasCatalogDraft?: boolean;

@@ -146,6 +146,7 @@ jobs:
             . ./.env
             set +a
             ./node_modules/.bin/prisma migrate deploy
+            pnpm run sync:permissions
 
             fuser -k 3000/tcp || true
 

@@ -43,15 +43,13 @@ const OTP_LOCKOUT_WINDOW_MS = 15 * 60 * 1000;
 const PASSWORD_RESET_PURPOSE = 'RESET_PASSWORD';
 const PASSWORD_RESET_EXPIRES_IN = '10m';
 const STEP_UP_EXPIRES_IN = '5m';
-const STEP_UP_PURPOSES = ['BANK_ACCOUNT_CHANGE', 'PAYOUT_REQUEST'] as const;
+type StepUpPurpose = 'BANK_ACCOUNT_CHANGE' | 'PAYOUT_REQUEST';
 
 type PasswordResetJwtPayload = {
   userId: string;
   purpose: typeof PASSWORD_RESET_PURPOSE;
   iat?: number;
 };
-
-type StepUpPurpose = (typeof STEP_UP_PURPOSES)[number];
 
 type StepUpJwtPayload = {
   userId: string;

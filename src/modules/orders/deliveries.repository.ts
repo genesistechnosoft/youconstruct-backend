@@ -293,13 +293,8 @@ export class DeliveriesRepository {
     };
   }) {
     return this.prisma.$transaction(async (tx) => {
-      if (
-        input.toStatus === DeliveryStatus.CANCELLED &&
-        !input.resolution
-      ) {
-        throw new ConflictException(
-          'Delivery cancel requires a resolution',
-        );
+      if (input.toStatus === DeliveryStatus.CANCELLED && !input.resolution) {
+        throw new ConflictException('Delivery cancel requires a resolution');
       }
       const prior = await tx.delivery.findUnique({
         where: { id: input.deliveryId },

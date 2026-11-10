@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import {
+  BudgetRange,
   BulkProductUploadRowStatus,
   BulkProductUploadStatus,
   CouponDiscountType,
@@ -19,6 +20,8 @@ import {
   PayoutStatus,
   PlatformRole,
   ProductStatus,
+  ProfessionalContentStatus,
+  ProfessionalOnboardingStatus,
   RestockStatus,
   ReturnReasonCode,
   ReturnStatus,
@@ -33,6 +36,10 @@ import {
   VENDOR_DELIVERY_TRANSITIONS,
   VENDOR_SUB_ORDER_TRANSITIONS,
 } from '../orders/order-status.util';
+import {
+  PROFESSIONAL_ONBOARDING_TRANSITIONS,
+  PROFESSIONAL_CONTENT_TRANSITIONS,
+} from '../professionals/professional-status.util';
 import { PERMISSION_CATALOG } from '../rbac/permissions.constants';
 
 @Injectable()
@@ -68,12 +75,19 @@ export class MetaService {
           shippingUnitType: this.options(ShippingUnitType),
           subOrderStatus: this.options(SubOrderStatus),
           vendorOnboardingStatus: this.options(VendorOnboardingStatus),
+          professionalOnboardingStatus: this.options(
+            ProfessionalOnboardingStatus,
+          ),
+          professionalContentStatus: this.options(ProfessionalContentStatus),
+          budgetRange: this.options(BudgetRange),
         },
         transitions: {
           vendorSubOrder: VENDOR_SUB_ORDER_TRANSITIONS,
           adminSubOrder: ADMIN_SUB_ORDER_TRANSITIONS,
           vendorDelivery: VENDOR_DELIVERY_TRANSITIONS,
           adminDelivery: ADMIN_DELIVERY_TRANSITIONS,
+          professionalOnboarding: PROFESSIONAL_ONBOARDING_TRANSITIONS,
+          professionalContent: PROFESSIONAL_CONTENT_TRANSITIONS,
         },
         permissions: PERMISSION_CATALOG.map((entry) => ({
           value: entry.key,

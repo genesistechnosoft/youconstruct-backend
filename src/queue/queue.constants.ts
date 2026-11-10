@@ -1,6 +1,7 @@
 export const MEDIA_PROCESSING_QUEUE = 'MEDIA_PROCESSING_QUEUE';
 export const PAYMENT_TIMEOUT_QUEUE = 'PAYMENT_TIMEOUT_QUEUE';
 export const BULK_PRODUCT_UPLOAD_QUEUE = 'BULK_PRODUCT_UPLOAD_QUEUE';
+export const PURGE_PROJECT_MEDIA_QUEUE = 'PURGE_PROJECT_MEDIA_QUEUE';
 
 /** Shared BullMQ defaults: retries + retention for completed/failed jobs. */
 export const DEFAULT_QUEUE_JOB_OPTIONS = {

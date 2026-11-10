@@ -525,9 +525,7 @@ export class CancelRefundService {
     const freight = otherDispatched
       ? new Prisma.Decimal(0)
       : so.onlineShippingAmount;
-    const already = await this.ordersRepository.sumCompletedRefunds(
-      so.orderId,
-    );
+    const already = await this.ordersRepository.sumCompletedRefunds(so.orderId);
     const cap = Prisma.Decimal.max(
       so.order.onlineAmount.sub(already),
       new Prisma.Decimal(0),

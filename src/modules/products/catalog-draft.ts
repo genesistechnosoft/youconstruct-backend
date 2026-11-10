@@ -175,7 +175,10 @@ export function catalogMatchesPublished(
     return false;
   }
 
-  if (!sameSpecs(draft.specs, published.specs) || !sameOptions(draft.options, published.options)) {
+  if (
+    !sameSpecs(draft.specs, published.specs) ||
+    !sameOptions(draft.options, published.options)
+  ) {
     return false;
   }
 
@@ -208,7 +211,10 @@ export function catalogMatchesPublished(
   });
 }
 
-export function skusToReserve(draft: CatalogDraft, liveSkus: string[]): string[] {
+export function skusToReserve(
+  draft: CatalogDraft,
+  liveSkus: string[],
+): string[] {
   const held = new Set(liveSkus);
   return [
     ...new Set(
@@ -236,7 +242,9 @@ export function draftSkuConflicts(
     liveVariants.map((variant) => [variant.sku, variant.id]),
   );
   const released = new Set<string>();
-  const draftById = new Map(draft.variants.map((variant) => [variant.id, variant]));
+  const draftById = new Map(
+    draft.variants.map((variant) => [variant.id, variant]),
+  );
   for (const live of liveVariants) {
     const next = draftById.get(live.id);
     if (next && next.sku !== live.sku) {
@@ -318,7 +326,9 @@ function sameOptions(left: CatalogDraftOption[], right: CatalogDraftOption[]) {
       option.attributeId === other?.attributeId &&
       option.position === other?.position &&
       option.values.length === other.values.length &&
-      option.values.every((value, valueIndex) => value === other.values[valueIndex])
+      option.values.every(
+        (value, valueIndex) => value === other.values[valueIndex],
+      )
     );
   });
 }

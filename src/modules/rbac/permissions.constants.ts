@@ -37,15 +37,33 @@ export const PERMISSIONS = {
     ROLES_MANAGE: 'roles:manage',
   },
   PROFESSIONAL: {
+    PROFILE_VIEW: 'profile:view',
+    PROFILE_EDIT: 'profile:edit',
+    PORTFOLIO_VIEW: 'portfolio:view',
+    PORTFOLIO_CREATE: 'portfolio:create',
+    PORTFOLIO_EDIT: 'portfolio:edit',
+    PORTFOLIO_DELETE: 'portfolio:delete',
+    MEDIA_UPLOAD: 'media:upload',
+    MEDIA_DELETE: 'media:delete',
     TEAM_MANAGE: 'team:manage',
     ROLES_MANAGE: 'roles:manage',
+  },
+  ADMIN_PROFESSIONAL: {
+    PROFESSIONALS_VIEW: 'professionals:view',
+    PROFESSIONALS_APPROVE: 'professionals:approve',
+    PROFESSIONALS_REJECT: 'professionals:reject',
+    PROFESSIONALS_SUSPEND: 'professionals:suspend',
+    PROFESSIONAL_CONTENT_VIEW: 'professional-content:view',
+    PROFESSIONAL_CONTENT_MODERATE: 'professional-content:moderate',
+    PROFESSIONAL_CATEGORIES_MANAGE: 'professional-categories:manage',
   },
 } as const;
 
 export type PermissionKey =
   | (typeof PERMISSIONS.ADMIN)[keyof typeof PERMISSIONS.ADMIN]
   | (typeof PERMISSIONS.VENDOR)[keyof typeof PERMISSIONS.VENDOR]
-  | (typeof PERMISSIONS.PROFESSIONAL)[keyof typeof PERMISSIONS.PROFESSIONAL];
+  | (typeof PERMISSIONS.PROFESSIONAL)[keyof typeof PERMISSIONS.PROFESSIONAL]
+  | (typeof PERMISSIONS.ADMIN_PROFESSIONAL)[keyof typeof PERMISSIONS.ADMIN_PROFESSIONAL];
 
 export type PermissionCatalogEntry = {
   key: PermissionKey;
@@ -311,7 +329,71 @@ export const PERMISSION_CATALOG: PermissionCatalogEntry[] = [
     isElevated: false,
   },
 
-  // ── PROFESSIONAL (scaffolding) ─────────────────────────
+  // ── PROFESSIONAL ───────────────────────────────────────
+  {
+    key: PERMISSIONS.PROFESSIONAL.PROFILE_VIEW,
+    name: 'View Profile',
+    group: 'Profile',
+    scope: PermissionScope.PROFESSIONAL,
+    description: 'View professional profile and onboarding status',
+    isElevated: false,
+  },
+  {
+    key: PERMISSIONS.PROFESSIONAL.PROFILE_EDIT,
+    name: 'Edit Profile',
+    group: 'Profile',
+    scope: PermissionScope.PROFESSIONAL,
+    description: 'Edit professional profile fields and submit for approval',
+    isElevated: false,
+  },
+  {
+    key: PERMISSIONS.PROFESSIONAL.PORTFOLIO_VIEW,
+    name: 'View Portfolio',
+    group: 'Portfolio',
+    scope: PermissionScope.PROFESSIONAL,
+    description: 'View projects in the professional portfolio',
+    isElevated: false,
+  },
+  {
+    key: PERMISSIONS.PROFESSIONAL.PORTFOLIO_CREATE,
+    name: 'Create Projects',
+    group: 'Portfolio',
+    scope: PermissionScope.PROFESSIONAL,
+    description: 'Create new projects in the portfolio',
+    isElevated: false,
+  },
+  {
+    key: PERMISSIONS.PROFESSIONAL.PORTFOLIO_EDIT,
+    name: 'Edit Projects',
+    group: 'Portfolio',
+    scope: PermissionScope.PROFESSIONAL,
+    description: 'Edit and submit existing portfolio projects',
+    isElevated: false,
+  },
+  {
+    key: PERMISSIONS.PROFESSIONAL.PORTFOLIO_DELETE,
+    name: 'Delete Projects',
+    group: 'Portfolio',
+    scope: PermissionScope.PROFESSIONAL,
+    description: 'Soft-delete own portfolio projects (not REMOVED ones)',
+    isElevated: false,
+  },
+  {
+    key: PERMISSIONS.PROFESSIONAL.MEDIA_UPLOAD,
+    name: 'Upload Media',
+    group: 'Media',
+    scope: PermissionScope.PROFESSIONAL,
+    description: 'Upload photos and attachments for projects',
+    isElevated: false,
+  },
+  {
+    key: PERMISSIONS.PROFESSIONAL.MEDIA_DELETE,
+    name: 'Delete Media',
+    group: 'Media',
+    scope: PermissionScope.PROFESSIONAL,
+    description: 'Remove uploaded media from projects',
+    isElevated: false,
+  },
   {
     key: PERMISSIONS.PROFESSIONAL.TEAM_MANAGE,
     name: 'Manage Team',
@@ -326,6 +408,65 @@ export const PERMISSION_CATALOG: PermissionCatalogEntry[] = [
     group: 'Team',
     scope: PermissionScope.PROFESSIONAL,
     description: 'Create and edit professional custom roles',
+    isElevated: false,
+  },
+
+  // ── ADMIN — PROFESSIONAL MANAGEMENT ────────────────────
+  {
+    key: PERMISSIONS.ADMIN_PROFESSIONAL.PROFESSIONALS_VIEW,
+    name: 'View Professionals',
+    group: 'Professionals',
+    scope: PermissionScope.ADMIN,
+    description: 'View professional profiles and onboarding queue',
+    isElevated: false,
+  },
+  {
+    key: PERMISSIONS.ADMIN_PROFESSIONAL.PROFESSIONALS_APPROVE,
+    name: 'Approve Professionals',
+    group: 'Professionals',
+    scope: PermissionScope.ADMIN,
+    description: 'Approve pending professional profile applications',
+    isElevated: false,
+  },
+  {
+    key: PERMISSIONS.ADMIN_PROFESSIONAL.PROFESSIONALS_REJECT,
+    name: 'Reject Professionals',
+    group: 'Professionals',
+    scope: PermissionScope.ADMIN,
+    description:
+      'Reject pending professional profile applications with a reason',
+    isElevated: false,
+  },
+  {
+    key: PERMISSIONS.ADMIN_PROFESSIONAL.PROFESSIONALS_SUSPEND,
+    name: 'Suspend Professionals',
+    group: 'Professionals',
+    scope: PermissionScope.ADMIN,
+    description: 'Suspend or reinstate an approved professional profile',
+    isElevated: true,
+  },
+  {
+    key: PERMISSIONS.ADMIN_PROFESSIONAL.PROFESSIONAL_CONTENT_VIEW,
+    name: 'View Professional Content',
+    group: 'Content Moderation',
+    scope: PermissionScope.ADMIN,
+    description: 'View professional projects in the moderation queue',
+    isElevated: false,
+  },
+  {
+    key: PERMISSIONS.ADMIN_PROFESSIONAL.PROFESSIONAL_CONTENT_MODERATE,
+    name: 'Moderate Professional Content',
+    group: 'Content Moderation',
+    scope: PermissionScope.ADMIN,
+    description: 'Approve, reject, or remove professional projects',
+    isElevated: false,
+  },
+  {
+    key: PERMISSIONS.ADMIN_PROFESSIONAL.PROFESSIONAL_CATEGORIES_MANAGE,
+    name: 'Manage Professional Categories',
+    group: 'Professionals',
+    scope: PermissionScope.ADMIN,
+    description: 'Create, edit, sort, and soft-delete professional categories',
     isElevated: false,
   },
 ];

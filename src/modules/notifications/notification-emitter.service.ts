@@ -20,6 +20,7 @@ type EventToggles = {
   coupon?: boolean;
   bulkUpload?: boolean;
   returns?: boolean;
+  professional?: boolean;
 };
 
 const ORDER_EVENTS = new Set<NotificationEventType>([
@@ -64,6 +65,16 @@ const RETURN_EVENTS = new Set<NotificationEventType>([
   NotificationEventType.RETURN_REFUNDED,
 ]);
 
+const PROFESSIONAL_EVENTS = new Set<NotificationEventType>([
+  NotificationEventType.PROFESSIONAL_APPROVED,
+  NotificationEventType.PROFESSIONAL_REJECTED,
+  NotificationEventType.PROFESSIONAL_SUSPENDED,
+  NotificationEventType.PROFESSIONAL_REINSTATED,
+  NotificationEventType.PROJECT_APPROVED,
+  NotificationEventType.PROJECT_REJECTED,
+  NotificationEventType.PROJECT_REMOVED,
+]);
+
 function isEventToggled(
   eventType: NotificationEventType,
   toggles: EventToggles,
@@ -75,6 +86,7 @@ function isEventToggled(
   if (COUPON_EVENTS.has(eventType)) return toggles.coupon !== false;
   if (BULK_EVENTS.has(eventType)) return toggles.bulkUpload !== false;
   if (RETURN_EVENTS.has(eventType)) return toggles.returns !== false;
+  if (PROFESSIONAL_EVENTS.has(eventType)) return toggles.professional !== false;
   return true;
 }
 

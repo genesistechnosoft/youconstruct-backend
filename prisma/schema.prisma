@@ -87,6 +87,31 @@ enum VendorOnboardingStatus {
   REJECTED
 }
 
+enum ProfessionalOnboardingStatus {
+  DRAFT
+  SUBMITTED
+  APPROVED
+  REJECTED
+  SUSPENDED
+}
+
+enum ProfessionalContentStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+  REJECTED
+  REMOVED
+}
+
+enum BudgetRange {
+  UNDER_5_LAKH
+  LAKH_5_TO_10
+  LAKH_10_TO_25
+  LAKH_25_TO_50
+  LAKH_50_TO_100
+  ABOVE_1_CRORE
+}
+
 enum VendorPlan {
   FREE
   PRO
@@ -243,6 +268,7 @@ enum MediaEntityType {
   PRODUCT_VARIANT
   VENDOR_PROFILE
   PROFESSIONAL_PROFILE
+  PROFESSIONAL_PROJECT
   CATEGORY
   BRAND
   HOMEPAGE_BANNER
@@ -331,6 +357,13 @@ enum NotificationEventType {
   COUPON_CREATED
   BULK_UPLOAD_COMPLETED
   BULK_UPLOAD_FAILED
+  PROFESSIONAL_APPROVED
+  PROFESSIONAL_REJECTED
+  PROFESSIONAL_SUSPENDED
+  PROFESSIONAL_REINSTATED
+  PROJECT_APPROVED
+  PROJECT_REJECTED
+  PROJECT_REMOVED
 }
 
 enum NotificationDeliveryStatus {
@@ -934,30 +967,96 @@ model ProductShippingOverride {
 }
 
 model ProfessionalProfile {
-  id              String    @id @default(uuid())
-  userId          String    @unique
-  displayName     String
-  slug            String    @unique
-  tagline         String?
-  bio             String?
-  city            String?
-  state           String?
-  pincode         String?
-  latitude        Float?
-  longitude       Float?
-  experienceYears Int?
-  websiteUrl      String?
-  instagramUrl    String?
-  isApproved      Boolean   @default(false)
+  id               String                       @id @default(uuid())
+  userId           String                       @unique
+  displayName      String                       @db.VarChar(120)
+  slug             String                       @unique
+  tagline          String?                      @db.VarChar(160)
+  bio              String?                      @db.VarChar(2000)
+  city             String?
+  state            String?
+  pincode          String?
+  latitude         Float?
+  longitude        Float?
+  experienceYears  Int?
+  websiteUrl       String?
+  instagramUrl     String?
+  onboardingStatus ProfessionalOnboardingStatus @default(DRAFT)
+  isApproved       Boolean                      @default(false)
+  submittedAt      DateTime?
+  reviewedAt       DateTime?
+  approvedAt       DateTime?
+  rejectionReason  String?                      @db.VarChar(500)
+  suspendedAt      DateTime?
+  suspensionReason String?                      @db.VarChar(500)
+  createdAt        DateTime                     @default(now())
+  updatedAt        DateTime                     @updatedAt
+  deletedAt        DateTime?
+
+  user       User                          @relation(fields: [userId], references: [id])
+  categories ProfessionalProfileCategory[]
+  projects   ProfessionalProject[]
+
+  @@index([onboardingStatus, createdAt])
+  @@index([isApproved, deletedAt, approvedAt])
+  @@map("professional_profiles")
+}
+
+model ProfessionalCategory {
+  id          String    @id @default(uuid())
+  name        String    @db.VarChar(80)
+  slug        String    @unique
+  description String?   @db.VarChar(300)
+  isActive    Boolean   @default(true)
+  sortOrder   Int       @default(0)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+
+  profiles ProfessionalProfileCategory[]
+
+  @@index([isActive, deletedAt, sortOrder])
+  @@map("professional_categories")
+}
+
+model ProfessionalProfileCategory {
+  professionalId String
+  categoryId     String
+  createdAt      DateTime @default(now())
+
+  professional ProfessionalProfile  @relation(fields: [professionalId], references: [id])
+  category     ProfessionalCategory @relation(fields: [categoryId], references: [id])
+
+  @@id([professionalId, categoryId])
+  @@index([categoryId])
+  @@map("professional_profile_categories")
+}
+
+model ProfessionalProject {
+  id              String                    @id @default(uuid())
+  professionalId  String
+  title           String                    @db.VarChar(150)
+  description     String?                   @db.VarChar(5000)
+  location        String?                   @db.VarChar(150)
+  areaSqft        Decimal?                  @db.Decimal(10, 2)
+  budgetRange     BudgetRange?
+  completionYear  Int?                      @db.SmallInt
+  status          ProfessionalContentStatus @default(DRAFT)
+  rejectionReason String?                   @db.VarChar(500)
+  removalReason   String?                   @db.VarChar(500)
+  submittedAt     DateTime?
+  reviewedAt      DateTime?
   approvedAt      DateTime?
-  isActive        Boolean   @default(true)
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
+  removedAt       DateTime?
+  createdAt       DateTime                  @default(now())
+  updatedAt       DateTime                  @updatedAt
   deletedAt       DateTime?
 
-  user User @relation(fields: [userId], references: [id])
+  professional ProfessionalProfile @relation(fields: [professionalId], references: [id])
 
-  @@map("professional_profiles")
+  @@index([professionalId, status, deletedAt])
+  @@index([status, submittedAt])
+  @@map("professional_projects")
 }
 
 // ─────────────────────────────────────────────

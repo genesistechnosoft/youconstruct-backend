@@ -1166,8 +1166,7 @@ export class OrdersRepository {
         0,
       );
       const refundedCaptured =
-        input.createRefund &&
-        (input.refundAmount?.greaterThan(0) ?? false);
+        input.createRefund && (input.refundAmount?.greaterThan(0) ?? false);
       const nextStatus =
         deliveredUnits > 0
           ? SubOrderStatus.PROCESSING

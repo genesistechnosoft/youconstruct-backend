@@ -40,6 +40,10 @@ import { StorageModule } from './storage/storage.module';
 import { WishlistModule } from './modules/wishlist/wishlist.module';
 import { BulkUploadModule } from './modules/bulk-upload/bulk-upload.module';
 import { HomeModule } from './modules/home/home.module';
+import { ProfessionalCategoriesModule } from './modules/professional-categories/professional-categories.module';
+import { ProfessionalsModule } from './modules/professionals/professionals.module';
+import { ProfessionalProjectsModule } from './modules/professional-projects/professional-projects.module';
+import { ProfessionalDiscoveryModule } from './modules/professional-discovery/professional-discovery.module';
 import { SmsModule } from './common/sms/sms.module';
 import { CommerceOtpModule } from './common/otp/commerce-otp.module';
 
@@ -90,6 +94,10 @@ import { CommerceOtpModule } from './common/otp/commerce-otp.module';
     WishlistModule,
     BulkUploadModule,
     HomeModule,
+    ProfessionalCategoriesModule,
+    ProfessionalsModule,
+    ProfessionalProjectsModule,
+    ProfessionalDiscoveryModule,
   ],
   controllers: [AppController],
   providers: [

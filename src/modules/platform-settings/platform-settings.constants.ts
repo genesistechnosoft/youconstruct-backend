@@ -12,6 +12,10 @@ export type PlatformSettingDefinition = {
   defaultValue: Prisma.InputJsonValue;
   isEditable: boolean;
   isPublic: boolean;
+  /** Inclusive lower bound for NUMBER settings. */
+  min?: number;
+  /** Inclusive upper bound for NUMBER settings. */
+  max?: number;
 };
 
 export const PLATFORM_SETTING_DEFINITIONS = [
@@ -197,6 +201,7 @@ export const PLATFORM_SETTING_DEFINITIONS = [
       coupon: true,
       bulkUpload: true,
       returns: true,
+      professional: true,
     },
     isEditable: true,
     isPublic: false,
@@ -291,6 +296,85 @@ export const PLATFORM_SETTING_DEFINITIONS = [
     defaultValue: false,
     isEditable: true,
     isPublic: false,
+  },
+
+  // ── PROFESSIONAL ─────────────────────────────────────
+  {
+    namespace: 'professional',
+    key: 'autoApproveProfiles',
+    valueType: PlatformSettingValueType.BOOLEAN,
+    label: 'Auto-approve professional profiles',
+    description:
+      'When enabled, professional profiles are automatically approved on submit without admin review.',
+    defaultValue: false,
+    isEditable: true,
+    isPublic: false,
+  },
+  {
+    namespace: 'professional',
+    key: 'autoApproveProjects',
+    valueType: PlatformSettingValueType.BOOLEAN,
+    label: 'Auto-approve professional projects',
+    description:
+      'When enabled, submitted projects are automatically approved without admin review.',
+    defaultValue: false,
+    isEditable: true,
+    isPublic: false,
+  },
+  {
+    namespace: 'professional',
+    key: 'maxCategoriesPerProfile',
+    valueType: PlatformSettingValueType.NUMBER,
+    label: 'Max categories per professional profile',
+    description:
+      'Maximum number of categories a professional profile can be linked to.',
+    defaultValue: 5,
+    isEditable: true,
+    isPublic: false,
+    min: 1,
+    max: 20,
+  },
+  {
+    namespace: 'professional',
+    key: 'maxProjectsPerProfessional',
+    valueType: PlatformSettingValueType.NUMBER,
+    label: 'Max projects per professional',
+    description:
+      'Maximum number of non-deleted projects a professional can have.',
+    defaultValue: 100,
+    isEditable: true,
+    isPublic: false,
+    min: 1,
+    max: 500,
+  },
+  {
+    namespace: 'professional',
+    key: 'maxPhotosPerProject',
+    valueType: PlatformSettingValueType.NUMBER,
+    label: 'Max photos per project',
+    description:
+      'Maximum number of photos that can be attached to a single project.',
+    defaultValue: 20,
+    isEditable: true,
+    isPublic: false,
+    min: 1,
+    max: 100,
+  },
+  {
+    namespace: 'professional',
+    key: 'removalPurgeDelayDays',
+    valueType: PlatformSettingValueType.NUMBER,
+    label: 'Removal purge delay (days)',
+    description:
+      'Days to wait after a project is REMOVED before purging its media from storage. ' +
+      'Project is hidden from public immediately on removal regardless of this delay. ' +
+      'Set to 0 to purge immediately. If the delayed job is lost (e.g. Redis restart), ' +
+      'media will not be purged until the admin re-removes or a manual cleanup runs.',
+    defaultValue: 30,
+    isEditable: true,
+    isPublic: false,
+    min: 0,
+    max: 365,
   },
 ] satisfies PlatformSettingDefinition[];
 
