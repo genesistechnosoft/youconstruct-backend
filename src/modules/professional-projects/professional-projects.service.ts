@@ -11,6 +11,7 @@ import {
   ProfessionalContentStatus,
   ProfessionalOnboardingStatus,
 } from '../../../generated/prisma/client.js';
+import { MediaRepository } from '../media/media.repository';
 import {
   domainBadRequest,
   domainForbidden,
@@ -45,6 +46,7 @@ export class ProfessionalProjectsService {
     private readonly professionalsService: ProfessionalsService,
     private readonly professionalsRepo: ProfessionalsRepository,
     private readonly mediaService: MediaService,
+    private readonly mediaRepository: MediaRepository,
     private readonly platformSettings: PlatformSettingsService,
     private readonly notifications: NotificationEmitterService,
     private readonly securityAudit: SecurityAuditService,
@@ -71,7 +73,11 @@ export class ProfessionalProjectsService {
   async getMyProject(profileId: string, projectId: string) {
     const project = await this.repo.findByIdAndOwner(projectId, profileId);
     if (!project) throw new NotFoundException('Project not found');
-    return { message: 'Project fetched successfully', data: project };
+    const photos = await this.loadProjectPhotos([project.id]);
+    return {
+      message: 'Project fetched successfully',
+      data: { ...project, photos: photos.get(project.id) ?? [] },
+    };
   }
 
   async createProject(profileId: string, dto: CreateProjectDto) {
@@ -288,7 +294,11 @@ export class ProfessionalProjectsService {
   async getForAdmin(projectId: string) {
     const project = await this.repo.findByIdForAdmin(projectId);
     if (!project) throw new NotFoundException('Project not found');
-    return { message: 'Project fetched successfully', data: project };
+    const photos = await this.loadProjectPhotos([project.id]);
+    return {
+      message: 'Project fetched successfully',
+      data: { ...project, photos: photos.get(project.id) ?? [] },
+    };
   }
 
   async approveProject(projectId: string, actorUserId: string) {
@@ -441,6 +451,27 @@ export class ProfessionalProjectsService {
   }
 
   // ── Helpers ────────────────────────────────────────────────────────────────
+
+  /**
+   * Batch-loads all gallery photos for the given project IDs (1 DB query).
+   * Returns a Map keyed by projectId → resolved photo objects with URLs.
+   */
+  private async loadProjectPhotos(projectIds: string[]) {
+    const links = await this.mediaRepository.findLinksByEntityIds(
+      MediaEntityType.PROFESSIONAL_PROJECT,
+      projectIds,
+    );
+    type PhotoLink = (typeof links)[number];
+    const map = new Map<string, Awaited<ReturnType<typeof this.mediaService.withUrls>>[]>();
+    const resolved = await Promise.all(
+      links.map((l: PhotoLink) => this.mediaService.withUrls(l.media)),
+    );
+    links.forEach((l: PhotoLink, i: number) => {
+      if (!map.has(l.entityId)) map.set(l.entityId, []);
+      map.get(l.entityId)!.push(resolved[i]);
+    });
+    return map;
+  }
 
   private ensureApproved(status: ProfessionalOnboardingStatus) {
     if (status !== ProfessionalOnboardingStatus.APPROVED) {
